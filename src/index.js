@@ -65,7 +65,7 @@ app.use('/admin', adminRoutes);
 
 // Serve React frontend at /app
 app.use('/app', express.static(join(__dirname, '..', 'frontend', 'dist')));
-app.get('/app/*', (_req, res) => {
+app.get('/app/*splat', (_req, res) => {
   res.sendFile(join(__dirname, '..', 'frontend', 'dist', 'index.html'));
 });
 
