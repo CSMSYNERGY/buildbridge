@@ -35,7 +35,7 @@ export default function Home() {
   return (
     <div className="space-y-8 max-w-3xl">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Welcome back</h1>
+        <h1 className="text-3xl font-bold tracking-tight">Welcome to BuildBridge</h1>
         <p className="text-muted-foreground mt-1">
           Location ID: <code className="text-xs bg-muted px-1.5 py-0.5 rounded">{user?.locationId}</code>
         </p>
