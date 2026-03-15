@@ -13,6 +13,12 @@ export default {
     },
     extend: {
       colors: {
+        brand: {
+          dark:  '#3d3672',
+          teal:  '#1b7895',
+          mint:  '#75e6da',
+          light: '#dbeaff',
+        },
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',

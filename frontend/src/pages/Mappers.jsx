@@ -43,10 +43,10 @@ export default function Mappers() {
     <div className="space-y-6 max-w-4xl">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Mappers</h1>
+          <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>Mappers</h1>
           <p className="text-muted-foreground mt-1">Map integration fields to GoHighLevel values.</p>
         </div>
-        <Button asChild>
+        <Button asChild className="text-white" style={{ backgroundColor: '#3d3672' }}>
           <Link to="/app/mappers/new">
             <Plus className="h-4 w-4" />
             New Mapper
@@ -58,7 +58,7 @@ export default function Mappers() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
             <p className="text-muted-foreground text-sm">No mappers configured yet.</p>
-            <Button asChild className="mt-4" variant="outline">
+            <Button asChild className="mt-4" variant="outline" style={{ borderColor: '#1b7895', color: '#1b7895' }}>
               <Link to="/app/mappers/new">Create your first mapper</Link>
             </Button>
           </CardContent>
@@ -66,18 +66,20 @@ export default function Mappers() {
       ) : (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{mappers.length} mapper{mappers.length !== 1 ? 's' : ''}</CardTitle>
+            <CardTitle className="text-base" style={{ color: '#3d3672' }}>
+              {mappers.length} mapper{mappers.length !== 1 ? 's' : ''}
+            </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="border-b bg-muted/50">
+                <thead className="border-b" style={{ backgroundColor: '#dbeaff' }}>
                   <tr>
-                    <th className="px-6 py-3 text-left font-medium text-muted-foreground">App</th>
-                    <th className="px-6 py-3 text-left font-medium text-muted-foreground">Type</th>
-                    <th className="px-6 py-3 text-left font-medium text-muted-foreground">External Key</th>
-                    <th className="px-6 py-3 text-left font-medium text-muted-foreground">GHL Value</th>
-                    <th className="px-6 py-3 text-right font-medium text-muted-foreground">Actions</th>
+                    <th className="px-6 py-3 text-left font-medium" style={{ color: '#3d3672' }}>App</th>
+                    <th className="px-6 py-3 text-left font-medium" style={{ color: '#3d3672' }}>Type</th>
+                    <th className="px-6 py-3 text-left font-medium" style={{ color: '#3d3672' }}>External Key</th>
+                    <th className="px-6 py-3 text-left font-medium" style={{ color: '#3d3672' }}>GHL Value</th>
+                    <th className="px-6 py-3 text-right font-medium" style={{ color: '#3d3672' }}>Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">

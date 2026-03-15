@@ -17,7 +17,7 @@ export default function SmartBuild() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [testStatus, setTestStatus] = useState(null); // 'ok' | 'error' | null
+  const [testStatus, setTestStatus] = useState(null);
 
   useEffect(() => {
     fetchWithAuth('/api/smartbuild/config')
@@ -76,13 +76,13 @@ export default function SmartBuild() {
   return (
     <div className="max-w-lg space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">SmartBuild Config</h1>
+        <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>SmartBuild Config</h1>
         <p className="text-muted-foreground mt-1">Connect your SmartBuild account credentials.</p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">API Credentials</CardTitle>
+          <CardTitle className="text-base" style={{ color: '#3d3672' }}>API Credentials</CardTitle>
           <CardDescription>
             These credentials are encrypted at rest. Your API key is never exposed in plaintext.
           </CardDescription>
@@ -91,7 +91,7 @@ export default function SmartBuild() {
           <form onSubmit={handleSave} className="space-y-5">
             {/* API Key */}
             <div className="space-y-1.5">
-              <Label htmlFor="apiKey">API Key</Label>
+              <Label htmlFor="apiKey" style={{ color: '#3d3672' }}>API Key</Label>
               <div className="relative">
                 <Input
                   id="apiKey"
@@ -115,7 +115,7 @@ export default function SmartBuild() {
 
             {/* Base URL */}
             <div className="space-y-1.5">
-              <Label htmlFor="baseUrl">SmartBuild Base URL</Label>
+              <Label htmlFor="baseUrl" style={{ color: '#3d3672' }}>SmartBuild Base URL</Label>
               <div className="flex gap-2">
                 <Input
                   id="baseUrl"
@@ -132,18 +132,32 @@ export default function SmartBuild() {
                   disabled={testing}
                   onClick={handleTestConnection}
                   title="Test connection"
+                  style={{ borderColor: '#1b7895', color: '#1b7895' }}
                 >
                   <RefreshCw className={`h-4 w-4 ${testing ? 'animate-spin' : ''}`} />
                 </Button>
               </div>
               {testStatus && (
-                <Badge variant={testStatus === 'ok' ? 'success' : 'destructive'} className="mt-1">
+                <Badge
+                  className="mt-1"
+                  style={
+                    testStatus === 'ok'
+                      ? { backgroundColor: '#75e6da', color: '#1a1a2e', borderColor: 'transparent' }
+                      : {}
+                  }
+                  variant={testStatus === 'ok' ? undefined : 'destructive'}
+                >
                   {testStatus === 'ok' ? 'Connected' : 'Unreachable'}
                 </Badge>
               )}
             </div>
 
-            <Button type="submit" disabled={saving} className="w-full">
+            <Button
+              type="submit"
+              disabled={saving}
+              className="w-full text-white"
+              style={{ backgroundColor: '#3d3672' }}
+            >
               {saving ? 'Saving…' : 'Save Configuration'}
             </Button>
           </form>

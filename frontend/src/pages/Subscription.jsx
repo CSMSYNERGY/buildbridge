@@ -56,7 +56,7 @@ export default function Subscription() {
   return (
     <div className="space-y-8 max-w-5xl">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Subscription</h1>
+        <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>Subscription</h1>
         <p className="text-muted-foreground mt-1">Choose the plan that fits your workflow.</p>
       </div>
 
@@ -65,17 +65,20 @@ export default function Subscription() {
         <span className={billing === 'monthly' ? 'font-medium' : 'text-muted-foreground'}>Monthly</span>
         <button
           onClick={() => setBilling((b) => (b === 'monthly' ? 'annual' : 'monthly'))}
-          className="relative inline-flex h-6 w-11 rounded-full bg-muted transition-colors focus:outline-none data-[checked]:bg-primary"
-          data-checked={billing === 'annual' ? '' : undefined}
+          className="relative inline-flex h-6 w-11 rounded-full transition-colors focus:outline-none"
+          style={{ backgroundColor: billing === 'annual' ? '#3d3672' : '#e2e8f0' }}
           role="switch"
           aria-checked={billing === 'annual'}
         >
           <span
-            className={`inline-block h-5 w-5 translate-x-0.5 translate-y-0.5 rounded-full bg-white shadow transition-transform ${billing === 'annual' ? 'translate-x-5' : ''}`}
+            className={`inline-block h-5 w-5 translate-y-0.5 rounded-full bg-white shadow transition-transform ${billing === 'annual' ? 'translate-x-5' : 'translate-x-0.5'}`}
           />
         </button>
         <span className={billing === 'annual' ? 'font-medium' : 'text-muted-foreground'}>
-          Annual <Badge variant="success" className="ml-1">Save ~17%</Badge>
+          Annual{' '}
+          <Badge className="ml-1" style={{ backgroundColor: '#75e6da', color: '#1a1a2e', borderColor: 'transparent' }}>
+            Save ~17%
+          </Badge>
         </span>
       </div>
 
@@ -84,9 +87,11 @@ export default function Subscription() {
         {Object.entries(grouped).map(([appSlug, plans]) => {
           const plan = plans.find((p) => p.billingInterval === billing) ?? plans[0];
           return (
-            <Card key={appSlug} className="flex flex-col">
+            <Card key={appSlug} className="flex flex-col" style={{ borderColor: '#1b7895' }}>
               <CardHeader>
-                <CardTitle className="text-lg">{APP_LABELS[appSlug] ?? appSlug}</CardTitle>
+                <CardTitle className="text-lg" style={{ color: '#3d3672' }}>
+                  {APP_LABELS[appSlug] ?? appSlug}
+                </CardTitle>
                 <CardDescription>
                   <span className="text-3xl font-bold text-foreground">
                     {formatPrice(plan.priceUsd)}
@@ -99,16 +104,16 @@ export default function Subscription() {
               <CardContent className="flex-1">
                 <ul className="space-y-2 text-sm text-muted-foreground">
                   <li className="flex items-center gap-2">
-                    <Check className="h-4 w-4 text-green-500 shrink-0" />
+                    <Check className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
                     Full {APP_LABELS[appSlug] ?? appSlug} integration
                   </li>
                   <li className="flex items-center gap-2">
-                    <Check className="h-4 w-4 text-green-500 shrink-0" />
+                    <Check className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
                     GHL workflow actions
                   </li>
                   {appSlug === 'suite' && (
                     <li className="flex items-center gap-2">
-                      <Check className="h-4 w-4 text-green-500 shrink-0" />
+                      <Check className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
                       All apps included
                     </li>
                   )}
@@ -116,7 +121,8 @@ export default function Subscription() {
               </CardContent>
               <CardFooter>
                 <Button
-                  className="w-full"
+                  className="w-full text-white"
+                  style={{ backgroundColor: '#3d3672' }}
                   disabled={subscribing === plan.id}
                   onClick={() => handleSubscribe(plan.id)}
                 >

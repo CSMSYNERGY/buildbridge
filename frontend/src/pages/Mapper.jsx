@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../co
 import { ChevronDown, Search } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
-const APP_SLUGS = ['smartbuild', 'idearoom', 'quickbooks', 'monday', 'suite'];
+const APP_SLUGS = ['smartbuild', 'idearoom', 'quickbooks', 'monday'];
 const MAPPER_TYPES = ['opportunity_stage', 'contact_tag', 'pipeline', 'custom_field'];
 
 // ─── Searchable GHL field dropdown ───────────────────────────────────────────
