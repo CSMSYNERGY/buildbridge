@@ -55,9 +55,19 @@ export default function Subscription() {
 
   return (
     <div className="space-y-8 max-w-5xl">
-      <div>
+      <div style={{ position: 'relative', overflow: 'hidden' }}>
         <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>Subscription</h1>
         <p className="text-muted-foreground mt-1">Choose the plan that fits your workflow.</p>
+        <img
+          src="/app/logo.png"
+          alt=""
+          aria-hidden="true"
+          style={{
+            position: 'absolute', right: '24px', top: '50%', transform: 'translateY(-50%)',
+            height: '100px', width: 'auto', opacity: 0.25,
+            pointerEvents: 'none', userSelect: 'none',
+          }}
+        />
       </div>
 
       {/* Monthly / Annual toggle */}

@@ -35,7 +35,7 @@ export default function Home() {
   return (
     <div className="space-y-6 max-w-3xl">
       {/* Welcome banner */}
-      <div className="rounded-lg px-6 py-5 text-white" style={{ backgroundColor: '#3d3672' }}>
+      <div className="rounded-lg px-6 py-5 text-white" style={{ backgroundColor: '#3d3672', position: 'relative', overflow: 'hidden' }}>
         <h1 className="text-2xl font-bold tracking-tight">Welcome to BuildBridge</h1>
         <p className="mt-1 text-sm" style={{ color: 'rgba(255,255,255,0.75)' }}>
           Location ID:{' '}
@@ -46,6 +46,16 @@ export default function Home() {
             {user?.locationId}
           </code>
         </p>
+        <img
+          src="/app/logo.png"
+          alt=""
+          aria-hidden="true"
+          style={{
+            position: 'absolute', right: '16px', top: '50%', transform: 'translateY(-50%)',
+            height: '120px', width: 'auto', opacity: 0.25,
+            pointerEvents: 'none', userSelect: 'none',
+          }}
+        />
       </div>
 
       {/* Subscription status */}
