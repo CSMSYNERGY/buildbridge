@@ -1,83 +1,78 @@
-import crypto from 'crypto';
-import { db } from '../core/db/client.js';
-import { subscriptions } from '../core/db/schema.js';
-import { eq } from 'drizzle-orm';
 import {
   logWebhookEvent,
   markEventProcessed,
   markEventFailed,
 } from '../core/webhooks/eventLog.js';
-import { env } from '../core/env.js';
+import {
+  createSubscription,
+  updateSubscription,
+  cancelSubscription,
+  pauseSubscription,
+} from '../services/subscriptionService.js';
 import { createError } from '../core/middleware/errorHandler.js';
 
 /**
- * Verify Deposyt HMAC-SHA256 webhook signature.
- * Expects header: x-deposyt-signature: sha256=<hex>
- */
-function verifyDeposytSignature(req) {
-  const sigHeader = req.headers['x-deposyt-signature'];
-  if (!sigHeader) throw createError(401, 'Missing Deposyt signature');
-
-  const [, receivedHex] = sigHeader.split('=');
-  const rawBody = req.rawBody; // set by express.json verify option
-
-  const expected = crypto
-    .createHmac('sha256', env.DEPOSYT_WEBHOOK_SIGNING_KEY)
-    .update(rawBody)
-    .digest('hex');
-
-  const valid = crypto.timingSafeEqual(
-    Buffer.from(expected, 'hex'),
-    Buffer.from(receivedHex ?? '', 'hex'),
-  );
-
-  if (!valid) throw createError(401, 'Invalid Deposyt signature');
-}
-
-/**
  * POST /webhooks/subscription
- * Handles Deposyt subscription lifecycle events.
+ * Entry point after deposytSignatureVerify → idempotencyCheck middleware.
  */
-export async function handleDeposytWebhook(req, res, next) {
+export async function handleSubscriptionWebhook(req, res, next) {
+  const payload = req.body;
+  const eventId = payload?.id ?? payload?.event_id;
+  const eventType = payload?.type ?? payload?.event_type;
+
+  if (!eventId || !eventType) {
+    return next(createError(400, 'Missing event id or type in Deposyt payload'));
+  }
+
+  const locationId = extractLocationId(payload);
+
   try {
-    verifyDeposytSignature(req);
-
-    const payload = req.body;
-    const eventId = payload?.id ?? payload?.event_id;
-    const eventType = payload?.type ?? payload?.event_type;
-
-    if (!eventId || !eventType) {
-      throw createError(400, 'Missing event id or type in Deposyt payload');
-    }
-
     await logWebhookEvent({
       id: eventId,
       source: 'deposyt',
       eventType,
-      locationId: payload?.metadata?.locationId ?? null,
+      locationId,
       payload,
     });
-
-    try {
-      await processDeposytEvent(eventType, payload);
-      await markEventProcessed(eventId);
-    } catch (processingErr) {
-      await markEventFailed(eventId, processingErr);
-      throw processingErr;
-    }
-
-    res.json({ received: true });
-  } catch (err) {
-    next(err);
+  } catch (logErr) {
+    // If logging fails due to a duplicate key the idempotency check should have caught it;
+    // log a warning but continue so we return 200 and don't prompt Deposyt to retry.
+    console.warn('[webhook] logWebhookEvent error:', logErr.message);
   }
+
+  try {
+    await processSubscriptionEvent(eventType, payload);
+    await markEventProcessed(eventId);
+  } catch (err) {
+    await markEventFailed(eventId, err).catch(() => {});
+    return next(err);
+  }
+
+  res.json({ received: true });
 }
 
-async function processDeposytEvent(eventType, payload) {
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+function extractLocationId(payload) {
+  return (
+    payload?.data?.subscription?.metadata?.locationId ??
+    payload?.subscription?.metadata?.locationId ??
+    payload?.metadata?.locationId ??
+    null
+  );
+}
+
+function extractSub(payload) {
   const sub = payload?.data?.subscription ?? payload?.subscription;
-  if (!sub) throw new Error('No subscription object in payload');
+  if (!sub) throw new Error('No subscription object in Deposyt payload');
+  return sub;
+}
+
+async function processSubscriptionEvent(eventType, payload) {
+  const sub = extractSub(payload);
 
   const {
-    id: subscriptionId,
+    id: deposytSubId,
     plan_id: planId,
     status,
     current_period_start,
@@ -90,44 +85,44 @@ async function processDeposytEvent(eventType, payload) {
 
   switch (eventType) {
     case 'recurring.subscription.add':
-      await db
-        .insert(subscriptions)
-        .values({
-          id: subscriptionId,
-          locationId,
-          planId,
-          status: status ?? 'active',
-          currentPeriodStart: current_period_start ? new Date(current_period_start * 1000) : null,
-          currentPeriodEnd: current_period_end ? new Date(current_period_end * 1000) : null,
-        })
-        .onConflictDoNothing();
+      await createSubscription(
+        locationId,
+        deposytSubId,
+        planId,
+        current_period_end ? new Date(current_period_end * 1000) : null,
+      );
       break;
 
     case 'recurring.subscription.update':
-      await db
-        .update(subscriptions)
-        .set({
-          status: status ?? 'active',
-          planId,
-          currentPeriodStart: current_period_start ? new Date(current_period_start * 1000) : null,
-          currentPeriodEnd: current_period_end ? new Date(current_period_end * 1000) : null,
-          updatedAt: new Date(),
-        })
-        .where(eq(subscriptions.id, subscriptionId));
+      await updateSubscription(deposytSubId, {
+        status: status ?? 'active',
+        planId,
+        currentPeriodStart: current_period_start ? new Date(current_period_start * 1000) : undefined,
+        currentPeriodEnd: current_period_end ? new Date(current_period_end * 1000) : undefined,
+      });
       break;
 
     case 'recurring.subscription.delete':
-      await db
-        .update(subscriptions)
-        .set({
-          status: 'canceled',
-          canceledAt: canceled_at ? new Date(canceled_at * 1000) : new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(subscriptions.id, subscriptionId));
+      await cancelSubscription(deposytSubId);
+      break;
+
+    case 'recurring.subscription.pause':
+      await pauseSubscription(deposytSubId);
       break;
 
     default:
       console.warn(`[deposyt] Unhandled event type: ${eventType}`);
   }
+}
+
+/**
+ * Re-process a stored webhook event payload.
+ * Used by the admin replay endpoint.
+ */
+export async function reprocessEventPayload(eventId, payload) {
+  const eventType = payload?.type ?? payload?.event_type;
+  if (!eventType) throw new Error('Cannot determine event type from stored payload');
+
+  await processSubscriptionEvent(eventType, payload);
+  await markEventProcessed(eventId);
 }

@@ -5,6 +5,8 @@ import { authLimiter, actionLimiter } from '../core/middleware/rateLimiter.js';
 import {
   getMe,
   getPlans,
+  createSubscriptionHandler,
+  cancelSubscriptionHandler,
   getMappers,
   createMapper,
   updateMapper,
@@ -26,6 +28,8 @@ router.use(requireAuth);
 
 router.get('/me', getMe);
 router.get('/subscription/plans', getPlans);
+router.post('/subscription/create', actionLimiter, createSubscriptionHandler);
+router.delete('/subscription/cancel', actionLimiter, cancelSubscriptionHandler);
 
 // Mappers CRUD
 router.get('/mappers', getMappers);

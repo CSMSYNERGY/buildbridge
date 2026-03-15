@@ -3,12 +3,13 @@ import {
   plans,
   mappers,
   integrationCredentials,
-  subscriptions,
 } from '../core/db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { randomUUID } from 'crypto';
+import * as deposytService from '../services/deposytService.js';
+import * as subscriptionService from '../services/subscriptionService.js';
 
 // ─── Me ──────────────────────────────────────────────────────────────────────
 
@@ -24,7 +25,66 @@ export async function getPlans(_req, res, next) {
       .select()
       .from(plans)
       .where(eq(plans.isActive, true));
-    res.json({ plans: rows });
+
+    // Group by appSlug for convenient frontend consumption
+    const grouped = rows.reduce((acc, plan) => {
+      if (!acc[plan.appSlug]) acc[plan.appSlug] = [];
+      acc[plan.appSlug].push(plan);
+      return acc;
+    }, {});
+
+    res.json({ plans: rows, grouped });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Subscription create / cancel ─────────────────────────────────────────────
+
+export async function createSubscriptionHandler(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const { planId, name, email } = req.body;
+
+    if (!planId) throw createError(400, 'planId is required');
+
+    // Create the subscription in Deposyt first
+    const deposytSub = await deposytService.createSubscription(planId, {
+      name,
+      email,
+      locationId,
+    });
+
+    // Persist locally
+    const sub = await subscriptionService.createSubscription(
+      locationId,
+      deposytSub.id,
+      planId,
+      deposytSub.current_period_end
+        ? new Date(deposytSub.current_period_end * 1000)
+        : null,
+    );
+
+    res.status(201).json({ subscription: sub });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function cancelSubscriptionHandler(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const { deposytSubId } = req.body;
+
+    if (!deposytSubId) throw createError(400, 'deposytSubId is required');
+
+    // Cancel in Deposyt
+    await deposytService.cancelSubscription(deposytSubId);
+
+    // Update local record
+    const sub = await subscriptionService.cancelSubscription(deposytSubId);
+
+    res.json({ success: true, subscription: sub });
   } catch (err) {
     next(err);
   }

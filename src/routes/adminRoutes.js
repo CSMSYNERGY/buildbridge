@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
-import { getLocations, getWebhookEvents } from '../controllers/adminController.js';
+import { getLocations, getWebhookEvents, replayWebhookEvent } from '../controllers/adminController.js';
 
 const router = Router();
 
@@ -23,5 +23,8 @@ router.get('/locations', getLocations);
 
 // GET /admin/webhook-events — recent 50 events
 router.get('/webhook-events', getWebhookEvents);
+
+// POST /admin/webhook-events/:eventId/replay — re-process a stored event
+router.post('/webhook-events/:eventId/replay', replayWebhookEvent);
 
 export default router;

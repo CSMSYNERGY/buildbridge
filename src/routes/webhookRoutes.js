@@ -1,17 +1,17 @@
 import { Router } from 'express';
+import { deposytSignatureVerify } from '../middleware/deposytWebhook.js';
 import { isDuplicateEvent } from '../core/webhooks/eventLog.js';
-import { handleDeposytWebhook } from '../controllers/webhookController.js';
-import { createError } from '../core/middleware/errorHandler.js';
+import { handleSubscriptionWebhook } from '../controllers/webhookController.js';
 
 const router = Router();
 
 /**
- * Idempotency middleware — rejects already-processed events.
+ * Idempotency middleware — short-circuits already-processed events.
  */
 async function idempotencyCheck(req, res, next) {
   try {
     const eventId = req.body?.id ?? req.body?.event_id;
-    if (!eventId) return next(); // let controller validate
+    if (!eventId) return next();
 
     const duplicate = await isDuplicateEvent(eventId);
     if (duplicate) {
@@ -24,6 +24,11 @@ async function idempotencyCheck(req, res, next) {
 }
 
 // POST /webhooks/subscription
-router.post('/subscription', idempotencyCheck, handleDeposytWebhook);
+router.post(
+  '/subscription',
+  deposytSignatureVerify,
+  idempotencyCheck,
+  handleSubscriptionWebhook,
+);
 
 export default router;
