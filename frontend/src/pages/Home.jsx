@@ -35,35 +35,17 @@ export default function Home() {
   return (
     <div className="space-y-6 max-w-3xl">
       {/* Welcome banner */}
-      <div
-        className="rounded-lg text-white"
-        style={{ backgroundColor: '#3d3672', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px' }}
-      >
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Welcome to BuildBridge</h1>
-          <p className="mt-1 text-sm" style={{ color: 'rgba(255,255,255,0.75)' }}>
-            Location ID:{' '}
-            <code
-              className="font-mono text-xs px-1.5 py-0.5 rounded"
-              style={{ backgroundColor: 'rgba(255,255,255,0.15)' }}
-            >
-              {user?.locationId}
-            </code>
-          </p>
-        </div>
-        <img
-          src="/app/logo.png"
-          alt="BuildBridge"
-          className="hidden sm:block"
-          style={{
-            height: '110px',
-            width: 'auto',
-            objectFit: 'contain',
-            borderRadius: '12px',
-            padding: '8px',
-            background: 'rgba(255,255,255,0.1)',
-          }}
-        />
+      <div className="rounded-lg px-6 py-5 text-white" style={{ backgroundColor: '#3d3672' }}>
+        <h1 className="text-2xl font-bold tracking-tight">Welcome to BuildBridge</h1>
+        <p className="mt-1 text-sm" style={{ color: 'rgba(255,255,255,0.75)' }}>
+          Location ID:{' '}
+          <code
+            className="font-mono text-xs px-1.5 py-0.5 rounded"
+            style={{ backgroundColor: 'rgba(255,255,255,0.15)' }}
+          >
+            {user?.locationId}
+          </code>
+        </p>
       </div>
 
       {/* Subscription status */}
