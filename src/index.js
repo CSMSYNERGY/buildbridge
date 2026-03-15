@@ -10,6 +10,13 @@ import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
 
+// Routes
+import authRoutes from './routes/authRoutes.js';
+import actionsRoutes from './routes/actionsRoutes.js';
+import webApiRoutes from './routes/webApiRoutes.js';
+import webhookRoutes from './routes/webhookRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 
@@ -31,8 +38,10 @@ app.use(cors({
   credentials: true,
 }));
 
-// Body parsing
-app.use(express.json());
+// Body parsing — capture rawBody for webhook signature verification
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -47,15 +56,18 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', ts: new Date().toISOString() });
 });
 
+// API Routes
+app.use('/auth', authRoutes);
+app.use('/actions', actionsRoutes);
+app.use('/api', webApiRoutes);
+app.use('/webhooks', webhookRoutes);
+app.use('/admin', adminRoutes);
+
 // Serve React frontend at /app
 app.use('/app', express.static(join(__dirname, '..', 'frontend', 'dist')));
 app.get('/app/*', (_req, res) => {
   res.sendFile(join(__dirname, '..', 'frontend', 'dist', 'index.html'));
 });
-
-// TODO: mount API routers here
-// app.use('/api/auth', authRouter);
-// app.use('/api/ghl', ghlRouter);
 
 // Global error handler (must be last)
 app.use(errorHandler);
