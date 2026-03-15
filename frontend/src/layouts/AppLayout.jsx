@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
-import { Hammer, LogOut, CreditCard, Sliders, Home } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 import { Button } from '../components/ui/button.jsx';
 
@@ -25,18 +25,23 @@ export default function AppLayout() {
   return (
     <div className="flex min-h-screen flex-col bg-background">
       {/* ── Top navigation bar ─────────────────────────────────────── */}
-      <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-4 px-4"
-        style={{ backgroundColor: '#3d3672' }}>
-
-        {/* Brand */}
+      <header
+        className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-4 px-4"
+        style={{ backgroundColor: '#3d3672' }}
+      >
+        {/* Logo */}
         <div className="flex items-center gap-2 shrink-0">
-          <Hammer className="h-5 w-5 text-white" />
-          <div className="leading-none">
-            <span className="font-bold text-sm tracking-tight text-white">BuildBridge</span>
-            <span className="hidden sm:block text-[10px] leading-none" style={{ color: '#75e6da' }}>
-              by CSM Synergy
-            </span>
-          </div>
+          <img
+            src="/app/logo.png"
+            alt="BuildBridge"
+            style={{ height: '44px', width: 'auto' }}
+          />
+          <span
+            className="hidden sm:block text-[10px] leading-none"
+            style={{ color: '#75e6da' }}
+          >
+            by CSM Synergy
+          </span>
         </div>
 
         {/* Divider */}
@@ -66,7 +71,10 @@ export default function AppLayout() {
         {/* User + logout */}
         <div className="flex items-center gap-2 shrink-0 ml-auto">
           {user && (
-            <span className="hidden md:block text-xs truncate max-w-[160px]" style={{ color: 'rgba(255,255,255,0.7)' }}>
+            <span
+              className="hidden md:block text-xs truncate max-w-[160px]"
+              style={{ color: 'rgba(255,255,255,0.7)' }}
+            >
               {user.email ?? user.locationId}
             </span>
           )}
