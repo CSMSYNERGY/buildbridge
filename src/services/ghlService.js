@@ -13,7 +13,12 @@ const API_VERSION = env.GHL_DEFAULT_API_VERSION;
  * Returns the raw token response from GHL.
  */
 export async function exchangeCodeForTokens(code) {
-  const res = await fetch(`${GHL_BASE}/oauth/token`, {
+  const tokenUrl = `${GHL_BASE}/oauth/token`;
+  console.log('[ghlService] exchangeCodeForTokens — POST', tokenUrl);
+  console.log('[ghlService] client_id:', env.GHL_CLIENT_ID);
+  console.log('[ghlService] redirect_uri:', env.REDIRECT_URI);
+
+  const res = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -27,7 +32,9 @@ export async function exchangeCodeForTokens(code) {
 
   if (!res.ok) {
     const body = await res.text();
-    throw createError(502, `GHL token exchange failed: ${body}`);
+    console.error('[ghlService] GHL token exchange failed — HTTP', res.status);
+    console.error('[ghlService] GHL error response body:', body);
+    throw createError(502, `GHL token exchange failed (HTTP ${res.status}): ${body}`);
   }
 
   return res.json();

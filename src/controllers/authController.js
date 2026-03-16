@@ -1,6 +1,5 @@
 import { db } from '../core/db/client.js';
 import { locations } from '../core/db/schema.js';
-import { eq } from 'drizzle-orm';
 import { encrypt } from '../core/middleware/encrypt.js';
 import { setAuthCookie } from '../core/auth/jwt.js';
 import { exchangeCodeForTokens } from '../services/ghlService.js';
@@ -27,12 +26,17 @@ export function redirectToGHL(req, res) {
  * Exchange authorization code for tokens, upsert location, issue session cookie.
  */
 export async function handleCallback(req, res, next) {
+  let step = 'init';
   try {
     const { code, error } = req.query;
 
     if (error) throw createError(400, `GHL OAuth error: ${error}`);
     if (!code) throw createError(400, 'Missing authorization code');
 
+    console.log('[auth/callback] Received auth code:', String(code).slice(0, 8));
+
+    step = 'token_exchange';
+    console.log('[auth/callback] Exchanging code for tokens...');
     const tokenData = await exchangeCodeForTokens(code);
 
     const {
@@ -43,10 +47,14 @@ export async function handleCallback(req, res, next) {
       companyId,
     } = tokenData;
 
+    console.log('[auth/callback] Tokens received. locationId:', locationId, '| companyId:', companyId ?? 'none');
+
     if (!locationId) throw createError(502, 'GHL did not return a locationId');
 
     const expiresAt = new Date(Date.now() + expires_in * 1000);
 
+    step = 'db_save';
+    console.log('[auth/callback] Tokens received, saving to database...');
     await db
       .insert(locations)
       .values({
@@ -69,8 +77,12 @@ export async function handleCallback(req, res, next) {
 
     setAuthCookie(res, { locationId, companyId });
 
+    step = 'redirect';
+    console.log('[auth/callback] Location saved, redirecting...');
     res.redirect('/app');
   } catch (err) {
+    console.error(`[auth/callback] ERROR at step "${step}":`, err.message);
+    console.error('[auth/callback] Stack:', err.stack);
     next(err);
   }
 }
