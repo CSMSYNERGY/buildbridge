@@ -45,6 +45,7 @@ export async function handleCallback(req, res, next) {
       expires_in,
       locationId,
       companyId,
+      userId,
     } = tokenData;
 
     console.log('[auth/callback] Tokens received. locationId:', locationId, '| companyId:', companyId ?? 'none');
@@ -52,6 +53,28 @@ export async function handleCallback(req, res, next) {
     if (!locationId) throw createError(502, 'GHL did not return a locationId');
 
     const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+    // Fetch the user's name from GHL
+    step = 'fetch_user';
+    let userName = null;
+    let userEmail = null;
+    if (userId) {
+      try {
+        const userRes = await fetch(`${env.GHL_BASE_URL}/users/${userId}`, {
+          headers: {
+            Authorization: `Bearer ${access_token}`,
+            Version: env.GHL_DEFAULT_API_VERSION,
+          },
+        });
+        if (userRes.ok) {
+          const userData = await userRes.json();
+          userName = userData.name ?? `${userData.firstName ?? ''} ${userData.lastName ?? ''}`.trim() || null;
+          userEmail = userData.email ?? null;
+        }
+      } catch {
+        // Non-fatal — fall back to showing locationId
+      }
+    }
 
     step = 'db_save';
     console.log('[auth/callback] Tokens received, saving to database...');
@@ -75,7 +98,7 @@ export async function handleCallback(req, res, next) {
         },
       });
 
-    setAuthCookie(res, { locationId, companyId });
+    setAuthCookie(res, { locationId, companyId, userId, name: userName, email: userEmail });
 
     step = 'redirect';
     console.log('[auth/callback] Location saved, redirecting to GHL sub-account...');

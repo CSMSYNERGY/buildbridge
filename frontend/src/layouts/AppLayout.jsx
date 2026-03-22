@@ -74,7 +74,7 @@ export default function AppLayout() {
               className="hidden md:block text-xs truncate max-w-[160px]"
               style={{ color: 'rgba(255,255,255,0.7)' }}
             >
-              {user.email ?? user.locationId}
+              {user.name ?? user.email ?? user.locationId}
             </span>
           )}
           <Button
