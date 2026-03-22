@@ -20,7 +20,17 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     fetchWithAuth('/api/me')
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) {
+          // Not authenticated — if we're inside a GHL iframe, navigate the
+          // top-level window to OAuth so the user doesn't need a new tab.
+          if (window !== window.top) {
+            window.top.location.href = '/auth';
+          }
+          return null;
+        }
+        return res.json();
+      })
       .then((data) => setUser(data?.user ?? null))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
