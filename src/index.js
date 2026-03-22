@@ -32,9 +32,11 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
+      // Allow GHL to embed in an iframe (removes the default 'self' restriction)
+      frameAncestors: false,
     },
   },
-  // Allow GHL to embed the app in an iframe
+  // Also disable X-Frame-Options header for iframe embedding
   frameguard: false,
 }));
 
