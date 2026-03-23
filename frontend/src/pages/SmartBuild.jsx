@@ -74,7 +74,19 @@ export default function SmartBuild() {
   if (loading) return <p className="text-muted-foreground text-sm">Loading configuration…</p>;
 
   return (
-    <div className="max-w-lg space-y-6">
+    <div style={{ position: 'relative' }}>
+      <img
+        src="/buildbridge/logo.png"
+        alt=""
+        aria-hidden="true"
+        style={{
+          position: 'fixed', top: '50%', left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: '70%', height: 'auto', opacity: 0.06,
+          pointerEvents: 'none', userSelect: 'none', zIndex: 0,
+        }}
+      />
+    <div className="max-w-lg space-y-6" style={{ position: 'relative', zIndex: 1 }}>
       <div>
         <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>SmartBuild Config</h1>
         <p className="text-muted-foreground mt-1">Connect your SmartBuild account credentials.</p>
@@ -163,6 +175,7 @@ export default function SmartBuild() {
           </form>
         </CardContent>
       </Card>
+    </div>
     </div>
   );
 }

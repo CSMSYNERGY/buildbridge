@@ -40,7 +40,19 @@ export default function Mappers() {
   if (loading) return <p className="text-muted-foreground text-sm">Loading mappers…</p>;
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div style={{ position: 'relative' }}>
+      <img
+        src="/buildbridge/logo.png"
+        alt=""
+        aria-hidden="true"
+        style={{
+          position: 'fixed', top: '50%', left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: '70%', height: 'auto', opacity: 0.06,
+          pointerEvents: 'none', userSelect: 'none', zIndex: 0,
+        }}
+      />
+    <div className="space-y-6 max-w-4xl" style={{ position: 'relative', zIndex: 1 }}>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>Mappers</h1>
@@ -117,6 +129,7 @@ export default function Mappers() {
           </CardContent>
         </Card>
       )}
+    </div>
     </div>
   );
 }
