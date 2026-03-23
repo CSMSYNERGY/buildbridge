@@ -12,8 +12,8 @@ export default function SmartBuild() {
   const { fetchWithAuth } = useAuth();
   const { toast } = useToast();
 
-  const [form, setForm] = useState({ apiKey: '', baseUrl: '' });
-  const [showKey, setShowKey] = useState(false);
+  const [form, setForm] = useState({ username: '', password: '', baseUrl: '' });
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -23,7 +23,7 @@ export default function SmartBuild() {
     fetchWithAuth('/api/smartbuild/config')
       .then((r) => r.json())
       .then((d) => {
-        if (d.config) setForm({ apiKey: d.config.apiKey ?? '', baseUrl: d.config.baseUrl ?? '' });
+        if (d.config) setForm({ username: d.config.username ?? '', password: d.config.password ?? '', baseUrl: d.config.baseUrl ?? '' });
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -50,18 +50,23 @@ export default function SmartBuild() {
   }
 
   async function handleTestConnection() {
-    if (!form.baseUrl) {
-      toast({ title: 'Enter a Base URL first', variant: 'destructive' });
+    if (!form.baseUrl || !form.username || !form.password) {
+      toast({ title: 'Enter all credentials first', variant: 'destructive' });
       return;
     }
     setTesting(true);
     setTestStatus(null);
     try {
-      const res = await fetch(`${form.baseUrl}/health`, { method: 'GET' });
-      setTestStatus(res.ok ? 'ok' : 'error');
+      const res = await fetchWithAuth('/api/smartbuild/test', {
+        method: 'POST',
+        body: JSON.stringify({ baseUrl: form.baseUrl, username: form.username, password: form.password }),
+      });
+      const data = await res.json();
+      setTestStatus(data.success ? 'ok' : 'error');
       toast({
-        title: res.ok ? 'Connection successful' : 'Connection failed',
-        variant: res.ok ? 'default' : 'destructive',
+        title: data.success ? 'Connection successful' : 'Connection failed',
+        description: data.success ? undefined : (data.error ?? 'Invalid credentials or unreachable server.'),
+        variant: data.success ? 'default' : 'destructive',
       });
     } catch {
       setTestStatus('error');
@@ -94,33 +99,46 @@ export default function SmartBuild() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base" style={{ color: '#3d3672' }}>API Credentials</CardTitle>
+          <CardTitle className="text-base" style={{ color: '#3d3672' }}>Login Credentials</CardTitle>
           <CardDescription>
-            These credentials are encrypted at rest. Your API key is never exposed in plaintext.
+            These credentials are encrypted at rest and never exposed in plaintext.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSave} className="space-y-5">
-            {/* API Key */}
+            {/* Username */}
             <div className="space-y-1.5">
-              <Label htmlFor="apiKey" style={{ color: '#3d3672' }}>API Key</Label>
+              <Label htmlFor="username" style={{ color: '#3d3672' }}>Username</Label>
+              <Input
+                id="username"
+                type="text"
+                placeholder="your@email.com"
+                value={form.username}
+                onChange={set('username')}
+                required
+              />
+            </div>
+
+            {/* Password */}
+            <div className="space-y-1.5">
+              <Label htmlFor="password" style={{ color: '#3d3672' }}>Password</Label>
               <div className="relative">
                 <Input
-                  id="apiKey"
-                  type={showKey ? 'text' : 'password'}
-                  placeholder="sk-••••••••••••••••"
-                  value={form.apiKey}
-                  onChange={set('apiKey')}
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="••••••••••••••••"
+                  value={form.password}
+                  onChange={set('password')}
                   className="pr-10"
                   required
                 />
                 <button
                   type="button"
-                  onClick={() => setShowKey((v) => !v)}
+                  onClick={() => setShowPassword((v) => !v)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                   tabIndex={-1}
                 >
-                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
             </div>

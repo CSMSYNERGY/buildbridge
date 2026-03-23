@@ -14,6 +14,7 @@ import {
   deleteMapper,
   getSmartBuildConfig,
   saveSmartBuildConfig,
+  testSmartBuildConnection,
 } from '../controllers/webApiController.js';
 
 const router = Router();
@@ -45,5 +46,6 @@ router.delete('/mappers/:id', actionLimiter, deleteMapper);
 // SmartBuild integration config
 router.get('/smartbuild/config', getSmartBuildConfig);
 router.post('/smartbuild/config', actionLimiter, saveSmartBuildConfig);
+router.post('/smartbuild/test', actionLimiter, testSmartBuildConnection);
 
 export default router;

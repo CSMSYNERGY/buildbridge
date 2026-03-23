@@ -219,6 +219,26 @@ export async function getSmartBuildConfig(req, res, next) {
   }
 }
 
+export async function testSmartBuildConnection(req, res, next) {
+  try {
+    const { baseUrl, username, password } = req.body;
+    if (!baseUrl || !username || !password) {
+      throw createError(400, 'baseUrl, username, and password are required');
+    }
+
+    const { login } = await import('../services/smartbuildService.js');
+    await login(baseUrl, username, password);
+
+    res.json({ success: true });
+  } catch (err) {
+    // Return a friendly error rather than a 5xx so the frontend can display it
+    if (err.status === 401 || err.status === 400) {
+      return res.status(err.status).json({ success: false, error: err.message });
+    }
+    next(err);
+  }
+}
+
 export async function saveSmartBuildConfig(req, res, next) {
   try {
     const { locationId } = req.user;
