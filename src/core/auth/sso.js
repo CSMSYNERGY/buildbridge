@@ -1,7 +1,6 @@
 import crypto from 'crypto';
 import { env } from '../env.js';
 import { setAuthCookie } from './jwt.js';
-import { createError } from '../middleware/errorHandler.js';
 
 /**
  * Decrypt the GHL SSO key payload and issue an app session cookie.
@@ -11,17 +10,24 @@ export async function ghlSsoController(req, res, next) {
   try {
     const { key } = req.query;
 
+    // No key — GHL is previewing the URL or the user already has a session.
+    // Fall through to the app; the existing cookie (if any) will authenticate them.
     if (!key) {
-      throw createError(400, 'Missing SSO key');
+      return res.redirect('/buildbridge');
     }
 
     const userData = decryptSsoKey(key);
+
+    const name = userData.name
+      ?? `${userData.firstName ?? ''} ${userData.lastName ?? ''}`.trim()
+      || null;
 
     setAuthCookie(res, {
       locationId: userData.locationId,
       companyId: userData.companyId,
       userId: userData.userId,
       email: userData.email,
+      name,
     });
 
     res.redirect('/buildbridge');
