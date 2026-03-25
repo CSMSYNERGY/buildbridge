@@ -6,6 +6,7 @@ import { Button } from '../components/ui/button.jsx';
 import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
+import { Badge } from '../components/ui/badge.jsx';
 import { ChevronDown, Search } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
@@ -137,21 +138,24 @@ export default function Mapper() {
   });
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [allMappers, setAllMappers] = useState([]);
 
   // GHL fields
   const [ghlFields, setGhlFields] = useState([]);
   const [fieldsFallback, setFieldsFallback] = useState(false);
 
-  // Load existing mapper (edit mode) and GHL fields in parallel
+  // Load all mappers, existing mapper (edit mode), and GHL fields in parallel
   useEffect(() => {
     const promises = [];
 
-    if (!isNew) {
-      promises.push(
-        fetchWithAuth(`/api/mappers`)
-          .then((r) => r.json())
-          .then((d) => {
-            const m = d.mappers?.find((x) => x.id === id);
+    promises.push(
+      fetchWithAuth('/api/mappers')
+        .then((r) => r.json())
+        .then((d) => {
+          const mappers = d.mappers ?? [];
+          setAllMappers(mappers);
+          if (!isNew) {
+            const m = mappers.find((x) => x.id === id);
             if (m) {
               setForm((f) => ({
                 ...f,
@@ -161,10 +165,10 @@ export default function Mapper() {
                 ghlValue: m.ghlValue,
               }));
             }
-          })
-          .catch(() => toast({ title: 'Failed to load mapper', variant: 'destructive' })),
-      );
-    }
+          }
+        })
+        .catch(() => toast({ title: 'Failed to load mappers', variant: 'destructive' })),
+    );
 
     promises.push(
       fetchWithAuth('/api/ghl/fields')
@@ -225,15 +229,19 @@ export default function Mapper() {
 
   if (loading) return <p className="text-muted-foreground text-sm">Loading…</p>;
 
+  const otherMappers = allMappers.filter((m) => m.id !== id);
+
   return (
-    <div className="max-w-lg space-y-6">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">{isNew ? 'New Mapper' : 'Edit Mapper'}</h1>
+        <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>{isNew ? 'New Mapper' : 'Edit Mapper'}</h1>
         <p className="text-muted-foreground mt-1">
           {isNew ? 'Create a new field mapping.' : 'Update the GHL field for this mapper.'}
         </p>
       </div>
 
+      <div className="flex gap-6 items-start">
+      <div className="w-full max-w-lg shrink-0">
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Mapper Details</CardTitle>
@@ -314,6 +322,49 @@ export default function Mapper() {
           </form>
         </CardContent>
       </Card>
+      </div>
+
+      {/* Existing mappers panel */}
+      {allMappers.length > 0 && (
+        <div className="flex-1 min-w-0">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base" style={{ color: '#3d3672' }}>
+                Existing Mappers ({allMappers.length})
+              </CardTitle>
+              <CardDescription>Reference of all configured mappings.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b" style={{ backgroundColor: '#dbeaff' }}>
+                    <tr>
+                      <th className="px-4 py-2 text-left font-medium" style={{ color: '#3d3672' }}>App</th>
+                      <th className="px-4 py-2 text-left font-medium" style={{ color: '#3d3672' }}>Type</th>
+                      <th className="px-4 py-2 text-left font-medium" style={{ color: '#3d3672' }}>External Key</th>
+                      <th className="px-4 py-2 text-left font-medium" style={{ color: '#3d3672' }}>GHL Value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {allMappers.map((m) => (
+                      <tr
+                        key={m.id}
+                        className={m.id === id ? 'bg-blue-50' : 'hover:bg-muted/30'}
+                      >
+                        <td className="px-4 py-2"><Badge variant="secondary">{m.appSlug}</Badge></td>
+                        <td className="px-4 py-2 text-muted-foreground text-xs">{m.mapperType}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{m.externalKey}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{m.ghlValue}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      </div>
     </div>
   );
 }
