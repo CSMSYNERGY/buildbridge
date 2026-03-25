@@ -6,7 +6,7 @@ import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { Eye, EyeOff, RefreshCw, ChevronDown, ChevronUp, CheckCircle2, XCircle } from 'lucide-react';
 
 export default function SmartBuild() {
   const { fetchWithAuth } = useAuth();
@@ -18,12 +18,19 @@ export default function SmartBuild() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testStatus, setTestStatus] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [credentialsOpen, setCredentialsOpen] = useState(true);
 
   useEffect(() => {
     fetchWithAuth('/api/smartbuild/config')
       .then((r) => r.json())
       .then((d) => {
-        if (d.config) setForm({ username: d.config.username ?? '', password: d.config.password ?? '', baseUrl: d.config.baseUrl ?? '' });
+        if (d.config) {
+          setForm({ username: d.config.username ?? '', password: d.config.password ?? '', baseUrl: d.config.baseUrl ?? '' });
+          const connected = !!(d.config.username);
+          setIsConnected(connected);
+          setCredentialsOpen(!connected);
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -42,6 +49,8 @@ export default function SmartBuild() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to save');
       toast({ title: 'Configuration saved' });
+      setIsConnected(!!form.username);
+      if (form.username) setCredentialsOpen(false);
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     } finally {
@@ -97,14 +106,54 @@ export default function SmartBuild() {
         <p className="text-muted-foreground mt-1">Connect your SmartBuild account credentials.</p>
       </div>
 
+      {/* Connection Status */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base" style={{ color: '#3d3672' }}>Login Credentials</CardTitle>
-          <CardDescription>
-            These credentials are encrypted at rest and never exposed in plaintext.
-          </CardDescription>
+        <CardContent className="pt-4 pb-4">
+          <div className="flex items-center gap-3">
+            {isConnected
+              ? <CheckCircle2 className="h-5 w-5 shrink-0" style={{ color: '#1b7895' }} />
+              : <XCircle className="h-5 w-5 shrink-0 text-muted-foreground" />
+            }
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium" style={{ color: '#3d3672' }}>
+                {isConnected ? 'Connected' : 'Not connected'}
+              </p>
+              {isConnected && (
+                <p className="text-sm text-muted-foreground truncate">{form.username}</p>
+              )}
+            </div>
+            <Badge
+              style={isConnected
+                ? { backgroundColor: '#75e6da', color: '#1a1a2e', borderColor: 'transparent' }
+                : {}
+              }
+              variant={isConnected ? undefined : 'secondary'}
+            >
+              {isConnected ? 'Active' : 'No credentials'}
+            </Badge>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader
+          className="cursor-pointer select-none"
+          onClick={() => setCredentialsOpen((v) => !v)}
+        >
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base" style={{ color: '#3d3672' }}>Login Credentials</CardTitle>
+              <CardDescription>
+                These credentials are encrypted at rest and never exposed in plaintext.
+              </CardDescription>
+            </div>
+            {credentialsOpen
+              ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
+              : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+            }
+          </div>
         </CardHeader>
-        <CardContent>
+        {credentialsOpen && <CardContent>
           <form onSubmit={handleSave} className="space-y-5">
             {/* Username */}
             <div className="space-y-1.5">
@@ -191,7 +240,7 @@ export default function SmartBuild() {
               {saving ? 'Saving…' : 'Save Configuration'}
             </Button>
           </form>
-        </CardContent>
+        </CardContent>}
       </Card>
     </div>
     </div>
