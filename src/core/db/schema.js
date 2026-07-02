@@ -136,6 +136,15 @@ export const qbSyncLinks = pgTable('qb_sync_links', {
   uniqueIndex('qb_sync_links_location_type_qb_uidx').on(t.locationId, t.entityType, t.qbId),
 ]);
 
+// ─── QuickBooks Sync State ────────────────────────────────────────────────────
+// Per-location cursor for the two-way sync (Rockwood model).
+export const qbSyncState = pgTable('qb_sync_state', {
+  locationId: text('location_id').primaryKey().references(() => locations.id),
+  lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ─── Relations ────────────────────────────────────────────────────────────────
 export const locationsRelations = relations(locations, ({ many }) => ({
   subscriptions: many(subscriptions),

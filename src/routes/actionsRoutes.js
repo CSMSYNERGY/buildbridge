@@ -7,11 +7,23 @@ import {
   createOrEditSmartBuildJob,
   updateOpportunity,
   getMappers,
+  triggerQuickBooksSync,
 } from '../controllers/actionsController.js';
 
 const router = Router();
 
-// All action routes require a valid API key and an active SmartBuild subscription
+// QuickBooks sync trigger — gated by a QuickBooks (not SmartBuild) subscription,
+// so it is mounted before the router-level SmartBuild gate below.
+router.post(
+  '/quickbooks-sync',
+  verifyApiKey,
+  requireAuth,
+  checkSubscription('quickbooks'),
+  actionLimiter,
+  triggerQuickBooksSync,
+);
+
+// All remaining action routes require a valid API key and an active SmartBuild subscription
 router.use(verifyApiKey, requireAuth, checkSubscription('smartbuild'), actionLimiter);
 
 router.post('/retrieve-smartbuild-job', retrieveSmartBuildJob);

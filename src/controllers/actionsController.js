@@ -1,5 +1,6 @@
 import { makeSmartBuildRequest } from '../services/smartbuildService.js';
 import { listMappers, getMappings } from '../services/mapperService.js';
+import { syncLocation } from '../services/qbSyncService.js';
 import { createError } from '../core/middleware/errorHandler.js';
 
 /**
@@ -48,6 +49,20 @@ export async function createOrEditSmartBuildJob(req, res, next) {
 
 export async function updateOpportunity(req, res) {
   res.json({ success: true, message: 'update-opportunity received' });
+}
+
+/**
+ * POST /actions/quickbooks-sync
+ * Manually trigger a two-way QuickBooks sync pass for the caller's location.
+ */
+export async function triggerQuickBooksSync(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const stats = await syncLocation(locationId);
+    res.json({ success: true, stats });
+  } catch (err) {
+    next(err);
+  }
 }
 
 /**
