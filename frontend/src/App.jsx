@@ -7,6 +7,7 @@ import Subscription from './pages/Subscription.jsx';
 import Mappers from './pages/Mappers.jsx';
 import Mapper from './pages/Mapper.jsx';
 import SmartBuild from './pages/SmartBuild.jsx';
+import QuickBooks from './pages/QuickBooks.jsx';
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="mappers/new" element={<Mapper />} />
             <Route path="mappers/:id" element={<Mapper />} />
             <Route path="smartbuild" element={<SmartBuild />} />
+            <Route path="quickbooks" element={<QuickBooks />} />
           </Route>
           {/* Redirect bare root to /buildbridge */}
           <Route path="/" element={<Navigate to="/buildbridge" replace />} />

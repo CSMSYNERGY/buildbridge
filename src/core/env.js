@@ -34,4 +34,11 @@ export const env = cleanEnv(process.env, {
   // Deposyt
   DEPOSYT_PRIVATE_API_KEY: str(),
   DEPOSYT_WEBHOOK_SIGNING_KEY: str(),
+
+  // Intuit / QuickBooks Online (OAuth2) — optional; leave blank to disable the
+  // QuickBooks integration. When blank, the Connect flow returns a 503.
+  INTUIT_CLIENT_ID: str({ default: '' }),
+  INTUIT_CLIENT_SECRET: str({ default: '' }),
+  QBO_REDIRECT_URI: str({ default: '' }),
+  QBO_ENVIRONMENT: str({ choices: ['sandbox', 'production'], default: 'sandbox' }),
 });

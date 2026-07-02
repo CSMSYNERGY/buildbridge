@@ -12,6 +12,7 @@ import { env } from './core/env.js';
 
 // Routes
 import authRoutes from './routes/authRoutes.js';
+import quickbooksRoutes from './routes/quickbooksRoutes.js';
 import actionsRoutes from './routes/actionsRoutes.js';
 import webApiRoutes from './routes/webApiRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
@@ -66,6 +67,7 @@ app.get('/health', (_req, res) => {
 
 // API Routes
 app.use('/auth', authRoutes);
+app.use('/auth/quickbooks', quickbooksRoutes);
 app.use('/actions', actionsRoutes);
 app.use('/api', webApiRoutes);
 app.use('/webhooks', webhookRoutes);
