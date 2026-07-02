@@ -1,8 +1,10 @@
 # QuickBooks Integration — Design Doc
 
-> Status: **Proposal / design only.** This document contains no product code. It captures the
-> requirements gathered from three recent client meetings and a concrete implementation design for
-> adding QuickBooks Online (QBO) support to BuildBridge.
+> Status: **Implemented (pending sandbox validation).** Originally written as the design proposal;
+> the phases below now exist in code. This branch carries the shared foundation (OAuth, QBO entity
+> helpers, mapper runtime, GHL webhook infra, scheduler); the client models live on their own
+> branches per the separate-branches decision: `client/yoder-barnes` (one-way push + milestone
+> auto-invoicing) and `client/rockwood` (two-way contacts + estimates sync).
 
 ## 1. Context & Goals
 
@@ -143,13 +145,17 @@ Add and wire into `src/core/env.js` (envalid schema) and the fail-fast checks in
 - QBO API base URL (sandbox vs production)
 
 ## 8. Phased Roadmap
-1. **Foundation** — Intuit OAuth + `quickbooksService` + QB config UI + env wiring. *(Connect a
-   sandbox QuickBooks company end-to-end.)*
-2. **Yoder Barnes: Won → contact** — inbound GHL webhook + QB contact creation.
-3. **Milestone invoicing** — scheduler + the 4 auto-invoices. **Ship to Yoder Barnes first** (future
-   standard).
-4. **Rockwood: two-way sync** — contacts + estimates reconciler.
-5. **Mapper consumption** — implement the `getMappers` runtime + QB mapper types.
+1. ✅ **Foundation** — Intuit OAuth + `quickbooksService` + QB config UI + env wiring (this branch).
+2. ✅ **Yoder Barnes: Won → contact** — inbound GHL webhook + QB contact creation
+   (`client/yoder-barnes`).
+3. ✅ **Milestone invoicing** — scheduler + the 4 auto-invoices (`client/yoder-barnes`).
+4. ✅ **Rockwood: two-way sync** — contacts + estimates reconciler (`client/rockwood`).
+5. ✅ **Mapper consumption** — `getMappers` runtime implemented (this branch); QB mapper types in
+   use: `milestone_amount`, `milestone_date` (Yoder), `opportunity_stage`, `pipeline` (Rockwood).
+
+Remaining before go-live: validate against an Intuit **sandbox** company and a real GHL sub-account
+(webhook payload shapes, GHL endpoint filters), configure the Intuit app (client id/secret,
+redirect URI), and set the per-location mappers.
 
 ## 9. Open Questions
 - **Sandbox vs production realm:** which QBO environment do we target first, and how do we manage the
