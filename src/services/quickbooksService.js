@@ -244,3 +244,123 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
 
   return res.json();
 }
+
+// ─── Entity helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Run a QBO SQL-ish query, e.g. "SELECT * FROM Customer WHERE ...".
+ * Returns the QueryResponse object.
+ */
+export async function queryQuickBooks(locationId, query) {
+  const data = await makeQuickBooksRequest(
+    locationId,
+    'GET',
+    `/query?query=${encodeURIComponent(query)}&minorversion=75`,
+  );
+  return data.QueryResponse ?? {};
+}
+
+/** Escape a single-quoted string literal for a QBO query. */
+function qboEscape(value) {
+  return String(value).replace(/'/g, "\\'");
+}
+
+/**
+ * Find a QBO Customer by email (then by display name), creating one if absent.
+ * Returns the Customer object.
+ */
+export async function findOrCreateCustomer(locationId, { name, email, phone }) {
+  if (!name && !email) throw createError(400, 'Customer name or email is required');
+
+  if (email) {
+    const byEmail = await queryQuickBooks(
+      locationId,
+      `SELECT * FROM Customer WHERE PrimaryEmailAddr = '${qboEscape(email)}' MAXRESULTS 1`,
+    );
+    if (byEmail.Customer?.length) return byEmail.Customer[0];
+  }
+
+  if (name) {
+    const byName = await queryQuickBooks(
+      locationId,
+      `SELECT * FROM Customer WHERE DisplayName = '${qboEscape(name)}' MAXRESULTS 1`,
+    );
+    if (byName.Customer?.length) return byName.Customer[0];
+  }
+
+  const created = await makeQuickBooksRequest(locationId, 'POST', '/customer?minorversion=75', {
+    DisplayName: name ?? email,
+    ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
+    ...(phone ? { PrimaryPhone: { FreeFormNumber: phone } } : {}),
+  });
+  return created.Customer;
+}
+
+/**
+ * Create a QBO Invoice for a customer with a single line item.
+ * amountCents is an integer; description labels the line.
+ */
+export async function createInvoice(locationId, { qbCustomerId, amountCents, description, dueDate }) {
+  if (!qbCustomerId) throw createError(400, 'qbCustomerId is required');
+  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+    throw createError(400, 'amountCents must be a positive number');
+  }
+
+  const amount = Math.round(amountCents) / 100;
+  const body = {
+    CustomerRef: { value: String(qbCustomerId) },
+    ...(dueDate ? { DueDate: dueDate } : {}),
+    Line: [
+      {
+        DetailType: 'SalesItemLineDetail',
+        Amount: amount,
+        Description: description ?? undefined,
+        // ItemRef "1" is QBO's default Services item; override per-location via
+        // a mapper (appSlug 'quickbooks', type 'qb_item') in the caller.
+        SalesItemLineDetail: { ItemRef: { value: '1' } },
+      },
+    ],
+  };
+
+  const created = await makeQuickBooksRequest(locationId, 'POST', '/invoice?minorversion=75', body);
+  return created.Invoice;
+}
+
+/**
+ * Create or update a QBO Estimate with a single line item.
+ * Pass qbEstimateId + syncToken to update (QBO requires sparse update with SyncToken).
+ */
+export async function upsertEstimate(locationId, {
+  qbEstimateId, syncToken, qbCustomerId, amountCents, description,
+}) {
+  const amount = Math.round(amountCents) / 100;
+  const body = {
+    ...(qbEstimateId ? { Id: String(qbEstimateId), SyncToken: String(syncToken), sparse: true } : {}),
+    CustomerRef: { value: String(qbCustomerId) },
+    Line: [
+      {
+        DetailType: 'SalesItemLineDetail',
+        Amount: amount,
+        Description: description ?? undefined,
+        SalesItemLineDetail: { ItemRef: { value: '1' } },
+      },
+    ],
+  };
+
+  const result = await makeQuickBooksRequest(locationId, 'POST', '/estimate?minorversion=75', body);
+  return result.Estimate;
+}
+
+/**
+ * Change Data Capture — entities changed in QBO since `changedSince` (Date).
+ * entityList e.g. ['Customer', 'Estimate']. Returns the raw CDC response.
+ */
+export async function getChangedEntities(locationId, entityList, changedSince) {
+  const entities = entityList.join(',');
+  const since = (changedSince instanceof Date ? changedSince : new Date(changedSince)).toISOString();
+  return makeQuickBooksRequest(
+    locationId,
+    'GET',
+    `/cdc?entities=${encodeURIComponent(entities)}&changedSince=${encodeURIComponent(since)}&minorversion=75`,
+  );
+}

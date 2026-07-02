@@ -7,7 +7,8 @@ const client = postgres(env.DATABASE_URL, {
   max: env.NODE_ENV === 'test' ? 1 : 10,
   idle_timeout: 20,
   connect_timeout: 10,
-  ssl: { rejectUnauthorized: false },
+  // Railway↔Supabase requires SSL; honor sslmode=disable for local development
+  ssl: env.DATABASE_URL.includes('sslmode=disable') ? false : { rejectUnauthorized: false },
   connection: {
     options: '--client_encoding=UTF8',
   },

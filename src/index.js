@@ -9,6 +9,7 @@ import { requestLogger } from './core/middleware/logger.js';
 import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
+import { startScheduler } from './core/scheduler.js';
 
 // Routes
 import authRoutes from './routes/authRoutes.js';
@@ -86,5 +87,8 @@ console.log('[index] Starting listener on port', env.PORT);
 app.listen(env.PORT, () => {
   console.log(`[index] BuildBridge v2 listening on port ${env.PORT} [${env.NODE_ENV}]`);
 });
+
+// Background jobs (registered by integration modules at import time)
+if (env.ENABLE_SCHEDULER) startScheduler();
 
 export default app;

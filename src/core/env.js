@@ -1,4 +1,4 @@
-import { cleanEnv, str, port, url } from 'envalid';
+import { cleanEnv, str, port, url, bool } from 'envalid';
 
 export const env = cleanEnv(process.env, {
   // Application
@@ -41,4 +41,8 @@ export const env = cleanEnv(process.env, {
   INTUIT_CLIENT_SECRET: str({ default: '' }),
   QBO_REDIRECT_URI: str({ default: '' }),
   QBO_ENVIRONMENT: str({ choices: ['sandbox', 'production'], default: 'sandbox' }),
+
+  // Background jobs (milestone invoicing, two-way sync). Disable when running
+  // multiple instances to avoid duplicate job execution.
+  ENABLE_SCHEDULER: bool({ default: true }),
 });
