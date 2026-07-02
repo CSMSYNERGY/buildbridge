@@ -41,6 +41,7 @@ export const env = cleanEnv(process.env, {
   INTUIT_CLIENT_SECRET: str({ default: '' }),
   QBO_REDIRECT_URI: str({ default: '' }),
   QBO_ENVIRONMENT: str({ choices: ['sandbox', 'production'], default: 'sandbox' }),
+  QBO_API_BASE_URL: str({ default: '' }), // override for tests/mocks; blank → per-environment default
 
   // Background jobs (milestone invoicing, two-way sync). Disable when running
   // multiple instances to avoid duplicate job execution.

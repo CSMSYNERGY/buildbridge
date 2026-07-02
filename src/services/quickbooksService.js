@@ -16,6 +16,7 @@ const REVOKE_URL = 'https://developer.api.intuit.com/v2/oauth2/tokens/revoke';
 const SCOPE = 'com.intuit.quickbooks.accounting';
 
 function apiBase() {
+  if (env.QBO_API_BASE_URL) return env.QBO_API_BASE_URL; // explicit override (testing/mocks)
   return env.QBO_ENVIRONMENT === 'production'
     ? 'https://quickbooks.api.intuit.com'
     : 'https://sandbox-quickbooks.api.intuit.com';
