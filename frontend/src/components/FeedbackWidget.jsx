@@ -34,9 +34,13 @@ const FEEDBACK_CONFIG = {
 // without it Monday simply ignores the query param and the form still loads
 // and submits fine (the user picks the app manually), so this degrades
 // gracefully either way.
+// Also normalizes the plain share link (/forms/<hash>) to Monday's embeddable
+// /forms/embed/<hash> variant: the share link is served with a frame-ancestors
+// CSP that only allows monday.com itself, so browsers refuse to iframe it.
 function feedbackFormSrc(url) {
-  const sep = url.indexOf('?') === -1 ? '?' : '&';
-  return url + sep + encodeURIComponent(FEEDBACK_CONFIG.appFieldLabel) + '=' + encodeURIComponent(FEEDBACK_CONFIG.appName);
+  const embedUrl = url.indexOf('/forms/embed/') !== -1 ? url : url.replace('/forms/', '/forms/embed/');
+  const sep = embedUrl.indexOf('?') === -1 ? '?' : '&';
+  return embedUrl + sep + encodeURIComponent(FEEDBACK_CONFIG.appFieldLabel) + '=' + encodeURIComponent(FEEDBACK_CONFIG.appName);
 }
 
 const FEEDBACK_CHOICES = [
