@@ -32,6 +32,9 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
+      // Monday.com WorkForms embedded by the feedback widget (without this,
+      // frame-src falls back to default-src 'self' and the iframe is blocked)
+      frameSrc: ['https://forms.monday.com', 'https://*.monday.com'],
       // Allow GHL to embed in an iframe (removes the default 'self' restriction)
       frameAncestors: null,
     },

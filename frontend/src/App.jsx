@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router';
 import { AuthProvider } from './context/AuthProvider.jsx';
 import { ToastProvider } from './components/ui/toast.jsx';
+import FeedbackWidget from './components/FeedbackWidget.jsx';
 import AppLayout from './layouts/AppLayout.jsx';
 import Home from './pages/Home.jsx';
 import Subscription from './pages/Subscription.jsx';
@@ -25,6 +26,8 @@ export default function App() {
           {/* Redirect bare root to /buildbridge */}
           <Route path="/" element={<Navigate to="/buildbridge" replace />} />
         </Routes>
+        {/* Mounted outside <Routes> so it floats on every screen */}
+        <FeedbackWidget />
         </ToastProvider>
       </AuthProvider>
     </BrowserRouter>
