@@ -17,10 +17,10 @@ import { useState, useEffect } from 'react';
 //  Nothing else needs to change.
 // ════════════════════════════════════════════════════════════════════════
 const FEEDBACK_CONFIG = {
-  // PLACEHOLDER ▸ paste the "Report an Issue" Monday form share URL:
-  bugFormUrl: 'PASTE_MONDAY_BUG_FORM_SHARE_URL_HERE',
-  // PLACEHOLDER ▸ paste the "Request a Feature" Monday form share URL:
-  featureFormUrl: 'PASTE_MONDAY_FEATURE_FORM_SHARE_URL_HERE',
+  // "Report an Issue" Monday WorkForm share URL:
+  bugFormUrl: 'https://forms.monday.com/forms/90b6f8b12b5e3a1229a34411450a2aae',
+  // "Request a Feature" Monday WorkForm share URL:
+  featureFormUrl: 'https://forms.monday.com/forms/2afe5b74ae8a1146bf33736beae5095e',
   // Sent to the form so every submission is tagged with the app it came from.
   appName: 'BuildBridge',
   // Name of the Monday form question that appName pre-fills.
