@@ -1,0 +1,81 @@
+name: Dependabot alerts to Monday (via Issues)
+
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  security-events: read
+  issues: write
+
+jobs:
+  sync-alerts-to-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh label create "dependabot-alert" --repo "${{ github.repository }}" --color "0366d6" --description "Auto-filed from an open Dependabot security alert" --force
+          gh label create "security" --repo "${{ github.repository }}" --color "d93f0b" --description "Security-related" --force
+
+      - name: Open an issue for each open Dependabot alert without one
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching open Dependabot alerts for $REPO..."
+          alerts_json="$(gh api "repos/$REPO/dependabot/alerts?state=open&per_page=100" --paginate)"
+
+          if [ -z "$alerts_json" ]; then
+            echo "No open Dependabot alerts."
+            exit 0
+          fi
+
+          echo "Fetching existing dependabot-alert issue titles (open + closed) for dedup..."
+          existing_titles="$(gh api "repos/$REPO/issues?state=all&per_page=100&labels=dependabot-alert" --paginate --jq '.[].title' || true)"
+
+          count=0
+          while IFS= read -r alert; do
+            [ -z "$alert" ] && continue
+
+            number=$(echo "$alert" | jq -r '.number')
+            ghsa=$(echo "$alert" | jq -r '.security_advisory.ghsa_id')
+            package=$(echo "$alert" | jq -r '.dependency.package.name')
+            ecosystem=$(echo "$alert" | jq -r '.dependency.package.ecosystem')
+            summary=$(echo "$alert" | jq -r '.security_advisory.summary' | cut -c1-100)
+            severity=$(echo "$alert" | jq -r '.security_advisory.severity')
+            manifest=$(echo "$alert" | jq -r '.dependency.manifest_path // "unknown"')
+            alert_url=$(echo "$alert" | jq -r '.html_url')
+
+            marker="[alert #$number]"
+            title="[Dependabot] $package: $summary $marker"
+
+            if echo "$existing_titles" | grep -qF "$marker"; then
+              echo "Skip alert #$number ($ghsa) — issue already exists"
+              continue
+            fi
+
+            body="**Dependabot security alert ${marker}**
+
+- Package: \`$package\` ($ecosystem)
+- Manifest: \`$manifest\`
+- Severity: **$severity**
+- Advisory: $ghsa
+- Alert: $alert_url
+
+Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR."
+
+            echo "Creating issue for alert #$number ($ghsa)..."
+            gh issue create --repo "$REPO" \
+              --title "$title" \
+              --body "$body" \
+              --label "dependabot-alert,security"
+            count=$((count + 1))
+          done < <(echo "$alerts_json" | jq -c '.[]')
+
+          echo "Created $count new issue(s)."
