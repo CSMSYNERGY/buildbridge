@@ -1,0 +1,65 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "buildbridge",
+  "main": "src/worker.js",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+
+  // No public route yet — a custom domain will be attached later. This lets
+  // `wrangler deploy` finalize without requiring a workers.dev subdomain.
+  // To go live: add a custom domain route (or set this true after registering a
+  // workers.dev subdomain), then update REDIRECT_URI / SMARTBUILD_BASE_URL below.
+  "workers_dev": false,
+  "routes": [{ "pattern": "buildbridge.csmsynergy.com", "custom_domain": true }],
+
+  // nodejs_compat + a compatibility_date >= 2025-09-01 enables the Node.js HTTP
+  // server modules (cloudflare:node -> httpServerHandler) that let the Express
+  // app run on Workers unchanged.
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": {
+    "enabled": true
+  },
+
+  // React SPA. Asset-first routing serves /buildbridge/index.html and
+  // /buildbridge/assets/* directly from the built files; anything with no
+  // matching asset (API routes, SPA deep links) falls through to the Worker.
+  // The frontend is built into dist/buildbridge/ (see frontend/vite.config.js).
+  "assets": {
+    "directory": "./frontend/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none"
+  },
+
+  // Postgres (Supabase) via Hyperdrive connection pooling.
+  // TODO(deploy): create the resource with the REAL Supabase pooler URL and paste
+  // its id here:
+  //   wrangler hyperdrive create buildbridge-supabase \
+  //     --connection-string="postgres://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres"
+  // For local `wrangler dev`, set the connection string via the env var
+  //   CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE
+  // (falls back to the localConnectionString below).
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "02b19317508d42c18daf7145e1ba2ab1",
+      "localConnectionString": "postgresql://postgres:postgres@localhost:5433/smartbuild"
+    }
+  ],
+
+  // Non-secret configuration. Secrets (GHL_CLIENT_SECRET, GHL_SHARED_SECRET,
+  // X_API_KEY, APP_JWT_SECRET, ENCRYPTION_KEY, DATABASE_URL, DEPOSYT_* , and
+  // GHL_CLIENT_ID) are set with `wrangler secret put` — never committed here.
+  // REDIRECT_URI and SMARTBUILD_BASE_URL must be updated to the final public
+  // Workers URL (or custom domain) before OAuth will work.
+  "vars": {
+    "NODE_ENV": "production",
+    "GHL_BASE_URL": "https://services.leadconnectorhq.com",
+    "GHL_DEFAULT_API_VERSION": "2021-07-28",
+    "GHL_SCOPES": "locations.readonly contacts.readonly opportunities.readonly",
+    // TODO(deploy): replace `example` with the real workers.dev subdomain (or a
+    // custom domain) once known — must match the GHL marketplace redirect URI.
+    "REDIRECT_URI": "https://buildbridge.csmsynergy.com/auth/callback",
+    "SMARTBUILD_BASE_URL": "https://buildbridge.csmsynergy.com"
+  }
+}

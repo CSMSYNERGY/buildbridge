@@ -3,8 +3,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { env as cfEnv } from 'cloudflare:workers';
 import { requestLogger } from './core/middleware/logger.js';
 import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
@@ -18,10 +17,10 @@ import webhookRoutes from './routes/webhookRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 
 console.log('[index] All imports resolved. Configuring Express...');
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-// Trust Railway's proxy (needed for rate limiting and correct IP detection)
+// Trust the Cloudflare proxy (needed for rate limiting and correct IP detection).
+// On Workers the real client IP arrives in the CF-Connecting-IP header.
 app.set('trust proxy', 1);
 
 // Security headers
@@ -74,18 +73,35 @@ app.use('/api', webApiRoutes);
 app.use('/webhooks', webhookRoutes);
 app.use('/admin', adminRoutes);
 
-// Serve React frontend at /buildbridge
-app.use('/buildbridge', express.static(join(__dirname, '..', 'frontend', 'dist')));
-app.get('/buildbridge/*splat', (_req, res) => {
-  res.sendFile(join(__dirname, '..', 'frontend', 'dist', 'index.html'));
-});
+// Redirect the bare root to the SPA base path, so buildbridge.csmsynergy.com
+// opens the app instead of returning a 404 (the SPA is served under /buildbridge).
+app.get('/', (_req, res) => res.redirect(302, '/buildbridge/'));
+
+// Serve the React SPA under /buildbridge.
+//
+// Real static files (the built index.html and /buildbridge/assets/*) are served
+// directly by the Workers Static Assets layer (asset-first routing) before this
+// Worker runs — see the `assets` binding in wrangler.jsonc. This handler is only
+// reached for client-side routes with no matching asset file (e.g. deep links
+// like /buildbridge/mappers), where it returns the SPA shell so React Router can
+// take over.
+async function serveSpaShell(_req, res, next) {
+  try {
+    const shellUrl = new URL('/buildbridge/index.html', 'https://assets.local');
+    const assetRes = await cfEnv.ASSETS.fetch(new Request(shellUrl));
+    if (!assetRes.ok) return next();
+    const html = await assetRes.text();
+    res.status(200).type('html').send(html);
+  } catch (err) {
+    next(err);
+  }
+}
+app.get('/buildbridge', serveSpaShell);
+app.get('/buildbridge/*splat', serveSpaShell);
 
 // Global error handler (must be last)
 app.use(errorHandler);
 
-console.log('[index] Starting listener on port', env.PORT);
-app.listen(env.PORT, () => {
-  console.log(`[index] BuildBridge v2 listening on port ${env.PORT} [${env.NODE_ENV}]`);
-});
-
+// Note: no app.listen() here — the Workers entry (src/worker.js) wraps this
+// exported app in a Node HTTP server via httpServerHandler.
 export default app;

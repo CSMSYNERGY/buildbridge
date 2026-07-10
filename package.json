@@ -9,6 +9,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "build:frontend": "npm --prefix frontend install && npm --prefix frontend run build",
+    "cf:dev": "wrangler dev",
+    "cf:deploy": "npm run build:frontend && wrangler deploy",
     "migrate": "node src/core/db/migrate.js",
     "seed": "node src/core/db/seed.js",
     "db:generate": "drizzle-kit generate",
