@@ -17,6 +17,10 @@ import {
   deleteSmartBuildConfig,
   testSmartBuildConnection,
 } from '../controllers/webApiController.js';
+import {
+  getQuickBooksConfig,
+  disconnectQuickBooks,
+} from '../controllers/quickbooksController.js';
 
 const router = Router();
 
@@ -49,5 +53,9 @@ router.get('/smartbuild/config', getSmartBuildConfig);
 router.post('/smartbuild/config', actionLimiter, saveSmartBuildConfig);
 router.delete('/smartbuild/config', actionLimiter, deleteSmartBuildConfig);
 router.post('/smartbuild/test', actionLimiter, testSmartBuildConnection);
+
+// QuickBooks integration config (OAuth connect/callback live under /auth/quickbooks)
+router.get('/quickbooks/config', getQuickBooksConfig);
+router.delete('/quickbooks/config', actionLimiter, disconnectQuickBooks);
 
 export default router;

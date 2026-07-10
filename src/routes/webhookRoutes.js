@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { deposytSignatureVerify } from '../middleware/deposytWebhook.js';
 import { isDuplicateEvent } from '../core/webhooks/eventLog.js';
 import { handleSubscriptionWebhook } from '../controllers/webhookController.js';
+import { handleGhlWebhook } from '../controllers/ghlWebhookController.js';
+import { verifyApiKey } from '../core/ghl/middleware.js';
 
 const router = Router();
 
@@ -30,5 +32,8 @@ router.post(
   idempotencyCheck,
   handleSubscriptionWebhook,
 );
+
+// POST /webhooks/ghl — inbound GHL events (workflow custom webhook w/ x-api-key)
+router.post('/ghl', verifyApiKey, handleGhlWebhook);
 
 export default router;

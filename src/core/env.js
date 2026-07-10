@@ -1,4 +1,4 @@
-import { cleanEnv, str, port, url } from 'envalid';
+import { cleanEnv, str, port, url, bool } from 'envalid';
 
 export const env = cleanEnv(process.env, {
   // Application
@@ -34,4 +34,16 @@ export const env = cleanEnv(process.env, {
   // Deposyt
   DEPOSYT_PRIVATE_API_KEY: str(),
   DEPOSYT_WEBHOOK_SIGNING_KEY: str(),
+
+  // Intuit / QuickBooks Online (OAuth2) — optional; leave blank to disable the
+  // QuickBooks integration. When blank, the Connect flow returns a 503.
+  INTUIT_CLIENT_ID: str({ default: '' }),
+  INTUIT_CLIENT_SECRET: str({ default: '' }),
+  QBO_REDIRECT_URI: str({ default: '' }),
+  QBO_ENVIRONMENT: str({ choices: ['sandbox', 'production'], default: 'sandbox' }),
+  QBO_API_BASE_URL: str({ default: '' }), // override for tests/mocks; blank → per-environment default
+
+  // Background jobs (milestone invoicing, two-way sync). Disable when running
+  // multiple instances to avoid duplicate job execution.
+  ENABLE_SCHEDULER: bool({ default: true }),
 });

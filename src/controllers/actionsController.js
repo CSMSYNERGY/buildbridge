@@ -1,4 +1,5 @@
 import { makeSmartBuildRequest } from '../services/smartbuildService.js';
+import { listMappers, getMappings } from '../services/mapperService.js';
 import { createError } from '../core/middleware/errorHandler.js';
 
 /**
@@ -49,6 +50,23 @@ export async function updateOpportunity(req, res) {
   res.json({ success: true, message: 'update-opportunity received' });
 }
 
-export async function getMappers(req, res) {
-  res.json({ success: true, message: 'get-mappers received' });
+/**
+ * Return mappers for the authenticated location.
+ * Query params: appSlug?, mapperType?, format? ('map' → externalKey→ghlValue lookup)
+ */
+export async function getMappers(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const { appSlug, mapperType, format } = req.query;
+
+    if (format === 'map') {
+      const mappings = await getMappings(locationId, appSlug, mapperType);
+      return res.json({ success: true, mappings });
+    }
+
+    const rows = await listMappers(locationId, appSlug, mapperType);
+    res.json({ success: true, mappers: rows });
+  } catch (err) {
+    next(err);
+  }
 }

@@ -9,9 +9,11 @@ import { requestLogger } from './core/middleware/logger.js';
 import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
+import { startScheduler } from './core/scheduler.js';
 
 // Routes
 import authRoutes from './routes/authRoutes.js';
+import quickbooksRoutes from './routes/quickbooksRoutes.js';
 import actionsRoutes from './routes/actionsRoutes.js';
 import webApiRoutes from './routes/webApiRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
@@ -69,6 +71,7 @@ app.get('/health', (_req, res) => {
 
 // API Routes
 app.use('/auth', authRoutes);
+app.use('/auth/quickbooks', quickbooksRoutes);
 app.use('/actions', actionsRoutes);
 app.use('/api', webApiRoutes);
 app.use('/webhooks', webhookRoutes);
@@ -87,5 +90,8 @@ console.log('[index] Starting listener on port', env.PORT);
 app.listen(env.PORT, () => {
   console.log(`[index] BuildBridge v2 listening on port ${env.PORT} [${env.NODE_ENV}]`);
 });
+
+// Background jobs (registered by integration modules at import time)
+if (env.ENABLE_SCHEDULER) startScheduler();
 
 export default app;
