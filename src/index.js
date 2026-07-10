@@ -11,6 +11,9 @@ import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
 import { startScheduler } from './core/scheduler.js';
 
+// Integrations (register webhook handlers + scheduler jobs at import time)
+import './integrations/yoderBarnes.js';
+
 // Routes
 import authRoutes from './routes/authRoutes.js';
 import quickbooksRoutes from './routes/quickbooksRoutes.js';
