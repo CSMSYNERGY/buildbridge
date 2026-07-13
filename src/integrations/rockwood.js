@@ -1,0 +1,12 @@
+// Rockwood model — two-way QuickBooks sync:
+//   contacts + estimates reconciled between QBO and GHL every 15 minutes,
+//   last-write-wins on conflicts. QuickBooks remains Rockwood's source of
+//   truth; changes made there flow into Synergy (GHL) and vice-versa.
+// Importing this module registers the scheduler job.
+
+import { registerJob } from '../core/scheduler.js';
+import { syncAllLocations } from '../services/qbSyncService.js';
+
+registerJob('rockwood-quickbooks-sync', 15 * 60 * 1000, syncAllLocations);
+
+console.log('[rockwood] Rockwood QuickBooks two-way sync registered');

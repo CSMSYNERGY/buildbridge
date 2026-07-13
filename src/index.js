@@ -9,8 +9,13 @@ import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
 
+// Integrations (register webhook handlers + scheduler jobs at import time)
+import './integrations/yoderBarnes.js';
+import './integrations/rockwood.js';
+
 // Routes
 import authRoutes from './routes/authRoutes.js';
+import quickbooksRoutes from './routes/quickbooksRoutes.js';
 import actionsRoutes from './routes/actionsRoutes.js';
 import webApiRoutes from './routes/webApiRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
@@ -68,6 +73,7 @@ app.get('/health', (_req, res) => {
 
 // API Routes
 app.use('/auth', authRoutes);
+app.use('/auth/quickbooks', quickbooksRoutes);
 app.use('/actions', actionsRoutes);
 app.use('/api', webApiRoutes);
 app.use('/webhooks', webhookRoutes);
@@ -104,4 +110,7 @@ app.use(errorHandler);
 
 // Note: no app.listen() here — the Workers entry (src/worker.js) wraps this
 // exported app in a Node HTTP server via httpServerHandler.
+// Background QBO jobs run via a Cloudflare Cron Trigger — see the `scheduled`
+// handler in src/worker.js — rather than an in-process setInterval scheduler
+// (setInterval at module scope is disallowed on the Workers runtime).
 export default app;

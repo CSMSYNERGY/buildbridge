@@ -95,11 +95,63 @@ export const integrationCredentials = pgTable('integration_credentials', {
   uniqueIndex('integration_credentials_location_app_uidx').on(t.locationId, t.appSlug),
 ]);
 
+// ─── QuickBooks Milestones ────────────────────────────────────────────────────
+// One row per milestone invoice for a won opportunity (Yoder Barnes model).
+export const qbMilestones = pgTable('qb_milestones', {
+  id: text('id').primaryKey(),
+  locationId: text('location_id').notNull().references(() => locations.id),
+  opportunityId: text('opportunity_id').notNull(),      // GHL opportunity id
+  contactId: text('contact_id'),                        // GHL contact id
+  qbCustomerId: text('qb_customer_id'),                 // QBO Customer.Id
+  milestoneType: text('milestone_type').notNull(),      // 'deposit' | 'materials_delivery' | 'roof_completion' | 'project_completion'
+  amountCents: integer('amount_cents').notNull(),
+  milestoneDate: timestamp('milestone_date', { withTimezone: true }), // null → invoice immediately (deposit)
+  invoiceLeadDays: integer('invoice_lead_days').notNull().default(3),
+  qbInvoiceId: text('qb_invoice_id'),                   // QBO Invoice.Id once created
+  status: text('status').notNull().default('pending'),  // 'pending' | 'invoiced' | 'failed'
+  error: text('error'),
+  invoicedAt: timestamp('invoiced_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('qb_milestones_location_opp_type_uidx').on(
+    t.locationId, t.opportunityId, t.milestoneType,
+  ),
+  index('qb_milestones_status_idx').on(t.status),
+]);
+
+// ─── QuickBooks Sync Links ────────────────────────────────────────────────────
+// Maps a GHL entity to its QBO counterpart for two-way sync (Rockwood model).
+export const qbSyncLinks = pgTable('qb_sync_links', {
+  id: text('id').primaryKey(),
+  locationId: text('location_id').notNull().references(() => locations.id),
+  entityType: text('entity_type').notNull(),            // 'contact' | 'estimate'
+  ghlId: text('ghl_id').notNull(),
+  qbId: text('qb_id').notNull(),
+  lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('qb_sync_links_location_type_ghl_uidx').on(t.locationId, t.entityType, t.ghlId),
+  uniqueIndex('qb_sync_links_location_type_qb_uidx').on(t.locationId, t.entityType, t.qbId),
+]);
+
+// ─── QuickBooks Sync State ────────────────────────────────────────────────────
+// Per-location cursor for the two-way sync (Rockwood model).
+export const qbSyncState = pgTable('qb_sync_state', {
+  locationId: text('location_id').primaryKey().references(() => locations.id),
+  lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ─── Relations ────────────────────────────────────────────────────────────────
 export const locationsRelations = relations(locations, ({ many }) => ({
   subscriptions: many(subscriptions),
   mappers: many(mappers),
   integrationCredentials: many(integrationCredentials),
+  qbMilestones: many(qbMilestones),
+  qbSyncLinks: many(qbSyncLinks),
 }));
 
 export const plansRelations = relations(plans, ({ many }) => ({
@@ -120,4 +172,12 @@ export const integrationCredentialsRelations = relations(integrationCredentials,
     fields: [integrationCredentials.locationId],
     references: [locations.id],
   }),
+}));
+
+export const qbMilestonesRelations = relations(qbMilestones, ({ one }) => ({
+  location: one(locations, { fields: [qbMilestones.locationId], references: [locations.id] }),
+}));
+
+export const qbSyncLinksRelations = relations(qbSyncLinks, ({ one }) => ({
+  location: one(locations, { fields: [qbSyncLinks.locationId], references: [locations.id] }),
 }));

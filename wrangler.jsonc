@@ -21,6 +21,17 @@
     "enabled": true
   },
 
+  // Cron Trigger — runs the QBO background jobs (Rockwood two-way sync, Yoder
+  // milestone auto-invoicing) every 15 min via the `scheduled` handler in
+  // src/worker.js. Replaces the in-process setInterval scheduler, which the
+  // Workers runtime forbids at module scope. Both jobs are registered at import
+  // time (src/integrations/*) and are idempotent, so re-running each tick is safe.
+  // If job intervals ever diverge from 15 min, add matching cron patterns or gate
+  // per-job by a persisted last-run timestamp (KV/Durable Object).
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+
   // React SPA. Asset-first routing serves /buildbridge/index.html and
   // /buildbridge/assets/* directly from the built files; anything with no
   // matching asset (API routes, SPA deep links) falls through to the Worker.
