@@ -71,6 +71,12 @@
     // TODO(deploy): replace `example` with the real workers.dev subdomain (or a
     // custom domain) once known — must match the GHL marketplace redirect URI.
     "REDIRECT_URI": "https://buildbridge.csmsynergy.com/auth/callback",
-    "SMARTBUILD_BASE_URL": "https://buildbridge.csmsynergy.com"
+    "SMARTBUILD_BASE_URL": "https://buildbridge.csmsynergy.com",
+    // QuickBooks (Intuit) OAuth. QBO_REDIRECT_URI must match the Redirect URI
+    // registered in the Intuit app EXACTLY. INTUIT_CLIENT_ID + INTUIT_CLIENT_SECRET
+    // are secrets (set via `wrangler secret put`), never committed here.
+    // QBO_ENVIRONMENT: sandbox → sandbox-quickbooks.api.intuit.com; production → quickbooks.api.intuit.com.
+    "QBO_REDIRECT_URI": "https://buildbridge.csmsynergy.com/auth/quickbooks/callback",
+    "QBO_ENVIRONMENT": "sandbox"
   }
 }
