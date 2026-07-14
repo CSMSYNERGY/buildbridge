@@ -8,6 +8,8 @@ import { requestLogger } from './core/middleware/logger.js';
 import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
+import { sql } from 'drizzle-orm';
+import { db, dbContext, closeRequestDb } from './core/db/client.js';
 
 // Integrations (register webhook handlers + scheduler jobs at import time)
 import './integrations/yoderBarnes.js';
@@ -60,6 +62,31 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Per-request DB store: one pooled connection per request, created lazily on first DB
+// access and closed when the response is sent. Established here (inside Express) so it
+// lives in Express's own async context. Must precede any route that touches the DB.
+//
+// IMPORTANT: cleanup is hooked into res.end (the final step of every send path) rather
+// than relying on the 'finish'/'close' events — under the cloudflare:node
+// httpServerHandler bridge those events are not guaranteed to fire, and a pool that
+// never closes leaks its connection into Hyperdrive's origin pool (limit 20) until the
+// pool saturates and every DB request times out. finish/close stay as backups.
+app.use((req, res, next) => {
+  const store = {};
+  const cleanup = () => {
+    if (store.pool && !store.closed) console.log('[dbstore] closing request pool');
+    closeRequestDb(store);
+  };
+  const origEnd = res.end.bind(res);
+  res.end = function patchedEnd(...args) {
+    cleanup();
+    return origEnd(...args);
+  };
+  res.once('finish', cleanup);
+  res.once('close', cleanup);
+  dbContext.run(store, () => next());
+});
+
 // Logging
 app.use(requestLogger);
 
@@ -71,6 +98,25 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', ts: new Date().toISOString() });
 });
 
+// Deep health check — actually exercises the Postgres/Hyperdrive connection with a
+// trivial round-trip, so DB connectivity can be verified without an authenticated
+// request. Returns fast on success or failure (never hangs — see the response
+// timeout in src/worker.js).
+app.get('/health/db', async (_req, res) => {
+  const started = Date.now();
+  const hasStore = Boolean(dbContext.getStore());
+  try {
+    await db.execute(sql`select 1 as ok`);
+    res.json({ db: 'ok', ms: Date.now() - started, store: hasStore });
+  } catch (err) {
+    console.error('[health/db] DB check failed:', err);
+    res.status(500).json({ db: 'error', ms: Date.now() - started, store: hasStore, message: err.message });
+  }
+});
+
+// (Temporary DB-hang diagnostics removed 2026-07-15 — root cause found: socket-based
+// PG drivers hang under the cloudflare:node httpServerHandler bridge; fixed in
+// core/db/client.js with a static-import cloudflare:sockets adapter over Hyperdrive.)
 // API Routes
 app.use('/auth', authRoutes);
 app.use('/auth/quickbooks', quickbooksRoutes);
