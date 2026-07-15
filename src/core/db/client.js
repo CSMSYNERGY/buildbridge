@@ -41,11 +41,13 @@ async function queryViaDbWorker(sqlText, params, method) {
   }
 
   // The URL is arbitrary (service bindings route by binding, not host); the path is
-  // kept meaningful for logs.
+  // kept meaningful for logs. DATABASE_URL is forwarded so the DB worker can connect
+  // DIRECT to the Supabase pooler with native TLS (bypassing Hyperdrive's poisoned
+  // origin pool); the binding call never leaves Cloudflare's network.
   const res = await binding.fetch('https://buildbridge-db.internal/query', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sql: sqlText, params, method }),
+    body: JSON.stringify({ sql: sqlText, params, method, connectionString: cfEnv.DATABASE_URL }),
   });
 
   let data;

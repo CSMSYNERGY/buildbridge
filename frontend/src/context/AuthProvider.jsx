@@ -50,6 +50,9 @@ export function AuthProvider({ children }) {
     return fetch(url, {
       ...options,
       credentials: 'include',
+      // Never serve API data from the browser cache: a stale cached body (e.g. an
+      // error-era {config:null}) would otherwise be replayed indefinitely.
+      cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',
         ...(tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {}),

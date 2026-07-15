@@ -36,6 +36,15 @@ export async function ghlSsoController(req, res, next) {
       throw createError(401, 'Invalid SSO payload');
     }
 
+    // TEMPORARY diagnostic: field shape of GHL's SSO payload (ids only, no secrets).
+    console.log(
+      '[sso] payload keys:', Object.keys(userData).join(','),
+      '| activeLocation:', userData.activeLocation,
+      '| locationId:', userData.locationId,
+      '| companyId:', userData.companyId,
+      '| type:', userData.type,
+    );
+
     // Marketplace SSO payloads carry activeLocation; the legacy shape carries
     // locationId. companyId may arrive as companyId or company_id.
     const locationId = userData.activeLocation ?? userData.locationId ?? null;

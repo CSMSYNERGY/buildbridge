@@ -94,6 +94,16 @@ app.use((req, res, next) => {
   dbContext.run(store, () => next());
 });
 
+// API responses must never be cached: Express emits ETags and (without an explicit
+// Cache-Control) browsers heuristically cache JSON bodies — observed live as a stale
+// {config:null} being replayed inside the GHL iframe long after the backend was fixed.
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
+    res.set('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 // Logging
 app.use(requestLogger);
 
