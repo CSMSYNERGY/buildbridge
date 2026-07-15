@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // buildbridge-db — dedicated database worker (see src/db-worker.js for why).
+  // Deploy with: npx wrangler deploy -c wrangler.db.jsonc
+  "name": "buildbridge-db",
+  "main": "src/db-worker.js",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+
+  // No public surface: no routes, no workers.dev. Reachable ONLY via the main
+  // worker's service binding (DB_WORKER in wrangler.jsonc).
+  "workers_dev": false,
+
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": {
+    "enabled": true
+  },
+
+  // Same Hyperdrive config as the main worker (Supabase transaction pooler).
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "02b19317508d42c18daf7145e1ba2ab1",
+      "localConnectionString": "postgresql://postgres:postgres@localhost:5433/smartbuild"
+    }
+  ]
+}

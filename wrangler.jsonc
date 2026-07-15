@@ -44,6 +44,14 @@
     "not_found_handling": "none"
   },
 
+  // Database access goes through the dedicated buildbridge-db worker (service
+  // binding below + drizzle pg-proxy in src/core/db/client.js). Raw Postgres
+  // sockets are unreliable under the cloudflare:node httpServerHandler bridge this
+  // worker runs Express on; plain fetch to the DB worker is not.
+  "services": [
+    { "binding": "DB_WORKER", "service": "buildbridge-db" }
+  ],
+
   // Postgres (Supabase) via Hyperdrive connection pooling.
   // TODO(deploy): create the resource with the REAL Supabase pooler URL and paste
   // its id here:
