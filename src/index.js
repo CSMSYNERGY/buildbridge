@@ -11,10 +11,18 @@ import { env } from './core/env.js';
 
 // Routes
 import authRoutes from './routes/authRoutes.js';
+import quickbooksRoutes from './routes/quickbooksRoutes.js';
 import actionsRoutes from './routes/actionsRoutes.js';
 import webApiRoutes from './routes/webApiRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+
+// Integrations — importing registers their GHL webhook handlers (and scheduler
+// jobs). On Workers we deliberately do NOT call startScheduler(), so no timers
+// start here; registration is import-time only and Workers-safe. The recurring
+// jobs run on the legacy Node host (or, later, a Cloudflare Cron Trigger).
+import './integrations/yoderBarnes.js';
+import './integrations/rockwood.js';
 
 console.log('[index] All imports resolved. Configuring Express...');
 const app = express();
@@ -68,6 +76,7 @@ app.get('/health', (_req, res) => {
 
 // API Routes
 app.use('/auth', authRoutes);
+app.use('/auth/quickbooks', quickbooksRoutes);
 app.use('/actions', actionsRoutes);
 app.use('/api', webApiRoutes);
 app.use('/webhooks', webhookRoutes);
