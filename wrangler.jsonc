@@ -21,16 +21,17 @@
     "enabled": true
   },
 
-  // Cron Triggers — the `scheduled` handler in src/worker.js branches on the pattern:
-  //   */15 → QBO background jobs (Rockwood two-way sync, Yoder milestone
-  //          auto-invoicing). Both are registered at import time (src/integrations/*)
-  //          and are idempotent, so re-running each tick is safe.
-  //   */2  → DB warm-up ping (keeps isolates + Hyperdrive warm; absorbs the
-  //          cold-isolate first-connect race).
+  // Cron Trigger — runs the QBO background jobs (Rockwood two-way sync, Yoder
+  // milestone auto-invoicing) every 15 min via the `scheduled` handler in
+  // src/worker.js. Both jobs are registered at import time (src/integrations/*)
+  // and are idempotent, so re-running each tick is safe.
   // NOTE: cron registration requires the account to have a workers.dev subdomain
   // (Cloudflare error 10063 otherwise) — created 2026-07-15 (csm-synergy.workers.dev).
+  // A 2-min DB warm-up cron was tried and REMOVED: when the Hyperdrive path is
+  // degraded, a failing warm-up every 2 min continually re-poisons the origin pool
+  // (each destroyed mid-connect socket parks a dirty origin connection).
   "triggers": {
-    "crons": ["*/15 * * * *", "*/2 * * * *"]
+    "crons": ["*/15 * * * *"]
   },
 
   // React SPA. Asset-first routing serves /buildbridge/index.html and
