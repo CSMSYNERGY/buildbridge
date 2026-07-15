@@ -1,0 +1,700 @@
+{
+	"schema": "default",
+	"eventType": "created",
+	"clientId": "shedview-atomic-shed-demo",
+	"url": "https://sheds.idearoominc.com/?lng=en-US#2c1478bde3e5bce91e79fbf80085fbc9",
+	"order": {
+		"calculations": [
+			{
+				"token": "deliveryPrice",
+				"value": 0
+			},
+			{
+				"token": "buildingPrice",
+				"value": 5611.5
+			},
+			{
+				"token": "structurePrice",
+				"value": 0
+			},
+			{
+				"token": "lineItemsSubtotal",
+				"value": 5611.5
+			},
+			{
+				"token": "percentOfBuildingItems",
+				"value": 0
+			},
+			{
+				"token": "percentOfStructureItems",
+				"value": 0
+			},
+			{
+				"token": "taxableItemsForPercentOfSubtotalCalc",
+				"value": 5611.5
+			},
+			{
+				"token": "percentOfSubtotalItems",
+				"value": 0
+			},
+			{
+				"token": "surchargeSubtotal",
+				"value": 0
+			},
+			{
+				"token": "surchargeItems",
+				"value": 5612
+			},
+			{
+				"token": "surcharge",
+				"value": 0
+			},
+			{
+				"token": "nonTaxableSurcharge",
+				"value": 0
+			},
+			{
+				"token": "taxableSurcharge",
+				"value": 0
+			},
+			{
+				"token": "taxableItems",
+				"value": 5611.5
+			},
+			{
+				"token": "totalTax",
+				"value": 0
+			},
+			{
+				"token": "taxPercentage",
+				"value": 0
+			},
+			{
+				"token": "totalForPercentOfTotalCalc",
+				"value": 5611.5
+			},
+			{
+				"token": "percentOfTotalItems",
+				"value": 0
+			},
+			{
+				"token": "subtotal",
+				"value": 5611.5
+			},
+			{
+				"token": "subtotalWithoutCustomItems",
+				"value": 5611.5
+			},
+			{
+				"token": "nonTaxableItems",
+				"value": 0
+			},
+			{
+				"token": "subtotalExcludedFromDeposit",
+				"value": 0
+			},
+			{
+				"token": "totalExcludedFromDeposit",
+				"value": 0
+			},
+			{
+				"token": "total",
+				"value": 5611.5
+			},
+			{
+				"token": "totalCustomDiscounts",
+				"value": 0
+			},
+			{
+				"token": "totalCustomExpenses",
+				"value": 0
+			},
+			{
+				"token": "depositAmount",
+				"value": 0
+			},
+			{
+				"token": "depositPercentage"
+			},
+			{
+				"token": "standardDepositPercentage"
+			},
+			{
+				"token": "depositDiscount",
+				"value": 0
+			},
+			{
+				"token": "processingFee",
+				"value": 0
+			},
+			{
+				"token": "depositDueNow",
+				"value": 0
+			},
+			{
+				"token": "creditCardFee",
+				"value": 0
+			},
+			{
+				"token": "deliveryFeeToPrintQuote",
+				"value": 0
+			},
+			{
+				"token": "remainingDueForPercentOfRemainingDueCalc",
+				"value": 5611.5
+			},
+			{
+				"token": "percentOfRemainingDueItems",
+				"value": 0
+			},
+			{
+				"token": "remainingDue",
+				"value": 5611.5
+			},
+			{
+				"token": "depositDueNowWithCreditCardFee",
+				"value": 0
+			},
+			{
+				"token": "totalWithCreditCardFee",
+				"value": 5611.5
+			},
+			{
+				"token": "customQuoteCreditCardFeePercent",
+				"value": 0
+			},
+			{
+				"token": "customQuoteCreditCardFee",
+				"value": 0
+			},
+			{
+				"token": "remainingDueWithCustomQuoteCreditCardFee",
+				"value": 5611.5
+			}
+		],
+		"deliveryPercentageToPrintQuotePrice": 0,
+		"deliveryPrice": 0,
+		"deliveryPriceTaxable": false,
+		"depositAmount": 0,
+		"depositDueNow": 0,
+		"installation": {
+		},
+		"lineItems": [
+			{
+				"description": "Size: 10x20",
+				"productKey": "size",
+				"optionType": "size",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 106
+				}
+			},
+			{
+				"description": "Style: Utility",
+				"model": "",
+				"sku": "47216",
+				"price": 5611.5,
+				"optionType": "style",
+				"productKey": "style",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"category": "style-and-size",
+					"sortOrder": 101,
+					"alwaysKeep": true
+				},
+				"surchargeCategory": "base-price",
+				"value": "Utility"
+			},
+			{
+				"description": "Utility",
+				"productKey": "style-group"
+			},
+			{
+				"description": "Sidewall Height: 93 1/2\"",
+				"optionType": "height",
+				"productKey": "wall-height",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 105
+				}
+			},
+			{
+				"description": "Siding Color: Country Blue",
+				"parentOptionType": "siding",
+				"productCategory": "siding-color",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"singleQuantity": true,
+					"category": "colors-and-materials",
+					"sortOrder": 201
+				},
+				"hideQuantity": true,
+				"productKey": "siding-color"
+			},
+			{
+				"description": "Trim Color: White",
+				"quantity": 1,
+				"productCategory": "trim-color",
+				"productKey": "trim-color",
+				"consolidatedOptions": {
+					"category": "colors-and-materials",
+					"sortOrder": 203,
+					"alwaysKeep": true
+				},
+				"hideQuantity": true
+			},
+			{
+				"description": "Roof Color: Brillant",
+				"parentOptionType": "roofing",
+				"productCategory": "roof-color",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"singleQuantity": true,
+					"category": "colors-and-materials",
+					"sortOrder": 204
+				},
+				"hideQuantity": true,
+				"productKey": "roof-color"
+			},
+			{
+				"description": "Flooring: 3/4\" Tongue & Groove",
+				"optionType": "flooring",
+				"productCategory": "flooring-interior",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"category": "flooring-and-interior",
+					"sortOrder": 699
+				}
+			},
+			{
+				"description": "Floor Joist: 16\" OC Floor Joist",
+				"optionType": "floorJoist",
+				"productCategory": "flooring-interior",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"category": "flooring-and-interior",
+					"sortOrder": 699
+				}
+			},
+			{
+				"description": "Roof Material: Metal",
+				"productKey": "roof-material",
+				"quantity": 1,
+				"optionType": "roofing",
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 199
+				}
+			},
+			{
+				"description": "3' Double Door",
+				"price": 0,
+				"productCategory": "doors",
+				"quantity": 1,
+				"sku": "129.0857143",
+				"consolidatedOptions": {
+					"category": "doors-and-windows",
+					"sortOrder": 599,
+					"alwaysKeep": true
+				},
+				"selection": [
+					{
+						"type": "wall",
+						"key": "front"
+					},
+					{
+						"type": "component",
+						"key": "3-double-door",
+						"id": "9d2502f6-9188-49c3-999c-2a2f1ff67cdf"
+					}
+				]
+			},
+			{
+				"description": "Color: Country Blue",
+				"parentOptionKey": "3-double-door",
+				"parentOptionType": "component",
+				"productCategory": "doors",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"singleQuantity": true,
+					"category": "doors-and-windows",
+					"sortOrder": 599
+				},
+				"hideQuantity": true
+			},
+			{
+				"description": "Diamond Tread Plate",
+				"productCategory": "doors",
+				"quantity": 1,
+				"optionType": "threshold",
+				"consolidatedOptions": {
+					"category": "doors-and-windows",
+					"sortOrder": 599
+				}
+			},
+			{
+				"description": "Vent",
+				"productCategory": "vents",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"category": "additional-options",
+					"sortOrder": 799
+				},
+				"selection": [
+					{
+						"type": "wall",
+						"key": "front"
+					},
+					{
+						"type": "component",
+						"key": "vent",
+						"id": "d422ad5b-13b9-43ee-ad05-f9a95702f6fa"
+					}
+				]
+			},
+			{
+				"description": "Vent",
+				"productCategory": "vents",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"category": "additional-options",
+					"sortOrder": 799
+				},
+				"selection": [
+					{
+						"type": "wall",
+						"key": "front"
+					},
+					{
+						"type": "component",
+						"key": "vent",
+						"id": "2236f695-73a3-4571-a4c4-64b544222283"
+					}
+				]
+			},
+			{
+				"description": "Base: 4x6 Pressure Treated Runners",
+				"productCategory": "structure",
+				"optionType": "base",
+				"quantity": 1,
+				"optionKey": "4x4-painted-runners-10-ft-wide",
+				"surchargeCategory": "none",
+				"consolidatedOptions": {
+					"category": "style-and-size",
+					"sortOrder": 103
+				}
+			},
+			{
+				"productCategory": "structure",
+				"optionType": "installation-surface",
+				"quantity": 1,
+				"description": "Site Preparation: Dirt",
+				"consolidatedOptions": {
+					"category": "additional-options",
+					"sortOrder": 799
+				}
+			},
+			{
+				"productCategory": "flooring-interior",
+				"optionType": "interior-roof",
+				"quantity": 1,
+				"description": "Interior Roof: Standard Trusses",
+				"consolidatedOptions": {
+					"category": "additional-options",
+					"sortOrder": 799
+				}
+			},
+			{
+				"description": "Siding: LP Smart Siding",
+				"optionKey": "t1-11-smartpanel-siding",
+				"productKey": "siding",
+				"productCategory": "structure",
+				"surchargeCategory": "structure",
+				"optionType": "siding",
+				"quantity": 1,
+				"price": 0,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 104
+				}
+			}
+		],
+		"nonTaxableItems": 0,
+		"remainingDue": 5611.5,
+		"rentToOwn": "",
+		"status": "quote",
+		"subtotalPrice": 5611.5,
+		"subtotalPriceWithoutCustomItems": 5611.5,
+		"taxExempt": false,
+		"totalPrice": 5611.5,
+		"totalTax": 0,
+		"regionLabel": "Default",
+		"sharePost": {
+			"title": "Check out my shed from Atomic Sheds!",
+			"description": "Utility - 10x20"
+		},
+		"salesAccount": {
+			"authenticated": false,
+			"email": null
+		},
+		"apiSalesTaxPerentage": 0,
+		"billingAddress": {
+			"address1": "",
+			"city": "",
+			"firstName": "",
+			"lastName": "",
+			"state": "",
+			"zip": "",
+			"sameAsShipping": true
+		},
+		"customDepositAmount": 0,
+		"customDepositPercentage": 0,
+		"customer": {
+			"email": "rpannell@idearoom.com",
+			"firstName": "Testingly",
+			"lastName": "Testlicious",
+			"phone": "1234567890"
+		},
+		"customLineItems": [
+		],
+		"customTaxPercentage": 0,
+		"customTaxRate": false,
+		"dealer": {
+			"address": "",
+			"email": "",
+			"name": "",
+			"phone": ""
+		},
+		"depositType": "standard",
+		"depositDiscount": {
+			"customAmount": 0,
+			"customPercentage": 0,
+			"type": "custom-amount"
+		},
+		"emailFloorPlan": false,
+		"notes": "",
+		"salesRep": {
+			"name": ""
+		},
+		"secondaryPhone": "",
+		"shippingAddress": {
+			"address1": "123 Utopia",
+			"city": "Xanadu",
+			"firstName": "Testingly",
+			"lastName": "Testlicious",
+			"phone": "1234567890",
+			"state": "WI",
+			"zip": "54102"
+		},
+		"supplier": "atomic-shed-demo",
+		"taxAmount": 0,
+		"taxRate": 0,
+		"taxType": "standard",
+		"uuid": "92d108a0-6935-11ee-84d4-6f30c8586ef2",
+		"externalReferenceId": "",
+		"apiSalesTaxPercentage": 0,
+		"contact-me": "save-contact-me-now",
+		"print": false,
+		"openExternalLink": false,
+		"images": {
+			"isoSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/9273f480-6935-11ee-8a5b-4582051817e0.png",
+			"frontSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/92557000-6935-11ee-b6d1-cd46b7803d9e.png",
+			"leftSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/925bffb0-6935-11ee-9b62-9f6d60cc858c.png",
+			"backSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/925214a0-6935-11ee-a98d-bd3377811625.png",
+			"rightSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/92624140-6935-11ee-b6d1-cd46b7803d9e.png",
+			"floorplanSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/926b9010-6935-11ee-a7dc-5d61074096fb.png",
+			"floorplanWithLegendSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/92786150-6935-11ee-9b62-9f6d60cc858c.png",
+			"floorplanEmailSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/926a5790-6935-11ee-a98d-bd3377811625.png",
+			"elevationMapFrontSrc": "",
+			"elevationMapLeftSrc": "",
+			"elevationMapBackSrc": "",
+			"elevationMapRightSrc": "",
+			"socialSharePreviewSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/928f92d0-6935-11ee-9b62-9f6d60cc858c.png",
+			"floorPlanSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/926b9010-6935-11ee-a7dc-5d61074096fb.png"
+		},
+		"floorplan": {
+			"symbolsLegend": [
+				{
+					"compositeSymbolForLabel": null,
+					"label": "Closed Wall",
+					"iconSrc": "https://s3-us-west-2.amazonaws.com/idearoom-stagingassets/idearoom/images/floorplan-symbol-legend/icon-wall-closed.png"
+				}
+			]
+		},
+		"emailId": "1697138931242214",
+		"versionedEmailId": "1697138931242214",
+		"building": {
+			"style": {
+				"description": "Utility",
+				"model": "",
+				"sku": "47216",
+				"price": 5611.5,
+				"optionType": "style",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"category": "style-and-size",
+					"sortOrder": 101,
+					"alwaysKeep": true
+				},
+				"surchargeCategory": "base-price"
+			},
+			"style-group": {
+				"description": "Utility"
+			},
+			"wall-height": {
+				"description": "93 1/2\"",
+				"optionType": "height",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 105
+				}
+			},
+			"size": {
+				"description": "10x20",
+				"optionType": "size",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 106
+				}
+			},
+			"siding-color": {
+				"description": "Country Blue",
+				"parentOptionType": "siding",
+				"productCategory": "siding-color",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"singleQuantity": true,
+					"category": "colors-and-materials",
+					"sortOrder": 201
+				},
+				"hideQuantity": true
+			},
+			"trim-color": {
+				"description": "White",
+				"quantity": 1,
+				"productCategory": "trim-color",
+				"consolidatedOptions": {
+					"category": "colors-and-materials",
+					"sortOrder": 203,
+					"alwaysKeep": true
+				},
+				"hideQuantity": true
+			},
+			"roof-color": {
+				"description": "Brillant",
+				"parentOptionType": "roofing",
+				"productCategory": "roof-color",
+				"quantity": 1,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"singleQuantity": true,
+					"category": "colors-and-materials",
+					"sortOrder": 204
+				},
+				"hideQuantity": true
+			},
+			"roof-material": {
+				"description": "Metal",
+				"quantity": 1,
+				"optionType": "roofing",
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 199
+				}
+			},
+			"siding": {
+				"description": "LP Smart Siding",
+				"optionKey": "t1-11-smartpanel-siding",
+				"productCategory": "structure",
+				"surchargeCategory": "structure",
+				"optionType": "siding",
+				"quantity": 1,
+				"price": 0,
+				"consolidatedOptions": {
+					"alwaysKeep": true,
+					"category": "style-and-size",
+					"sortOrder": 104
+				}
+			},
+			"description": [
+				{
+					"Style": "5611.5, Utility"
+				},
+				{
+					"Style Group": "Utility"
+				},
+				{
+					"Wall Height": "93 1/2\""
+				},
+				{
+					"Size": "10x20"
+				},
+				{
+					"Siding Color": "Country Blue"
+				},
+				{
+					"Trim Color": "White"
+				},
+				{
+					"Roof Color": "Brillant"
+				},
+				{
+					"Flooring Interior": "Flooring: 3/4\" Tongue & Groove"
+				},
+				{
+					"Flooring Interior": "Floor Joist: 16\" OC Floor Joist"
+				},
+				{
+					"Roof Material": "Metal"
+				},
+				{
+					"Doors": "3' Double Door"
+				},
+				{
+					"Doors": "Color: Country Blue"
+				},
+				{
+					"Doors": "Diamond Tread Plate"
+				},
+				{
+					"Vents": "Vent"
+				},
+				{
+					"Vents": "Vent"
+				},
+				{
+					"Structure": "Base: 4x6 Pressure Treated Runners"
+				},
+				{
+					"Structure": "Site Preparation: Dirt"
+				},
+				{
+					"Flooring Interior": "Interior Roof: Standard Trusses"
+				},
+				{
+					"Siding": "LP Smart Siding"
+				}
+			]
+		}
+	},
+	"visits": 1,
+	"updates": 0,
+	"checkoutOpened": 0,
+	"hash": "2c1478bde3e5bce91e79fbf80085fbc9",
+	"environment": "production"
+}

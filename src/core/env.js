@@ -43,6 +43,13 @@ export const env = cleanEnv(process.env, {
   QBO_ENVIRONMENT: str({ choices: ['sandbox', 'production'], default: 'sandbox' }),
   QBO_API_BASE_URL: str({ default: '' }), // override for tests/mocks; blank → per-environment default
 
+  // IdeaRoom — lead capture. The inbound webhook needs no key from us (IdeaRoom
+  // pushes to a per-location URL); these are for the optional REST pull path and
+  // the provisional inbound-webhook secret. All optional — blank disables.
+  IDEAROOM_API_BASE_URL: url({ default: 'https://api.idearoominc.com' }),
+  IDEAROOM_API_KEY: str({ default: '' }),           // x-api-key issued by IdeaRoom
+  IDEAROOM_WEBHOOK_SECRET: str({ default: '' }),     // provisional inbound verify (see §9)
+
   // Background jobs (milestone invoicing, two-way sync). Disable when running
   // multiple instances to avoid duplicate job execution.
   ENABLE_SCHEDULER: bool({ default: true }),

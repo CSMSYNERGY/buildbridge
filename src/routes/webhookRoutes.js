@@ -3,6 +3,10 @@ import { deposytSignatureVerify } from '../middleware/deposytWebhook.js';
 import { isDuplicateEvent } from '../core/webhooks/eventLog.js';
 import { handleSubscriptionWebhook } from '../controllers/webhookController.js';
 import { handleGhlWebhook } from '../controllers/ghlWebhookController.js';
+import {
+  handleIdearoomWebhook,
+  verifyIdearoomWebhook,
+} from '../controllers/idearoomWebhookController.js';
 import { verifyApiKey } from '../core/ghl/middleware.js';
 
 const router = Router();
@@ -35,5 +39,8 @@ router.post(
 
 // POST /webhooks/ghl — inbound GHL events (workflow custom webhook w/ x-api-key)
 router.post('/ghl', verifyApiKey, handleGhlWebhook);
+
+// POST /webhooks/idearoom/:locationId — inbound IdeaRoom configurator events
+router.post('/idearoom/:locationId', verifyIdearoomWebhook, handleIdearoomWebhook);
 
 export default router;

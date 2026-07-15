@@ -120,6 +120,94 @@ function GhlFieldSelect({ value, onChange, fields, fallback }) {
   );
 }
 
+// ─── GHL pipeline / stage selector ───────────────────────────────────────────
+// Used for the `pipeline` and `opportunity_stage` mapper types, where the stored
+// ghlValue must be a GHL pipeline id / stage id (not a contact custom field).
+
+function GhlPipelineStageSelect({ mode, value, onChange, pipelines, fallback }) {
+  // mode: 'pipeline' (value = pipeline id) | 'stage' (value = stage id)
+  const [pipelineId, setPipelineId] = useState('');
+
+  // In stage mode + edit, derive which pipeline owns the currently selected stage.
+  useEffect(() => {
+    if (mode === 'stage' && value && !pipelineId) {
+      const owner = pipelines.find((p) => (p.stages ?? []).some((s) => s.id === value));
+      if (owner) setPipelineId(owner.id);
+    }
+  }, [mode, value, pipelines, pipelineId]);
+
+  const selectClass =
+    'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50';
+
+  if (fallback) {
+    return (
+      <Input
+        placeholder={mode === 'pipeline' ? 'GHL pipeline id' : 'GHL stage id'}
+        value={value}
+        onChange={(e) => onChange(e.target.value, '')}
+        required
+      />
+    );
+  }
+
+  if (mode === 'pipeline') {
+    return (
+      <select
+        className={selectClass}
+        value={value}
+        onChange={(e) => {
+          const p = pipelines.find((x) => x.id === e.target.value);
+          onChange(e.target.value, p?.name ?? '');
+        }}
+      >
+        <option value="">Select a pipeline…</option>
+        {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+    );
+  }
+
+  // stage mode — pick a pipeline to scope, then a stage within it
+  const selectedPipeline = pipelines.find((p) => p.id === pipelineId);
+  const stages = selectedPipeline?.stages ?? [];
+  return (
+    <div className="space-y-2">
+      <select
+        className={selectClass}
+        value={pipelineId}
+        onChange={(e) => {
+          setPipelineId(e.target.value);
+          onChange('', ''); // reset stage when the pipeline changes
+        }}
+      >
+        <option value="">Select a pipeline…</option>
+        {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <select
+        className={selectClass}
+        value={value}
+        disabled={!pipelineId}
+        onChange={(e) => {
+          const s = stages.find((x) => x.id === e.target.value);
+          onChange(e.target.value, s && selectedPipeline ? `${selectedPipeline.name} → ${s.name}` : '');
+        }}
+      >
+        <option value="">{pipelineId ? 'Select a stage…' : 'Choose a pipeline first'}</option>
+        {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
+// External-key suggestions per app + mapper type (e.g. IdeaRoom order statuses).
+const IDEAROOM_STATUS_KEYS = ['default', 'save', 'quote', 'deposit', 'deposit-later', 'deposit-now-token', 'deposit-now-paying', 'deposit-now-charged'];
+const EXTERNAL_KEY_SUGGESTIONS = {
+  idearoom: {
+    opportunity_stage: IDEAROOM_STATUS_KEYS,
+    contact_tag: IDEAROOM_STATUS_KEYS,
+    pipeline: ['default'],
+  },
+};
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Mapper() {
@@ -143,6 +231,10 @@ export default function Mapper() {
   // GHL fields
   const [ghlFields, setGhlFields] = useState([]);
   const [fieldsFallback, setFieldsFallback] = useState(false);
+
+  // GHL pipelines + stages (for pipeline / opportunity_stage mappers)
+  const [ghlPipelines, setGhlPipelines] = useState([]);
+  const [pipelinesFallback, setPipelinesFallback] = useState(false);
 
   // Load all mappers, existing mapper (edit mode), and GHL fields in parallel
   useEffect(() => {
@@ -178,6 +270,16 @@ export default function Mapper() {
         })
         .then((d) => setGhlFields(d.fields ?? []))
         .catch(() => setFieldsFallback(true)),
+    );
+
+    promises.push(
+      fetchWithAuth('/api/ghl/pipelines')
+        .then((r) => {
+          if (!r.ok) throw new Error('pipelines unavailable');
+          return r.json();
+        })
+        .then((d) => setGhlPipelines(d.pipelines ?? []))
+        .catch(() => setPipelinesFallback(true)),
     );
 
     Promise.all(promises).finally(() => setLoading(false));
@@ -231,6 +333,22 @@ export default function Mapper() {
 
   const otherMappers = allMappers.filter((m) => m.id !== id);
 
+  // GHL value input mode depends on the mapper type.
+  const isPipelineType = form.mapperType === 'pipeline';
+  const isStageType = form.mapperType === 'opportunity_stage';
+  const isTagType = form.mapperType === 'contact_tag';
+  const ghlValueLabel = isPipelineType
+    ? 'GHL Pipeline'
+    : isStageType
+      ? 'GHL Stage'
+      : isTagType
+        ? 'GHL Tag'
+        : 'GHL Field';
+  const ghlValueFallback =
+    isPipelineType || isStageType ? pipelinesFallback : isTagType ? false : fieldsFallback;
+  const externalKeySuggestions = EXTERNAL_KEY_SUGGESTIONS[form.appSlug]?.[form.mapperType] ?? [];
+  const externalKeyHint = externalKeySuggestions.length ? externalKeySuggestions[0] : 'e.g. STAGE_WON';
+
   return (
     <div className="space-y-6">
       <div>
@@ -282,31 +400,62 @@ export default function Mapper() {
               <Label htmlFor="externalKey">External Key</Label>
               <Input
                 id="externalKey"
-                placeholder="e.g. STAGE_WON"
+                placeholder={externalKeyHint}
                 value={form.externalKey}
                 onChange={set('externalKey')}
                 disabled={!isNew}
+                list={externalKeySuggestions.length ? 'externalKeySuggestions' : undefined}
                 required
               />
+              {externalKeySuggestions.length > 0 && (
+                <datalist id="externalKeySuggestions">
+                  {externalKeySuggestions.map((s) => <option key={s} value={s} />)}
+                </datalist>
+              )}
             </div>
 
-            {/* GHL field — searchable dropdown or fallback text input */}
+            {/* GHL value — pipeline / stage selector or searchable custom-field dropdown */}
             <div className="space-y-1.5">
               <Label htmlFor="ghlValue">
-                GHL Field
-                {fieldsFallback && (
-                  <span className="ml-2 text-xs text-muted-foreground">(enter field key manually)</span>
+                {ghlValueLabel}
+                {ghlValueFallback && (
+                  <span className="ml-2 text-xs text-muted-foreground">(enter id manually)</span>
                 )}
               </Label>
-              <GhlFieldSelect
-                value={form.ghlValue}
-                onChange={handleGhlFieldChange}
-                fields={ghlFields}
-                fallback={fieldsFallback}
-              />
+              {isPipelineType ? (
+                <GhlPipelineStageSelect
+                  mode="pipeline"
+                  value={form.ghlValue}
+                  onChange={handleGhlFieldChange}
+                  pipelines={ghlPipelines}
+                  fallback={pipelinesFallback}
+                />
+              ) : isStageType ? (
+                <GhlPipelineStageSelect
+                  mode="stage"
+                  value={form.ghlValue}
+                  onChange={handleGhlFieldChange}
+                  pipelines={ghlPipelines}
+                  fallback={pipelinesFallback}
+                />
+              ) : isTagType ? (
+                <Input
+                  placeholder="Tag to apply, e.g. idearoom-lead"
+                  value={form.ghlValue}
+                  onChange={(e) => handleGhlFieldChange(e.target.value, e.target.value)}
+                  required
+                />
+              ) : (
+                <GhlFieldSelect
+                  value={form.ghlValue}
+                  onChange={handleGhlFieldChange}
+                  fields={ghlFields}
+                  fallback={fieldsFallback}
+                />
+              )}
               {/* Hidden input ensures form validation fires if empty */}
               <input type="hidden" value={form.ghlValue} required />
-              {form.ghlValue && !fieldsFallback && (
+              {form.ghlValue && !ghlValueFallback && (
                 <p className="text-xs text-muted-foreground font-mono">{form.ghlValue}</p>
               )}
             </div>

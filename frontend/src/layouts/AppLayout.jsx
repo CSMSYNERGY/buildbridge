@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: '/buildbridge/subscription', label: 'Subscription'                },
   { to: '/buildbridge/mappers',      label: 'Mappers'                     },
   { to: '/buildbridge/smartbuild',   label: 'SmartBuild Config'           },
+  { to: '/buildbridge/idearoom',     label: 'IdeaRoom'                    },
   { to: '/buildbridge/quickbooks',   label: 'QuickBooks'                  },
 ];
 

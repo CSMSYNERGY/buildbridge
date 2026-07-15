@@ -8,6 +8,7 @@ import Subscription from './pages/Subscription.jsx';
 import Mappers from './pages/Mappers.jsx';
 import Mapper from './pages/Mapper.jsx';
 import SmartBuild from './pages/SmartBuild.jsx';
+import IdeaRoom from './pages/IdeaRoom.jsx';
 import QuickBooks from './pages/QuickBooks.jsx';
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="mappers/new" element={<Mapper />} />
             <Route path="mappers/:id" element={<Mapper />} />
             <Route path="smartbuild" element={<SmartBuild />} />
+            <Route path="idearoom" element={<IdeaRoom />} />
             <Route path="quickbooks" element={<QuickBooks />} />
           </Route>
           {/* Redirect bare root to /buildbridge */}

@@ -8,6 +8,7 @@ import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { randomUUID } from 'crypto';
+import { env } from '../core/env.js';
 import * as deposytService from '../services/deposytService.js';
 import * as subscriptionService from '../services/subscriptionService.js';
 import { makeGhlRequest } from '../services/ghlService.js';
@@ -128,6 +129,33 @@ export async function getGhlFields(req, res, next) {
     }));
 
     res.json({ fields });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * List the location's GHL pipelines with their stages, for the Mapper UI's
+ * pipeline / opportunity_stage selectors (ghlValue = pipeline id / stage id).
+ */
+export async function getGhlPipelines(req, res, next) {
+  try {
+    const { locationId } = req.user;
+
+    const data = await makeGhlRequest(
+      locationId,
+      'GET',
+      `/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`,
+    );
+
+    // GHL returns { pipelines: [{ id, name, stages: [{ id, name, position }] }] }
+    const pipelines = (data?.pipelines ?? []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      stages: (p.stages ?? []).map((s) => ({ id: s.id, name: s.name })),
+    }));
+
+    res.json({ pipelines });
   } catch (err) {
     next(err);
   }
@@ -305,5 +333,129 @@ export async function saveSmartBuildConfig(req, res, next) {
     res.json({ success: true, id: row.id });
   } catch (err) {
     next(err);
+  }
+}
+
+// ─── IdeaRoom Config (integration_credentials) ───────────────────────────────
+// IdeaRoom leads arrive via an inbound webhook (POST /webhooks/idearoom/:locationId),
+// so unlike SmartBuild there is no password to store. We persist the per-location
+// `client-id` (e.g. 'carportview-built-rite-buildings') and, optionally, the REST
+// `x-api-key` used for the on-demand pull path. See docs/idearoom-integration.md.
+
+const IDEAROOM_SLUG = 'idearoom';
+
+async function loadIdearoomCredentials(locationId) {
+  const [row] = await db
+    .select()
+    .from(integrationCredentials)
+    .where(
+      and(
+        eq(integrationCredentials.locationId, locationId),
+        eq(integrationCredentials.appSlug, IDEAROOM_SLUG),
+      ),
+    )
+    .limit(1);
+  return row ? JSON.parse(decrypt(row.encryptedPayload)) : null;
+}
+
+export async function getIdearoomConfig(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const creds = await loadIdearoomCredentials(locationId);
+    if (!creds) return res.json({ config: null });
+    // Never return the API key itself — only whether one is stored.
+    res.json({ config: { clientId: creds.clientId ?? null, hasApiKey: !!creds.apiKey } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function saveIdearoomConfig(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const { clientId, apiKey } = req.body;
+
+    if (!clientId) throw createError(400, 'clientId is required');
+
+    // Keep the existing API key when one isn't re-supplied (so saving the
+    // client-id alone doesn't wipe a previously stored key).
+    let resolvedApiKey = apiKey;
+    if (resolvedApiKey === undefined || resolvedApiKey === '') {
+      const existing = await loadIdearoomCredentials(locationId);
+      resolvedApiKey = existing?.apiKey ?? '';
+    }
+
+    const config = { clientId, apiKey: resolvedApiKey };
+    const encryptedPayload = encrypt(JSON.stringify(config));
+
+    const [row] = await db
+      .insert(integrationCredentials)
+      .values({
+        id: randomUUID(),
+        locationId,
+        appSlug: IDEAROOM_SLUG,
+        encryptedPayload,
+      })
+      .onConflictDoUpdate({
+        target: [integrationCredentials.locationId, integrationCredentials.appSlug],
+        set: { encryptedPayload, updatedAt: new Date() },
+      })
+      .returning();
+
+    res.json({ success: true, id: row.id });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function deleteIdearoomConfig(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    await db
+      .delete(integrationCredentials)
+      .where(
+        and(
+          eq(integrationCredentials.locationId, locationId),
+          eq(integrationCredentials.appSlug, IDEAROOM_SLUG),
+        ),
+      );
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Probe the IdeaRoom REST API to validate the stored/supplied credentials.
+ * A bogus hash returns 404 when auth is accepted and 401/403 when the key or
+ * client-id is rejected, so we treat any non-auth status as success.
+ */
+export async function testIdearoomConnection(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    let { clientId, apiKey } = req.body ?? {};
+
+    if (!clientId || !apiKey) {
+      const existing = await loadIdearoomCredentials(locationId);
+      clientId = clientId || existing?.clientId;
+      apiKey = apiKey || existing?.apiKey;
+    }
+    if (!clientId || !apiKey) {
+      return res.status(400).json({ success: false, error: 'client-id and API key are required to test.' });
+    }
+    if (!env.IDEAROOM_API_BASE_URL) {
+      return res.status(503).json({ success: false, error: 'IdeaRoom API base URL not configured.' });
+    }
+
+    const r = await fetch(`${env.IDEAROOM_API_BASE_URL}/v1/orders/connection-test`, {
+      headers: { 'x-api-key': apiKey, 'client-id': clientId },
+    });
+
+    if (r.status === 401 || r.status === 403) {
+      return res.status(401).json({ success: false, error: 'IdeaRoom rejected the API key / client-id.' });
+    }
+    res.json({ success: true, status: r.status });
+  } catch {
+    res.status(502).json({ success: false, error: 'Could not reach the IdeaRoom API.' });
   }
 }
