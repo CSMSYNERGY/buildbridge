@@ -23,7 +23,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "drizzle-orm": "^0.39.3",
+    "drizzle-orm": "^0.45.2",
     "envalid": "^8.0.0",
     "express": "^5.0.1",
     "express-rate-limit": "^7.5.0",
@@ -35,7 +35,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.30.4",
+    "drizzle-kit": "^0.31.10",
     "supertest": "^7.0.0",
     "vitest": "^3.0.8"
   }
