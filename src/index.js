@@ -73,17 +73,23 @@ app.use(cookieParser());
 // pool saturates and every DB request times out. finish/close stay as backups.
 app.use((req, res, next) => {
   const store = {};
-  const cleanup = () => {
-    if (store.pool && !store.closed) console.log('[dbstore] closing request pool');
-    closeRequestDb(store);
-  };
   const origEnd = res.end.bind(res);
   res.end = function patchedEnd(...args) {
-    cleanup();
+    // Close the request's DB client BEFORE the response goes out. Ordering is load-
+    // bearing: once the response is sent, the Workers runtime tears down the request's
+    // I/O context, and an in-flight async close never completes — Hyperdrive then sees
+    // an abrupt half-closed connection instead of a clean Terminate and parks the
+    // dirty origin connection for minutes. Enough of those exhausts its origin pool
+    // (limit 20) and every subsequent query in every request times out.
+    if (store.pool && !store.closed) {
+      console.log('[dbstore] closing request client before response');
+      closeRequestDb(store).catch(() => {}).finally(() => origEnd(...args));
+      return res;
+    }
     return origEnd(...args);
   };
-  res.once('finish', cleanup);
-  res.once('close', cleanup);
+  // Backup for paths that never reach res.end (aborted requests).
+  res.once('close', () => closeRequestDb(store));
   dbContext.run(store, () => next());
 });
 
@@ -105,18 +111,30 @@ app.get('/health', (_req, res) => {
 app.get('/health/db', async (_req, res) => {
   const started = Date.now();
   const hasStore = Boolean(dbContext.getStore());
+  const out = { store: hasStore };
+  // 1. Simple protocol (no params)
   try {
     await db.execute(sql`select 1 as ok`);
-    res.json({ db: 'ok', ms: Date.now() - started, store: hasStore });
+    out.simple = `ok (${Date.now() - started}ms)`;
   } catch (err) {
-    console.error('[health/db] DB check failed:', err);
-    res.status(500).json({ db: 'error', ms: Date.now() - started, store: hasStore, message: err.message });
+    out.simple = `error (${Date.now() - started}ms): ${err.message}`;
   }
+  // 2. Extended protocol (parameterized) against the same table the QBO config reads
+  const t2 = Date.now();
+  try {
+    await db.execute(sql`select count(*) as n from integration_credentials where location_id = ${'health-probe'}`);
+    out.parameterized = `ok (${Date.now() - t2}ms)`;
+  } catch (err) {
+    out.parameterized = `error (${Date.now() - t2}ms): ${err.message}`;
+  }
+  const failed = [out.simple, out.parameterized].some((v) => String(v).startsWith('error'));
+  res.status(failed ? 500 : 200).json({ db: failed ? 'error' : 'ok', ms: Date.now() - started, ...out });
 });
 
 // (Temporary DB-hang diagnostics removed 2026-07-15 — root cause found: socket-based
 // PG drivers hang under the cloudflare:node httpServerHandler bridge; fixed in
 // core/db/client.js with a static-import cloudflare:sockets adapter over Hyperdrive.)
+
 // API Routes
 app.use('/auth', authRoutes);
 app.use('/auth/quickbooks', quickbooksRoutes);
