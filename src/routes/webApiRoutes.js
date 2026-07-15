@@ -5,6 +5,7 @@ import { authLimiter, actionLimiter } from '../core/middleware/rateLimiter.js';
 import {
   getMe,
   getPlans,
+  getMySubscriptions,
   createSubscriptionHandler,
   cancelSubscriptionHandler,
   getGhlFields,
@@ -37,12 +38,16 @@ router.post('/logout', (_req, res) => {
   res.json({ success: true });
 });
 
+// Plans are public pricing info, so the Subscription page renders standalone
+// (e.g. opened directly, outside the GHL SSO iframe). Subscribing still requires auth.
+router.get('/subscription/plans', getPlans);
+
 // ─── Protected ────────────────────────────────────────────────────────────────
 
 router.use(requireAuth);
 
 router.get('/me', getMe);
-router.get('/subscription/plans', getPlans);
+router.get('/subscription/mine', getMySubscriptions);
 router.post('/subscription/create', actionLimiter, createSubscriptionHandler);
 router.delete('/subscription/cancel', actionLimiter, cancelSubscriptionHandler);
 

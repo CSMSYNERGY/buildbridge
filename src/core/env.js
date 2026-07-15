@@ -35,6 +35,14 @@ export const env = cleanEnv(process.env, {
   DEPOSYT_PRIVATE_API_KEY: str(),
   DEPOSYT_WEBHOOK_SIGNING_KEY: str(),
 
+  // NMI / Deposyt gateway — recurring billing via the Payment API (transact.php)
+  // and Collect.js card tokenization. NMI_SECURITY_KEY is the private server-side
+  // key; NMI_TOKENIZATION_KEY is the public Collect.js key sent to the browser.
+  // Leave NMI_SECURITY_KEY blank to disable checkout (create returns 503).
+  NMI_GATEWAY_URL: url({ default: 'https://deposyt.transactiongateway.com' }),
+  NMI_SECURITY_KEY: str({ default: '' }),
+  NMI_TOKENIZATION_KEY: str({ default: '' }),
+
   // Intuit / QuickBooks Online (OAuth2) — optional; leave blank to disable the
   // QuickBooks integration. When blank, the Connect flow returns a 503.
   INTUIT_CLIENT_ID: str({ default: '' }),

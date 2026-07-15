@@ -27,6 +27,10 @@ import adminRoutes from './routes/adminRoutes.js';
 console.log('[index] All imports resolved. Configuring Express...');
 const app = express();
 
+// Collect.js (card tokenization) loads its script and hosted-field iframes from
+// the NMI/Deposyt gateway, so the CSP must allow that origin for scripts/frames/XHR.
+const nmiOrigin = new URL(env.NMI_GATEWAY_URL).origin;
+
 // Trust the Cloudflare proxy (needed for rate limiting and correct IP detection).
 // On Workers the real client IP arrives in the CF-Connecting-IP header.
 app.set('trust proxy', 1);
@@ -36,12 +40,15 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", nmiOrigin],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
-      // Monday.com WorkForms embedded by the feedback widget (without this,
-      // frame-src falls back to default-src 'self' and the iframe is blocked)
-      frameSrc: ['https://forms.monday.com', 'https://*.monday.com'],
+      // Collect.js tokenization talks to the gateway origin.
+      connectSrc: ["'self'", nmiOrigin],
+      // Monday.com WorkForms embedded by the feedback widget + Collect.js hosted
+      // card-field iframes from the gateway (without this, frame-src falls back to
+      // default-src 'self' and the iframes are blocked)
+      frameSrc: ['https://forms.monday.com', 'https://*.monday.com', nmiOrigin],
       // Allow GHL to embed in an iframe (removes the default 'self' restriction)
       frameAncestors: null,
     },
