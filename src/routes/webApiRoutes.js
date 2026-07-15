@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../core/auth/jwt.js';
+import { requireAuth, clearAuthCookie } from '../core/auth/jwt.js';
 import { ghlSsoController } from '../core/auth/sso.js';
 import { authLimiter, actionLimiter } from '../core/middleware/rateLimiter.js';
 import {
@@ -26,9 +26,16 @@ const router = Router();
 
 // ─── Public (no auth) ─────────────────────────────────────────────────────────
 
-// GET|POST /api/sso/decrypt — GHL SSO entry point (issues cookie, redirects to /buildbridge)
+// GET|POST /api/sso/decrypt — GHL SSO entry point (issues cookie; GET redirects to
+// /buildbridge, POST responds JSON {user, token} for the embedded-iframe handshake)
 router.get('/sso/decrypt', authLimiter, ghlSsoController);
 router.post('/sso/decrypt', authLimiter, ghlSsoController);
+
+// POST /api/logout — clear the session cookie (the SPA also drops its Bearer token)
+router.post('/logout', (_req, res) => {
+  clearAuthCookie(res);
+  res.json({ success: true });
+});
 
 // ─── Protected ────────────────────────────────────────────────────────────────
 

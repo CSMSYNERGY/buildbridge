@@ -7,6 +7,10 @@ const COOKIE_OPTIONS = {
   httpOnly: true,
   secure: env.NODE_ENV === 'production',
   sameSite: 'none',
+  // CHIPS: lets the cookie work when the app is embedded in GHL's iframe on
+  // browsers that block unpartitioned third-party cookies (the cookie is scoped
+  // per top-level site). Browsers that don't support it ignore the attribute.
+  partitioned: env.NODE_ENV === 'production',
   maxAge: 60 * 60 * 24 * 7 * 1000, // 7 days in ms
   path: '/',
 };
@@ -21,8 +25,24 @@ export function clearAuthCookie(res) {
   res.clearCookie(COOKIE_NAME, { path: '/' });
 }
 
+/**
+ * Resolve the session token from the cookie or, as a fallback, from an
+ * Authorization: Bearer header. The header path exists for the embedded-in-GHL
+ * iframe, where some browsers refuse third-party cookies entirely — the SPA then
+ * holds the token from /api/sso/decrypt in memory and sends it per-request.
+ */
+function extractToken(req) {
+  const cookieToken = req.cookies?.[COOKIE_NAME];
+  if (cookieToken) return cookieToken;
+
+  const auth = req.headers?.authorization;
+  if (auth?.startsWith('Bearer ')) return auth.slice(7);
+
+  return null;
+}
+
 export function requireAuth(req, res, next) {
-  const token = req.cookies?.[COOKIE_NAME];
+  const token = extractToken(req);
 
   if (!token) {
     return next(createError(401, 'Authentication required'));

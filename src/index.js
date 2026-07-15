@@ -8,8 +8,9 @@ import { requestLogger } from './core/middleware/logger.js';
 import { generalLimiter } from './core/middleware/rateLimiter.js';
 import { errorHandler } from './core/middleware/errorHandler.js';
 import { env } from './core/env.js';
-import { sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { db, dbContext, closeRequestDb } from './core/db/client.js';
+import { integrationCredentials } from './core/db/schema.js';
 
 // Integrations (register webhook handlers + scheduler jobs at import time)
 import './integrations/yoderBarnes.js';
@@ -110,25 +111,18 @@ app.get('/health', (_req, res) => {
 // timeout in src/worker.js).
 app.get('/health/db', async (_req, res) => {
   const started = Date.now();
-  const hasStore = Boolean(dbContext.getStore());
-  const out = { store: hasStore };
-  // 1. Simple protocol (no params)
   try {
-    await db.execute(sql`select 1 as ok`);
-    out.simple = `ok (${Date.now() - started}ms)`;
+    // One representative probe: parameterized builder select ('all' method) against
+    // a real table — the same shape the app's endpoints use.
+    const rows = await db.select({ id: integrationCredentials.id })
+      .from(integrationCredentials)
+      .where(eq(integrationCredentials.appSlug, 'quickbooks'))
+      .limit(1);
+    res.json({ db: 'ok', ms: Date.now() - started, rows: rows.length });
   } catch (err) {
-    out.simple = `error (${Date.now() - started}ms): ${err.message}`;
+    console.error('[health/db] DB check failed:', err?.message);
+    res.status(500).json({ db: 'error', ms: Date.now() - started, message: err.message });
   }
-  // 2. Extended protocol (parameterized) against the same table the QBO config reads
-  const t2 = Date.now();
-  try {
-    await db.execute(sql`select count(*) as n from integration_credentials where location_id = ${'health-probe'}`);
-    out.parameterized = `ok (${Date.now() - t2}ms)`;
-  } catch (err) {
-    out.parameterized = `error (${Date.now() - t2}ms): ${err.message}`;
-  }
-  const failed = [out.simple, out.parameterized].some((v) => String(v).startsWith('error'));
-  res.status(failed ? 500 : 200).json({ db: failed ? 'error' : 'ok', ms: Date.now() - started, ...out });
 });
 
 // (Temporary DB-hang diagnostics removed 2026-07-15 — root cause found: socket-based

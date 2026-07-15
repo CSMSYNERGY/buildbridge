@@ -13,12 +13,30 @@ const NAV_ITEMS = [
 ];
 
 export default function AppLayout() {
-  const { user, logout, loading } = useAuth();
+  const { user, logout, loading, embedded } = useAuth();
 
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        Loading…
+        {embedded ? 'Signing you in from HighLevel…' : 'Loading…'}
+      </div>
+    );
+  }
+
+  // Signed out. Standalone visitors are auto-redirected to /auth by AuthProvider;
+  // this state is only reachable when the embedded SSO handshake failed.
+  if (!user) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 p-6 text-center">
+        <Hammer className="h-8 w-8" style={{ color: '#3d3672' }} />
+        <p className="text-sm font-medium">We couldn't sign you in automatically.</p>
+        <p className="max-w-sm text-xs text-muted-foreground">
+          Reload this page to retry, or open BuildBridge in its own tab and log in with
+          your HighLevel account.
+        </p>
+        <Button asChild size="sm" style={{ backgroundColor: '#3d3672' }}>
+          <a href="/auth" target="_top" rel="noreferrer">Log in with HighLevel</a>
+        </Button>
       </div>
     );
   }
