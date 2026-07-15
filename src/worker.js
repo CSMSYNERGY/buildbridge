@@ -11,9 +11,10 @@ import './core/cf-env-bridge.js';
 
 import { createServer } from 'node:http';
 import { httpServerHandler } from 'cloudflare:node';
+import { sql } from 'drizzle-orm';
 import app from './index.js';
 import { runDueJobs } from './core/scheduler.js';
-import { dbContext, closeRequestDb } from './core/db/client.js';
+import { db, dbContext, closeRequestDb } from './core/db/client.js';
 
 // Express `app` is a standard (req, res) handler, so it plugs straight into a
 // Node HTTP server. The port is internal to the Worker sandbox — the runtime
@@ -51,18 +52,29 @@ export default {
     );
   },
 
-  // Cron Trigger (wrangler.jsonc `triggers.crons`) → run the QBO jobs that the
-  // integration modules registered at import time (through ./index.js). This
-  // replaces the in-process setInterval scheduler, which the Workers runtime
-  // forbids. waitUntil keeps the isolate alive until the jobs settle.
-  async scheduled(_event, _env, ctx) {
-    // Establish a per-run DB store (like the Express middleware) so the cron jobs get a
-    // single pooled connection that is closed when the run finishes.
+  // Cron Triggers (wrangler.jsonc `triggers.crons`) — two schedules, branched by
+  // the firing pattern:
+  //   • "*/2 * * * *"  → warm-up: a trivial DB round-trip. Keeps isolates + the
+  //     Hyperdrive path warm so real traffic doesn't land on a cold isolate (the
+  //     first connect in a cold isolate can lose the connect race and fail once).
+  //   • "*/15 * * * *" → the QBO jobs that the integration modules registered at
+  //     import time (through ./index.js). Replaces the in-process setInterval
+  //     scheduler, which the Workers runtime forbids.
+  // waitUntil keeps the isolate alive until the run settles.
+  async scheduled(event, _env, ctx) {
+    // Establish a per-run DB store (like the Express middleware) so the run gets a
+    // single client that is closed when the run finishes.
     const store = {};
     ctx.waitUntil(
       dbContext.run(store, async () => {
         try {
-          await runDueJobs();
+          if (event.cron === '*/2 * * * *') {
+            await db.execute(sql`select 1 as warmup`);
+          } else {
+            await runDueJobs();
+          }
+        } catch (err) {
+          console.error(`[worker] scheduled run failed (${event.cron}):`, err?.message);
         } finally {
           await closeRequestDb(store);
         }
