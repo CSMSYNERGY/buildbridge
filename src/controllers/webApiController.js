@@ -3,14 +3,16 @@ import {
   plans,
   mappers,
   integrationCredentials,
+  subscriptions,
 } from '../core/db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { randomUUID } from 'crypto';
-import * as deposytService from '../services/deposytService.js';
+import * as nmiService from '../services/nmiService.js';
 import * as subscriptionService from '../services/subscriptionService.js';
 import { makeGhlRequest } from '../services/ghlService.js';
+import { env } from '../core/env.js';
 
 // ─── Me ──────────────────────────────────────────────────────────────────────
 
@@ -34,7 +36,16 @@ export async function getPlans(_req, res, next) {
       return acc;
     }, {});
 
-    res.json({ plans: rows, grouped });
+    res.json({
+      plans: rows,
+      grouped,
+      // Public checkout config for Collect.js. The tokenization key is a public
+      // client-side key (safe to expose); the private security key stays server-side.
+      checkout: {
+        tokenizationKey: env.NMI_TOKENIZATION_KEY,
+        collectJsUrl: `${env.NMI_GATEWAY_URL.replace(/\/+$/, '')}/token/Collect.js`,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -45,25 +56,44 @@ export async function getPlans(_req, res, next) {
 export async function createSubscriptionHandler(req, res, next) {
   try {
     const { locationId } = req.user;
-    const { planId, name, email } = req.body;
+    const { planId, paymentToken, name, email } = req.body;
 
     if (!planId) throw createError(400, 'planId is required');
+    if (!paymentToken) throw createError(400, 'paymentToken is required');
 
-    // Create the subscription in Deposyt first
-    const deposytSub = await deposytService.createSubscription(planId, {
-      name,
+    // Validate the plan exists and is active.
+    const [plan] = await db
+      .select()
+      .from(plans)
+      .where(and(eq(plans.id, planId), eq(plans.isActive, true)))
+      .limit(1);
+    if (!plan) throw createError(404, `Unknown or inactive plan: ${planId}`);
+
+    const nameParts = (name ?? '').trim().split(/\s+/).filter(Boolean);
+    const firstName = nameParts[0] ?? '';
+    const lastName = nameParts.slice(1).join(' ');
+
+    // Start the recurring subscription in the NMI/Deposyt gateway with the
+    // Collect.js token, against the mapped gateway plan.
+    const nmiSub = await nmiService.createSubscription({
+      appPlanId: planId,
+      paymentToken,
+      firstName,
+      lastName,
       email,
       locationId,
     });
 
-    // Persist locally
+    // Estimate the current period end from the plan's billing interval; a gateway
+    // webhook can refine it later.
+    const days = plan.billingInterval === 'annual' ? 365 : 30;
+    const periodEnd = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
     const sub = await subscriptionService.createSubscription(
       locationId,
-      deposytSub.id,
+      nmiSub.subscriptionId,
       planId,
-      deposytSub.current_period_end
-        ? new Date(deposytSub.current_period_end * 1000)
-        : null,
+      periodEnd,
     );
 
     res.status(201).json({ subscription: sub });
@@ -72,18 +102,38 @@ export async function createSubscriptionHandler(req, res, next) {
   }
 }
 
+/**
+ * GET /api/subscription/mine — active subscriptions for the caller's location,
+ * joined with plan details (powers the "current plan" UI).
+ */
+export async function getMySubscriptions(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const rows = await subscriptionService.getActiveSubscriptions(locationId);
+    res.json({ subscriptions: rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function cancelSubscriptionHandler(req, res, next) {
   try {
     const { locationId } = req.user;
-    const { deposytSubId } = req.body;
+    const { subscriptionId } = req.body;
 
-    if (!deposytSubId) throw createError(400, 'deposytSubId is required');
+    if (!subscriptionId) throw createError(400, 'subscriptionId is required');
 
-    // Cancel in Deposyt
-    await deposytService.cancelSubscription(deposytSubId);
+    // Verify the subscription belongs to this location before cancelling it.
+    const [owned] = await db
+      .select()
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, subscriptionId), eq(subscriptions.locationId, locationId)))
+      .limit(1);
+    if (!owned) throw createError(404, 'Subscription not found');
 
-    // Update local record
-    const sub = await subscriptionService.cancelSubscription(deposytSubId);
+    // Cancel in the gateway, then mark the local record cancelled.
+    await nmiService.cancelSubscription(subscriptionId);
+    const sub = await subscriptionService.cancelSubscription(subscriptionId);
 
     res.json({ success: true, subscription: sub });
   } catch (err) {
