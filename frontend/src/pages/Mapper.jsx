@@ -11,7 +11,17 @@ import { ChevronDown, Search } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 
 const APP_SLUGS = ['smartbuild', 'idearoom', 'quickbooks', 'monday'];
-const MAPPER_TYPES = ['opportunity_stage', 'contact_tag', 'pipeline', 'custom_field'];
+const MAPPER_TYPES = [
+  'opportunity_stage',
+  'contact_tag',
+  'pipeline',
+  'custom_field',
+  // QuickBooks milestone mapping (Yoder model): external key is the milestone
+  // (deposit | materials_delivery | roof_completion | project_completion),
+  // GHL value is the field holding that milestone's amount / date.
+  'milestone_amount',
+  'milestone_date',
+];
 
 // ─── Searchable GHL field dropdown ───────────────────────────────────────────
 

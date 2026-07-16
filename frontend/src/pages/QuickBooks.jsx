@@ -1,11 +1,33 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { useSearchParams, Link } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
 import { useToast } from '../components/ui/toast.jsx';
 import { Button } from '../components/ui/button.jsx';
+import { Input } from '../components/ui/input.jsx';
+import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { CheckCircle2, XCircle, LogOut, Link2 } from 'lucide-react';
+import { CheckCircle2, XCircle, LogOut, Link2, RefreshCw, Receipt } from 'lucide-react';
+
+// Small controlled on/off switch (no dedicated Switch component in the kit).
+function Toggle({ checked, onChange, disabled }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50"
+      style={{ backgroundColor: checked ? '#1b7895' : '#cbd5e1' }}
+    >
+      <span
+        className="inline-block h-5 w-5 transform rounded-full bg-white transition-transform"
+        style={{ transform: checked ? 'translateX(22px)' : 'translateX(2px)' }}
+      />
+    </button>
+  );
+}
 
 export default function QuickBooks() {
   const { fetchWithAuth } = useAuth();
@@ -16,14 +38,28 @@ export default function QuickBooks() {
   const [config, setConfig] = useState(null); // { realmId, environment } | null
   const [disconnecting, setDisconnecting] = useState(false);
 
+  // Per-tenant feature settings
+  const [settings, setSettings] = useState(null);
+  const [pipelines, setPipelines] = useState([]);
+  const [saving, setSaving] = useState(false);
+
   const isConnected = !!config;
 
   useEffect(() => {
-    fetchWithAuth('/api/quickbooks/config')
-      .then((r) => r.json())
-      .then((d) => setConfig(d.config ?? null))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    Promise.all([
+      fetchWithAuth('/api/quickbooks/config')
+        .then((r) => r.json())
+        .then((d) => setConfig(d.config ?? null))
+        .catch(() => {}),
+      fetchWithAuth('/api/quickbooks/settings')
+        .then((r) => r.json())
+        .then((d) => setSettings(d.settings ?? null))
+        .catch(() => {}),
+      fetchWithAuth('/api/ghl/pipelines')
+        .then((r) => (r.ok ? r.json() : { pipelines: [] }))
+        .then((d) => setPipelines(d.pipelines ?? []))
+        .catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, [fetchWithAuth]);
 
   // Surface the OAuth round-trip result (?connected=1 / ?error=...) then clean the URL.
@@ -60,7 +96,39 @@ export default function QuickBooks() {
     }
   }
 
+  const setField = (field) => (value) => setSettings((s) => ({ ...s, [field]: value }));
+
+  async function handleSaveSettings() {
+    setSaving(true);
+    try {
+      const res = await fetchWithAuth('/api/quickbooks/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          qboTwoWaySync: settings.qboTwoWaySync,
+          qboMilestoneInvoicing: settings.qboMilestoneInvoicing,
+          qboContactSyncPipelineId: settings.qboContactSyncPipelineId || null,
+          qboInvoiceLeadDays: Number(settings.qboInvoiceLeadDays) || 0,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save');
+      setSettings(data.settings);
+      toast({ title: 'Settings saved' });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground text-sm">Loading configuration…</p>;
+
+  const s = settings ?? {
+    qboTwoWaySync: false,
+    qboMilestoneInvoicing: false,
+    qboContactSyncPipelineId: null,
+    qboInvoiceLeadDays: 3,
+  };
 
   return (
     <div style={{ position: 'relative' }}>
@@ -138,6 +206,109 @@ export default function QuickBooks() {
                 <Link2 className="h-4 w-4" />
                 Connect to QuickBooks
               </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Feature Settings — one app, opt into whichever aspects this client uses */}
+        {isConnected && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base" style={{ color: '#3d3672' }}>Integration Settings</CardTitle>
+              <CardDescription>
+                Turn on only the parts this company needs. Both are off until you enable them.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Two-way sync (Rockwood) */}
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
+                    <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Two-way contact &amp; estimate sync</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Keep contacts and estimates in step between QuickBooks and HighLevel (last edit wins).
+                  </p>
+                </div>
+                <Toggle checked={s.qboTwoWaySync} onChange={setField('qboTwoWaySync')} />
+              </div>
+
+              {/* Contact-sync pipeline (only meaningful when two-way is on) */}
+              {s.qboTwoWaySync && (
+                <div className="space-y-1.5 pl-6">
+                  <Label htmlFor="pipeline">Push contacts to QuickBooks from pipeline</Label>
+                  <select
+                    id="pipeline"
+                    value={s.qboContactSyncPipelineId ?? ''}
+                    onChange={(e) => setField('qboContactSyncPipelineId')(e.target.value || null)}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="">All contacts (no pipeline filter)</option>
+                    {pipelines.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Only create QuickBooks customers for contacts that have an opportunity in this pipeline
+                    (e.g. once a lead moves into "Buildings"). Edits to already-synced contacts always flow through.
+                  </p>
+                </div>
+              )}
+
+              <div className="h-px bg-border" />
+
+              {/* Milestone invoicing (Yoder) */}
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Receipt className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
+                    <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Milestone auto-invoicing</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    When an opportunity is Won, create the QuickBooks customer and schedule milestone invoices
+                    (deposit, materials, roof, completion).
+                  </p>
+                </div>
+                <Toggle checked={s.qboMilestoneInvoicing} onChange={setField('qboMilestoneInvoicing')} />
+              </div>
+
+              {s.qboMilestoneInvoicing && (
+                <div className="space-y-3 pl-6">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="leadDays">Invoice lead time (days before each milestone date)</Label>
+                    <Input
+                      id="leadDays"
+                      type="number"
+                      min="0"
+                      className="max-w-[120px]"
+                      value={s.qboInvoiceLeadDays ?? 3}
+                      onChange={(e) => setField('qboInvoiceLeadDays')(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      The deposit is invoiced immediately on Won; the others this many days before their date.
+                    </p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Map each milestone's amount and date fields under{' '}
+                    <Link to="/buildbridge/mappers" className="underline" style={{ color: '#1b7895' }}>Mappers</Link>{' '}
+                    (app <span className="font-mono">quickbooks</span>, types{' '}
+                    <span className="font-mono">milestone_amount</span> / <span className="font-mono">milestone_date</span>).
+                  </p>
+                </div>
+              )}
+
+              <div className="pt-1">
+                <Button
+                  type="button"
+                  onClick={handleSaveSettings}
+                  disabled={saving}
+                  className="text-white"
+                  style={{ backgroundColor: '#3d3672' }}
+                >
+                  {saving ? 'Saving…' : 'Save settings'}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         )}

@@ -133,6 +133,31 @@ export async function getGhlFields(req, res, next) {
   }
 }
 
+// ─── GHL Pipelines ─────────────────────────────────────────────────────────
+
+export async function getGhlPipelines(req, res, next) {
+  try {
+    const { locationId } = req.user;
+
+    const data = await makeGhlRequest(
+      locationId,
+      'GET',
+      `/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`,
+    );
+
+    // GHL returns { pipelines: [{ id, name, stages: [{ id, name }] }] }
+    const pipelines = (data?.pipelines ?? []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      stages: (p.stages ?? []).map((s) => ({ id: s.id, name: s.name })),
+    }));
+
+    res.json({ pipelines });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function createMapper(req, res, next) {
   try {
     const { locationId } = req.user;

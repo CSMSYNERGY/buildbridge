@@ -11,6 +11,10 @@ import {
   getCredentialsOrNull,
   revokeToken,
 } from '../services/quickbooksService.js';
+import {
+  getLocationSettings,
+  upsertLocationSettings,
+} from '../services/locationSettingsService.js';
 
 const QUICKBOOKS_SLUG = 'quickbooks';
 const STATE_PURPOSE = 'qbo_oauth';
@@ -96,6 +100,57 @@ export async function getQuickBooksConfig(req, res, next) {
         environment: env.QBO_ENVIRONMENT,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Shape the settings row into the public JSON the frontend consumes.
+function serializeSettings(s) {
+  return {
+    qboTwoWaySync: s.qboTwoWaySync,
+    qboMilestoneInvoicing: s.qboMilestoneInvoicing,
+    qboContactSyncPipelineId: s.qboContactSyncPipelineId ?? null,
+    qboInvoiceLeadDays: s.qboInvoiceLeadDays,
+  };
+}
+
+/**
+ * GET /api/quickbooks/settings
+ * Per-tenant QuickBooks feature configuration for the current location.
+ */
+export async function getQuickBooksSettings(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const settings = await getLocationSettings(locationId);
+    res.json({ settings: serializeSettings(settings) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * PUT /api/quickbooks/settings
+ * Update the current location's QuickBooks feature toggles / config.
+ */
+export async function saveQuickBooksSettings(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const {
+      qboTwoWaySync,
+      qboMilestoneInvoicing,
+      qboContactSyncPipelineId,
+      qboInvoiceLeadDays,
+    } = req.body;
+
+    const row = await upsertLocationSettings(locationId, {
+      qboTwoWaySync,
+      qboMilestoneInvoicing,
+      qboContactSyncPipelineId,
+      qboInvoiceLeadDays,
+    });
+
+    res.json({ settings: serializeSettings(row) });
   } catch (err) {
     next(err);
   }

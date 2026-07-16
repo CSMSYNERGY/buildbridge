@@ -137,21 +137,50 @@ export const qbSyncLinks = pgTable('qb_sync_links', {
 ]);
 
 // ─── QuickBooks Sync State ────────────────────────────────────────────────────
-// Per-location cursor for the two-way sync (Rockwood model).
+// Per-location cursors for QuickBooks background work:
+//   lastSyncAt      → Rockwood two-way sync (CDC + GHL-changed-since window)
+//   lastWonPollAt   → Yoder Won-opportunity poller (see milestoneService)
 export const qbSyncState = pgTable('qb_sync_state', {
   locationId: text('location_id').primaryKey().references(() => locations.id),
   lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
+  lastWonPollAt: timestamp('last_won_poll_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ─── Location Settings ────────────────────────────────────────────────────────
+// Per-tenant QuickBooks feature configuration. One app, opt-in aspects: a
+// location enables the two-way sync (Rockwood model) and/or milestone
+// auto-invoicing (Yoder model) independently. Both default OFF so connecting
+// QuickBooks never silently starts syncing before the tenant is configured.
+export const locationSettings = pgTable('location_settings', {
+  locationId: text('location_id').primaryKey().references(() => locations.id),
+  // Rockwood: reconcile contacts + estimates between QBO and GHL every 15 min.
+  qboTwoWaySync: boolean('qbo_two_way_sync').notNull().default(false),
+  // Yoder: opportunity Won → QBO customer + milestone rows → scheduled invoices.
+  qboMilestoneInvoicing: boolean('qbo_milestone_invoicing').notNull().default(false),
+  // When set, GHL→QBO contact CREATE is limited to contacts that have an
+  // opportunity in this pipeline (Carolyn's "push to QuickBooks when the lead
+  // moves into the Buildings pipeline"). Null → push all changed contacts.
+  qboContactSyncPipelineId: text('qbo_contact_sync_pipeline_id'),
+  // Default days before a milestone's date to raise its invoice (deposit is
+  // always immediate). Copied onto each qb_milestones row at creation time.
+  qboInvoiceLeadDays: integer('qbo_invoice_lead_days').notNull().default(3),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 // ─── Relations ────────────────────────────────────────────────────────────────
-export const locationsRelations = relations(locations, ({ many }) => ({
+export const locationsRelations = relations(locations, ({ one, many }) => ({
   subscriptions: many(subscriptions),
   mappers: many(mappers),
   integrationCredentials: many(integrationCredentials),
   qbMilestones: many(qbMilestones),
   qbSyncLinks: many(qbSyncLinks),
+  locationSettings: one(locationSettings, {
+    fields: [locations.id],
+    references: [locationSettings.locationId],
+  }),
 }));
 
 export const plansRelations = relations(plans, ({ many }) => ({
@@ -180,4 +209,8 @@ export const qbMilestonesRelations = relations(qbMilestones, ({ one }) => ({
 
 export const qbSyncLinksRelations = relations(qbSyncLinks, ({ one }) => ({
   location: one(locations, { fields: [qbSyncLinks.locationId], references: [locations.id] }),
+}));
+
+export const locationSettingsRelations = relations(locationSettings, ({ one }) => ({
+  location: one(locations, { fields: [locationSettings.locationId], references: [locations.id] }),
 }));

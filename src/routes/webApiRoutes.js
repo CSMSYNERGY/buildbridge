@@ -8,6 +8,7 @@ import {
   createSubscriptionHandler,
   cancelSubscriptionHandler,
   getGhlFields,
+  getGhlPipelines,
   getMappers,
   createMapper,
   updateMapper,
@@ -20,6 +21,8 @@ import {
 import {
   getQuickBooksConfig,
   disconnectQuickBooks,
+  getQuickBooksSettings,
+  saveQuickBooksSettings,
 } from '../controllers/quickbooksController.js';
 
 const router = Router();
@@ -46,8 +49,9 @@ router.get('/subscription/plans', getPlans);
 router.post('/subscription/create', actionLimiter, createSubscriptionHandler);
 router.delete('/subscription/cancel', actionLimiter, cancelSubscriptionHandler);
 
-// GHL fields
+// GHL fields + pipelines
 router.get('/ghl/fields', getGhlFields);
+router.get('/ghl/pipelines', getGhlPipelines);
 
 // Mappers CRUD
 router.get('/mappers', getMappers);
@@ -64,5 +68,9 @@ router.post('/smartbuild/test', actionLimiter, testSmartBuildConnection);
 // QuickBooks integration config (OAuth connect/callback live under /auth/quickbooks)
 router.get('/quickbooks/config', getQuickBooksConfig);
 router.delete('/quickbooks/config', actionLimiter, disconnectQuickBooks);
+
+// QuickBooks per-tenant feature settings (two-way sync / milestone invoicing)
+router.get('/quickbooks/settings', getQuickBooksSettings);
+router.put('/quickbooks/settings', actionLimiter, saveQuickBooksSettings);
 
 export default router;

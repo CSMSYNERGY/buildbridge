@@ -11,6 +11,7 @@ import {
 } from './quickbooksService.js';
 import { getMappings } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
+import { getLocationSettings } from './locationSettingsService.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
 const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -186,13 +187,41 @@ async function syncQbEstimatesToGhl(locationId, estimates, stats) {
 
 // ─── GHL → QB ─────────────────────────────────────────────────────────────────
 
-async function syncGhlContactsToQb(locationId, since, stats) {
+// Build the set of GHL contact ids that have an opportunity in `pipelineId`.
+// Used to gate contact CREATE (Carolyn: push a contact to QuickBooks when the
+// lead moves into the "Buildings" pipeline). Returns null when no pipeline is
+// configured → no gating (push all changed contacts).
+async function contactIdsInPipeline(locationId, pipelineId) {
+  if (!pipelineId) return null;
+  const data = await makeGhlRequest(
+    locationId,
+    'GET',
+    `/opportunities/search?location_id=${encodeURIComponent(locationId)}&pipeline_id=${encodeURIComponent(pipelineId)}&limit=100`,
+  ).catch(() => null);
+
+  // Fail open: if the lookup errored, don't gate (a transient GHL error must not
+  // silently stop all contact creation). An empty pipeline correctly gates all.
+  if (!data) return null;
+
+  const set = new Set();
+  for (const opp of data.opportunities ?? []) {
+    const cid = opp.contactId ?? opp.contact?.id;
+    if (cid) set.add(String(cid));
+  }
+  return set;
+}
+
+async function syncGhlContactsToQb(locationId, since, stats, settings) {
   const data = await makeGhlRequest(
     locationId,
     'GET',
     `/contacts/?locationId=${encodeURIComponent(locationId)}&limit=100`,
   );
   const contacts = data?.contacts ?? [];
+
+  // Contact-push gating: when a pipeline is configured, only CREATE contacts
+  // that have an opportunity in it. Existing linked contacts still update.
+  const pipelineGate = await contactIdsInPipeline(locationId, settings?.qboContactSyncPipelineId);
 
   for (const contact of contacts) {
     const ghlUpdatedAt = contact.dateUpdated ?? contact.updatedAt;
@@ -225,6 +254,11 @@ async function syncGhlContactsToQb(locationId, since, stats) {
       await touchLink(link.id);
       stats.ghlToQbContactsUpdated++;
     } else {
+      // Not yet in QuickBooks → only push if it clears the pipeline gate.
+      if (pipelineGate && !pipelineGate.has(String(contact.id))) {
+        stats.skipped++;
+        continue;
+      }
       const customer = await findOrCreateCustomer(locationId, {
         name,
         email: contact.email,
@@ -299,7 +333,8 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
  * contacts + estimates, QB→GHL then GHL→QB, last-write-wins on conflicts.
  * Returns per-direction stats.
  */
-export async function syncLocation(locationId) {
+export async function syncLocation(locationId, settings) {
+  const cfg = settings ?? (await getLocationSettings(locationId));
   const since = await getSyncSince(locationId);
   const runStartedAt = new Date();
 
@@ -325,7 +360,7 @@ export async function syncLocation(locationId) {
   await syncQbEstimatesToGhl(locationId, estimates, stats);
 
   // GHL → QB
-  await syncGhlContactsToQb(locationId, since, stats);
+  await syncGhlContactsToQb(locationId, since, stats, cfg);
   await syncGhlOpportunitiesToQb(locationId, since, stats);
 
   await setSyncState(locationId, runStartedAt);
@@ -334,8 +369,10 @@ export async function syncLocation(locationId) {
 }
 
 /**
- * Scheduler job: sync every location that has QuickBooks connected and an
- * active QuickBooks (or Suite) subscription.
+ * Scheduler job: run the two-way sync for every location that has QuickBooks
+ * connected, an active QuickBooks (or Suite) subscription, AND has opted into
+ * the two-way sync (Rockwood model) in its settings. Locations that only use
+ * milestone invoicing (Yoder model) are skipped here.
  */
 export async function syncAllLocations() {
   const rows = await db
@@ -343,13 +380,17 @@ export async function syncAllLocations() {
     .from(integrationCredentials)
     .where(eq(integrationCredentials.appSlug, 'quickbooks'));
 
+  let ran = 0;
   for (const { locationId } of rows) {
     try {
       if (!(await hasAccess(locationId, 'quickbooks'))) continue;
-      await syncLocation(locationId);
+      const settings = await getLocationSettings(locationId);
+      if (!settings.qboTwoWaySync) continue; // two-way sync not enabled for this tenant
+      await syncLocation(locationId, settings);
+      ran++;
     } catch (err) {
       console.error(`[rockwood] sync failed for ${locationId}:`, err.message);
     }
   }
-  return rows.length;
+  return ran;
 }

@@ -1,10 +1,12 @@
 import { db } from '../core/db/client.js';
-import { qbMilestones } from '../core/db/schema.js';
+import { qbMilestones, qbSyncState, integrationCredentials } from '../core/db/schema.js';
 import { eq, and, or, isNull, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { getMappings } from './mapperService.js';
 import { findOrCreateCustomer, createInvoice } from './quickbooksService.js';
+import { makeGhlRequest } from './ghlService.js';
 import { hasAccess } from './subscriptionService.js';
+import { getLocationSettings } from './locationSettingsService.js';
 
 // Milestone types in invoicing order. 'deposit' has no date — it is invoiced
 // immediately once the opportunity is won.
@@ -98,6 +100,14 @@ export async function handleOpportunityWon({ locationId, payload }) {
     return;
   }
 
+  // Only act for locations that have opted into milestone invoicing (Yoder
+  // model). A Rockwood-only tenant should never get milestone invoices.
+  const settings = await getLocationSettings(locationId);
+  if (!settings.qboMilestoneInvoicing) {
+    console.log(`[yoder] location ${locationId} milestone invoicing disabled — skipping`);
+    return;
+  }
+
   // If the event carries a stage/status, only act on Won.
   const status = (payload.status ?? payload.opportunity?.status ?? '').toString().toLowerCase();
   if (status && status !== 'won' && status !== 'open won') {
@@ -128,6 +138,7 @@ export async function handleOpportunityWon({ locationId, payload }) {
       milestoneType: type,
       amountCents,
       milestoneDate: parseDate(getPayloadField(payload, dateFields[type])),
+      invoiceLeadDays: settings.qboInvoiceLeadDays,
     });
   }
 
@@ -161,7 +172,20 @@ export async function invoiceDueMilestones() {
       ),
     );
 
+  // Respect the per-tenant toggle: don't invoice milestones for a location that
+  // has since disabled milestone invoicing (cached per location for this run).
+  const enabledByLocation = new Map();
+  async function invoicingEnabled(locId) {
+    if (!enabledByLocation.has(locId)) {
+      const s = await getLocationSettings(locId);
+      enabledByLocation.set(locId, s.qboMilestoneInvoicing);
+    }
+    return enabledByLocation.get(locId);
+  }
+
+  let invoiced = 0;
   for (const m of due) {
+    if (!(await invoicingEnabled(m.locationId))) continue;
     try {
       const invoice = await createInvoice(m.locationId, {
         qbCustomerId: m.qbCustomerId,
@@ -181,6 +205,7 @@ export async function invoiceDueMilestones() {
         })
         .where(eq(qbMilestones.id, m.id));
 
+      invoiced++;
       console.log(`[yoder] invoiced milestone ${m.milestoneType} for opportunity ${m.opportunityId} (QB invoice ${invoice.Id})`);
     } catch (err) {
       await db
@@ -191,5 +216,116 @@ export async function invoiceDueMilestones() {
     }
   }
 
-  return due.length;
+  return invoiced;
+}
+
+// ─── Won polling (webhook-free alternative) ───────────────────────────────────
+// So a reseller client doesn't have to build a GHL workflow → custom-webhook to
+// fire opportunity.won: poll GHL for recently-won opportunities and feed each
+// through handleOpportunityWon (idempotent per location+opportunity+milestone).
+
+const WON_POLL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // first poll looks back 7 days
+
+async function getWonPollSince(locationId) {
+  const [state] = await db
+    .select()
+    .from(qbSyncState)
+    .where(eq(qbSyncState.locationId, locationId))
+    .limit(1);
+  return state?.lastWonPollAt ?? new Date(Date.now() - WON_POLL_WINDOW_MS);
+}
+
+async function setWonPollState(locationId, when) {
+  await db
+    .insert(qbSyncState)
+    .values({ locationId, lastWonPollAt: when })
+    .onConflictDoUpdate({
+      target: qbSyncState.locationId,
+      set: { lastWonPollAt: when, updatedAt: new Date() },
+    });
+}
+
+// Collect custom fields from an object whether GHL returns them as an array
+// ([{id|key|fieldKey, value}]) or an object map, into one array getPayloadField
+// understands. Merges opportunity + contact fields so a milestone field resolves
+// regardless of which entity SmartBuild wrote it to.
+function collectCustomFields(...sources) {
+  const out = [];
+  for (const cf of sources) {
+    if (!cf) continue;
+    if (Array.isArray(cf)) out.push(...cf);
+    else if (typeof cf === 'object') {
+      for (const [key, value] of Object.entries(cf)) out.push({ key, value });
+    }
+  }
+  return out;
+}
+
+/**
+ * Scheduler job: for every QuickBooks-connected location with milestone
+ * invoicing enabled, poll GHL for opportunities won since the last poll and
+ * process each as a Won event. Best-effort and idempotent — safe to run
+ * alongside the inbound webhook (both paths converge on handleOpportunityWon).
+ */
+export async function pollWonOpportunities() {
+  const rows = await db
+    .select({ locationId: integrationCredentials.locationId })
+    .from(integrationCredentials)
+    .where(eq(integrationCredentials.appSlug, 'quickbooks'));
+
+  let processed = 0;
+  for (const { locationId } of rows) {
+    try {
+      if (!(await hasAccess(locationId, 'quickbooks'))) continue;
+      const settings = await getLocationSettings(locationId);
+      if (!settings.qboMilestoneInvoicing) continue;
+
+      const since = await getWonPollSince(locationId);
+      const startedAt = new Date();
+
+      const data = await makeGhlRequest(
+        locationId,
+        'GET',
+        `/opportunities/search?location_id=${encodeURIComponent(locationId)}&status=won&limit=100`,
+      );
+      const opps = data?.opportunities ?? [];
+
+      for (const opp of opps) {
+        const updatedAt = opp.updatedAt ?? opp.dateUpdated;
+        if (updatedAt && new Date(updatedAt) <= since) continue; // already seen
+
+        // Fetch the full opportunity + contact so milestone custom fields are
+        // present (search results are typically sparse).
+        const detail = await makeGhlRequest(locationId, 'GET', `/opportunities/${opp.id}`).catch(() => null);
+        const full = detail?.opportunity ?? opp;
+        const contactId = full.contactId ?? full.contact?.id ?? opp.contactId ?? null;
+
+        let contactObj = full.contact ?? null;
+        if (contactId) {
+          const cRes = await makeGhlRequest(locationId, 'GET', `/contacts/${contactId}`).catch(() => null);
+          contactObj = cRes?.contact ?? contactObj;
+        }
+
+        const payload = {
+          opportunityId: full.id ?? opp.id,
+          contactId,
+          status: 'won',
+          customFields: collectCustomFields(
+            full.customFields, full.custom_fields,
+            contactObj?.customFields, contactObj?.custom_fields,
+          ),
+          contact: contactObj ?? undefined,
+        };
+
+        await handleOpportunityWon({ locationId, payload });
+        processed++;
+      }
+
+      await setWonPollState(locationId, startedAt);
+    } catch (err) {
+      console.error(`[yoder] won-poll failed for ${locationId}:`, err.message);
+    }
+  }
+
+  return processed;
 }
