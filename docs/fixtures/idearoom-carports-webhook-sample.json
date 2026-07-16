@@ -1,0 +1,931 @@
+{
+	"schema": "default",
+	"eventType": "created",
+	"clientId": "carportview-idearoom-demo",
+	"url": "https://demo.carportview.com/#ef91cc417451ecfba13c726c738b7c6e",
+	"order": {
+		"calculations": [
+			{
+				"token": "deliveryPrice",
+				"value": 0
+			},
+			{
+				"token": "buildingPrice",
+				"value": 34077
+			},
+			{
+				"token": "structurePrice",
+				"value": 34077
+			},
+			{
+				"token": "lineItemsSubtotal",
+				"value": 34077
+			},
+			{
+				"token": "percentOfBuildingItems",
+				"value": 0
+			},
+			{
+				"token": "percentOfStructureItems",
+				"value": 0
+			},
+			{
+				"token": "taxableItemsForPercentOfSubtotalCalc",
+				"value": 34077
+			},
+			{
+				"token": "percentOfSubtotalItems",
+				"value": 0
+			},
+			{
+				"token": "surchargeSubtotal",
+				"value": 0
+			},
+			{
+				"token": "surchargeItems",
+				"value": 34077
+			},
+			{
+				"token": "surcharge",
+				"value": 3407.7
+			},
+			{
+				"token": "nonTaxableSurcharge",
+				"value": 0
+			},
+			{
+				"token": "taxableSurcharge",
+				"value": 3407.7
+			},
+			{
+				"token": "taxableItems",
+				"value": 34077
+			},
+			{
+				"token": "totalTax",
+				"value": 9371.175
+			},
+			{
+				"token": "taxPercentage",
+				"value": 25
+			},
+			{
+				"token": "totalForPercentOfTotalCalc",
+				"value": 43448.175
+			},
+			{
+				"token": "percentOfTotalItems",
+				"value": 0
+			},
+			{
+				"token": "subtotal",
+				"value": 37484.7
+			},
+			{
+				"token": "subtotalWithoutCustomItems",
+				"value": 37484.7
+			},
+			{
+				"token": "nonTaxableItems",
+				"value": 0
+			},
+			{
+				"token": "subtotalExcludedFromDeposit",
+				"value": 0
+			},
+			{
+				"token": "totalExcludedFromDeposit",
+				"value": 0
+			},
+			{
+				"token": "total",
+				"value": 46855.875
+			},
+			{
+				"token": "totalCustomDiscounts",
+				"value": 0
+			},
+			{
+				"token": "totalCustomExpenses",
+				"value": 0
+			},
+			{
+				"token": "depositAmount",
+				"value": 3748.47
+			},
+			{
+				"token": "depositPercentage",
+				"value": 10
+			},
+			{
+				"token": "standardDepositPercentage",
+				"value": 10
+			},
+			{
+				"token": "depositDiscount",
+				"value": 0
+			},
+			{
+				"token": "processingFee",
+				"value": 0
+			},
+			{
+				"token": "depositDueNow",
+				"value": 3748.47
+			},
+			{
+				"token": "creditCardFee",
+				"value": 0
+			},
+			{
+				"token": "deliveryFeeToPrintQuote",
+				"value": 0
+			},
+			{
+				"token": "remainingDueForPercentOfRemainingDueCalc",
+				"value": 43107.405
+			},
+			{
+				"token": "percentOfRemainingDueItems",
+				"value": 0
+			},
+			{
+				"token": "remainingDue",
+				"value": 43107.405
+			},
+			{
+				"token": "depositDueNowWithCreditCardFee",
+				"value": 3748.47
+			},
+			{
+				"token": "totalWithCreditCardFee",
+				"value": 46855.875
+			},
+			{
+				"token": "customQuoteCreditCardFeePercent",
+				"value": 0
+			},
+			{
+				"token": "customQuoteCreditCardFee",
+				"value": 0
+			},
+			{
+				"token": "remainingDueWithCustomQuoteCreditCardFee",
+				"value": 43107.405
+			}
+		],
+		"buildingPrice": 34077,
+		"deliveryPercentageToPrintQuotePrice": 0,
+		"deliveryPrice": 0,
+		"deliveryPriceTaxable": false,
+		"depositAmount": 0,
+		"depositPercent": 10,
+		"processingFee": 0,
+		"depositDueNow": 3748.47,
+		"nonTaxableItems": 0,
+		"excludedFromSubtotalPrice": 0,
+		"integrationProperties": {
+			"buildingStyle": "Steel Barn",
+			"buildingSize": {
+				"width": "20'",
+				"length": "21'"
+			}
+		},
+		"lineItems": [
+			{
+				"optionKey": "metal-barn",
+				"optionType": "style",
+				"hidePrice": true,
+				"hideQuantity": true,
+				"description": "Style: Steel Barn",
+				"productCategory": "structure",
+				"section": "center-section",
+				"price": 0,
+				"quantity": 1,
+				"surchargeCategory": "structure"
+			},
+			{
+				"description": "Base Price: 20‘x21'",
+				"optionKey": null,
+				"price": 0,
+				"productCategory": "structure",
+				"section": "center-section",
+				"quantity": 1,
+				"surchargeCategory": "base-price"
+			},
+			{
+				"description": "Left Lean Base Price: 10‘x21'",
+				"optionKey": null,
+				"price": 0,
+				"productCategory": "structure",
+				"section": "left-section",
+				"quantity": 1,
+				"surchargeCategory": "base-price"
+			},
+			{
+				"description": "Right Lean Base Price: 10‘x21'",
+				"optionKey": null,
+				"price": 0,
+				"productCategory": "structure",
+				"section": "right-section",
+				"quantity": 1,
+				"surchargeCategory": "base-price"
+			},
+			{
+				"optionKey": "pewter-gray",
+				"identifierKey": "pewter-gray",
+				"description": "Roof: Pewter Gray",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c709430-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "pewter-gray",
+				"identifierKey": "pewter-gray",
+				"description": "Trim: Pewter Gray",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c70bb40-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "pewter-gray",
+				"identifierKey": "pewter-gray",
+				"description": "Side Wall Siding: Pewter Gray",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c70bb41-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "lean-only",
+				"identifierKey": "lean-only",
+				"description": "Left Lean Type: Lean only",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "left-section",
+				"surchargeCategory": "none",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c70bb42-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "lean-only",
+				"identifierKey": "lean-only",
+				"description": "Right Lean Type: Lean only",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "right-section",
+				"surchargeCategory": "none",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c70e250-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "boxed-eave-roof",
+				"identifierKey": "boxed-eave-roof",
+				"description": "Roof Style: Boxed Eave Style",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c70e252-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "three-twelve",
+				"identifierKey": "three-twelve",
+				"description": "Roof Pitch: 3 / 12",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c710960-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "two-twelve",
+				"identifierKey": "two-twelve",
+				"description": "Left Lean Roof Pitch: 2 / 12",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "left-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c710961-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "two-twelve",
+				"identifierKey": "two-twelve",
+				"description": "Right Lean Roof Pitch: 2 / 12",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "right-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c710962-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "six-inches-overhang",
+				"identifierKey": "six-inches-overhang",
+				"description": "Roof Overhang: 6\"",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c713070-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "standard-trusses",
+				"identifierKey": "standard-trusses",
+				"description": "Trusses: Standard",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c713071-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "14-gauge-framing",
+				"identifierKey": "14-gauge-framing",
+				"description": "Gauge: 14-Gauge Framing",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c715780-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "14-gauge-framing",
+				"identifierKey": "14-gauge-framing",
+				"description": "Left Lean Gauge: 14-Gauge Framing",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "left-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c71a5a0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "14-gauge-framing",
+				"identifierKey": "14-gauge-framing",
+				"description": "Right Lean Gauge: 14-Gauge Framing",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "right-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c71f3c0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "standard-brace",
+				"identifierKey": "standard-brace",
+				"description": "Brace: Standard Brace",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c7241e0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "standard-brace",
+				"identifierKey": "standard-brace",
+				"description": "Left Lean Brace: Standard Brace",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "left-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c7268f0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "standard-brace",
+				"identifierKey": "standard-brace",
+				"description": "Right Lean Brace: Standard Brace",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "right-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c729000-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "10-tall",
+				"identifierKey": "10-tall",
+				"description": "Leg Height: 10'",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c72b710-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "6-tall",
+				"identifierKey": "6-tall",
+				"description": "Left Lean Leg Height: 6'",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "left-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c730530-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "6-tall",
+				"identifierKey": "6-tall",
+				"description": "Right Lean Leg Height: 6'",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "right-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c735350-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"description": "Left Side: Top - 3' Panel",
+				"price": 0,
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"optionKey": null,
+				"isWall": true,
+				"consolidatedOptions": {
+					"relatedItemId": "2c73a170-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "horizontal-siding",
+				"description": "Left Side Siding: Horizontal",
+				"price": 0,
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"consolidatedOptions": {
+					"relatedItemId": "2c73a170-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "j-trim-sides",
+				"identifierKey": "j-trim-sides",
+				"description": "Left Side J-Trim: Sides Only",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c73a170-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"description": "Right Side: Top - 3' Panel",
+				"price": 0,
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"optionKey": null,
+				"isWall": true,
+				"consolidatedOptions": {
+					"relatedItemId": "2c7416a0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "horizontal-siding",
+				"description": "Right Side Siding: Horizontal",
+				"price": 0,
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"consolidatedOptions": {
+					"relatedItemId": "2c7416a0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "j-trim-sides",
+				"identifierKey": "j-trim-sides",
+				"description": "Right Side J-Trim: Sides Only",
+				"productCategory": "structure",
+				"quantity": 1,
+				"section": "center-section",
+				"surchargeCategory": "structure",
+				"price": 0,
+				"isWall": false,
+				"consolidatedOptions": {
+					"relatedItemId": "2c7416a0-6936-11ee-b5b3-4138642d0c86"
+				}
+			},
+			{
+				"optionKey": "side-to-side",
+				"description": "Left Lean Connection Fee Side to Side (12-24 wide) 20'L",
+				"excludePriceFromDeposit": false,
+				"price": 0,
+				"productCategory": "structure",
+				"section": "left-section",
+				"quantity": 1,
+				"surchargeCategory": "structure",
+				"consolidatedOptions": {
+				}
+			},
+			{
+				"optionKey": "side-to-side",
+				"description": "Right Lean Connection Fee Side to Side (12-24 wide) 20'L",
+				"excludePriceFromDeposit": false,
+				"price": 0,
+				"productCategory": "structure",
+				"section": "right-section",
+				"quantity": 1,
+				"surchargeCategory": "structure",
+				"consolidatedOptions": {
+				}
+			}
+		],
+		"remainingDue": 43107.405,
+		"rentToOwn": "",
+		"standardDepositPercent": 10,
+		"status": "quote",
+		"structurePrice": 34077,
+		"subtotalPrice": 37484.7,
+		"subtotalPriceWithoutCustomItems": 37484.7,
+		"taxExempt": false,
+		"totalPrice": 46855.875,
+		"totalTax": 9371.175,
+		"regionLabel": "Southern States",
+		"sharePost": {
+			"title": "Check out my building from IdeaRoom CarportView!",
+			"description": "Steel Barn - 20' W x 21' L"
+		},
+		"salesAccount": {
+			"authenticated": false,
+			"email": null
+		},
+		"apiSalesTaxPerentage": 0,
+		"billingAddress": {
+			"address1": "123 Utopia",
+			"city": "Xanadu",
+			"firstName": "",
+			"lastName": "",
+			"state": "TX",
+			"zip": "75001",
+			"sameAsShipping": true
+		},
+		"customDepositAmount": 0,
+		"customDepositPercentage": 0,
+		"customer": {
+			"email": "rpannell@idearoom.com",
+			"firstName": "Testingly",
+			"lastName": "Testlicious",
+			"phone": "1234567890"
+		},
+		"customLineItems": [
+		],
+		"customTaxPercentage": 0,
+		"customTaxRate": false,
+		"dealer": {
+			"address": "",
+			"email": "",
+			"name": "",
+			"phone": ""
+		},
+		"depositType": "standard",
+		"depositDiscount": {
+			"customAmount": 0,
+			"customPercentage": 0,
+			"type": "custom-amount"
+		},
+		"emailFloorPlan": false,
+		"installation": {
+		},
+		"notes": "Test",
+		"salesRep": {
+			"name": ""
+		},
+		"secondaryPhone": "",
+		"shippingAddress": {
+			"address1": "123 Utopia",
+			"city": "Xanadu",
+			"firstName": "Testingly",
+			"lastName": "Testlicious",
+			"phone": "1234567890",
+			"state": "TX",
+			"zip": "75001"
+		},
+		"supplier": "idearoom-demo",
+		"taxAmount": 0,
+		"taxRate": 0,
+		"taxType": "standard",
+		"uuid": "2a20fee0-6936-11ee-b5b3-4138642d0c86",
+		"externalReferenceId": "",
+		"contact-me": "save-do-not-contact",
+		"installation-surface": "installation-surface-cement",
+		"power-available": "power-available-yes",
+		"jobsite-ready": "jobsite-ready-yes",
+		"site-ready": "site-ready-yes",
+		"print": false,
+		"openExternalLink": false,
+		"images": {
+			"isoSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29c01a30-6936-11ee-ad54-3b00e21ef042.png",
+			"frontSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29bff320-6936-11ee-b6d1-cd46b7803d9e.png",
+			"leftSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29bce5e0-6936-11ee-8a5b-4582051817e0.png",
+			"backSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29bdf750-6936-11ee-9b62-9f6d60cc858c.png",
+			"rightSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29c1eef0-6936-11ee-84d4-6f30c8586ef2.png",
+			"floorplanSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29dbdf90-6936-11ee-84d4-6f30c8586ef2.png",
+			"floorplanWithLegendSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29f13c50-6936-11ee-b5b3-4138642d0c86.png",
+			"floorplanEmailSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29bfa500-6936-11ee-b5b3-4138642d0c86.png",
+			"elevationMapFrontSrc": "",
+			"elevationMapLeftSrc": "",
+			"elevationMapBackSrc": "",
+			"elevationMapRightSrc": "",
+			"socialSharePreviewSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29e380b0-6936-11ee-b5b3-4138642d0c86.png",
+			"floorPlanSrc": "https://idearoom-render.s3.amazonaws.com/browser-render/29dbdf90-6936-11ee-84d4-6f30c8586ef2.png"
+		},
+		"floorplan": {
+			"symbolsLegend": [
+				{
+					"compositeSymbolForLabel": null,
+					"label": "Open Wall",
+					"iconSrc": "https://s3-us-west-2.amazonaws.com/idearoom-stagingassets/idearoom/images/floorplan-symbol-legend/icon-wall-open.png"
+				}
+			]
+		},
+		"emailId": "1697139185103914",
+		"versionedEmailId": "1697139185103914",
+		"buildingStructure": {
+			"buildingStyle": "metal-barn",
+			"roofing": "boxed-eave-roof",
+			"roof-overhang": "six-inches-overhang",
+			"insulation-material": "none-im",
+			"section": [
+				{
+					"key": "center-section",
+					"width": "20-wide",
+					"height": "10-tall",
+					"roof-pitch": "three-twelve",
+					"length": "20-deep",
+					"storage": "none",
+					"position": [
+						{
+							"key": "front",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "back",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "left",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding",
+									"gap-panel": "custom-size-top-panel"
+								}
+							]
+						},
+						{
+							"key": "right",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding",
+									"gap-panel": "custom-size-top-panel"
+								}
+							]
+						}
+					],
+					"wall-footprint": "no-storage-wall-footprint",
+					"trusses": "standard-trusses",
+					"brace": "standard-brace",
+					"leg": "standard-legs",
+					"eave": "regular-roof-eave"
+				},
+				{
+					"key": "left-section"
+				},
+				{
+					"key": "left-section",
+					"lean-type": "lean-only",
+					"width": "10-wide",
+					"height": "6-tall",
+					"roof-pitch": "two-twelve",
+					"length": "20-deep",
+					"position": [
+						{
+							"key": "front",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "back",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "left",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "right",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"siding": "horizontal-siding"
+								}
+							]
+						}
+					],
+					"wall-footprint": "no-storage-wall-footprint",
+					"brace": "standard-brace",
+					"leg": "standard-legs",
+					"eave": "regular-roof-eave"
+				},
+				{
+					"key": "right-section"
+				},
+				{
+					"key": "right-section",
+					"lean-type": "lean-only",
+					"width": "10-wide",
+					"height": "6-tall",
+					"roof-pitch": "two-twelve",
+					"length": "20-deep",
+					"position": [
+						{
+							"key": "front",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "back",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "left",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"siding": "horizontal-siding"
+								}
+							]
+						},
+						{
+							"key": "right",
+							"wall-surface": [
+								{
+									"key": "front-surface",
+									"wall": "none",
+									"siding": "horizontal-siding"
+								}
+							]
+						}
+					],
+					"wall-footprint": "no-storage-wall-footprint",
+					"brace": "standard-brace",
+					"leg": "standard-legs",
+					"eave": "regular-roof-eave"
+				}
+			],
+			"engineer-certified": "none",
+			"siding": "horizontal-siding",
+			"gauge": "14-gauge-framing",
+			"trim-package": "standard-trim-package",
+			"j-trim": "j-trim-sides",
+			"frame-spacing": "frame-spacing-five-feet",
+			"color-group": [
+				{
+					"key": "roof",
+					"color": "pewter-gray"
+				},
+				{
+					"key": "trim",
+					"color": "pewter-gray"
+				},
+				{
+					"key": "sidewall-siding",
+					"color": "pewter-gray"
+				}
+			],
+			"eave": "regular-roof-eave"
+		}
+	},
+	"visits": 1,
+	"updates": 0,
+	"checkoutOpened": 0,
+	"hash": "ef91cc417451ecfba13c726c738b7c6e",
+	"environment": "production"
+}

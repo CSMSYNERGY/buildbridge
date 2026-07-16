@@ -15,6 +15,7 @@ import { integrationCredentials } from './core/db/schema.js';
 // Integrations (register webhook handlers + scheduler jobs at import time)
 import './integrations/yoderBarnes.js';
 import './integrations/rockwood.js';
+import './integrations/idearoom.js';
 
 // Routes
 import authRoutes from './routes/authRoutes.js';

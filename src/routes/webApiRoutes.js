@@ -9,6 +9,7 @@ import {
   createSubscriptionHandler,
   cancelSubscriptionHandler,
   getGhlFields,
+  getGhlPipelines,
   getMappers,
   createMapper,
   updateMapper,
@@ -17,6 +18,10 @@ import {
   saveSmartBuildConfig,
   deleteSmartBuildConfig,
   testSmartBuildConnection,
+  getIdearoomConfig,
+  saveIdearoomConfig,
+  deleteIdearoomConfig,
+  testIdearoomConnection,
 } from '../controllers/webApiController.js';
 import {
   getQuickBooksConfig,
@@ -51,8 +56,9 @@ router.get('/subscription/mine', getMySubscriptions);
 router.post('/subscription/create', actionLimiter, createSubscriptionHandler);
 router.delete('/subscription/cancel', actionLimiter, cancelSubscriptionHandler);
 
-// GHL fields
+// GHL fields + pipelines (for mapper selectors)
 router.get('/ghl/fields', getGhlFields);
+router.get('/ghl/pipelines', getGhlPipelines);
 
 // Mappers CRUD
 router.get('/mappers', getMappers);
@@ -65,6 +71,12 @@ router.get('/smartbuild/config', getSmartBuildConfig);
 router.post('/smartbuild/config', actionLimiter, saveSmartBuildConfig);
 router.delete('/smartbuild/config', actionLimiter, deleteSmartBuildConfig);
 router.post('/smartbuild/test', actionLimiter, testSmartBuildConnection);
+
+// IdeaRoom integration config (inbound webhook + optional REST pull creds)
+router.get('/idearoom/config', getIdearoomConfig);
+router.post('/idearoom/config', actionLimiter, saveIdearoomConfig);
+router.delete('/idearoom/config', actionLimiter, deleteIdearoomConfig);
+router.post('/idearoom/test', actionLimiter, testIdearoomConnection);
 
 // QuickBooks integration config (OAuth connect/callback live under /auth/quickbooks)
 router.get('/quickbooks/config', getQuickBooksConfig);
