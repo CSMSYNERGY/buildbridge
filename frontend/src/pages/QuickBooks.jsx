@@ -107,6 +107,7 @@ export default function QuickBooks() {
           qboSyncDirection: settings.qboSyncDirection,
           qboMilestoneInvoicing: settings.qboMilestoneInvoicing,
           qboContactSyncPipelineId: settings.qboContactSyncPipelineId || null,
+          qboAssignedUserField: settings.qboAssignedUserField || null,
           qboInvoiceLeadDays: Number(settings.qboInvoiceLeadDays) || 0,
         }),
       });
@@ -127,6 +128,7 @@ export default function QuickBooks() {
     qboSyncDirection: 'off',
     qboMilestoneInvoicing: false,
     qboContactSyncPipelineId: null,
+    qboAssignedUserField: null,
     qboInvoiceLeadDays: 3,
   };
 
@@ -245,6 +247,22 @@ export default function QuickBooks() {
                   </p>
                 )}
               </div>
+
+              {/* Salesperson: read a QuickBooks custom field → GHL assigned user (QB→GHL) */}
+              {(s.qboSyncDirection === 'qb_to_ghl' || s.qboSyncDirection === 'two_way') && (
+                <div className="space-y-1.5 pl-6">
+                  <Label htmlFor="assignedField">QuickBooks salesperson field name</Label>
+                  <Input
+                    id="assignedField"
+                    placeholder="e.g. Salesperson"
+                    value={s.qboAssignedUserField ?? ''}
+                    onChange={(e) => setField('qboAssignedUserField')(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The QuickBooks customer custom field that holds the salesperson — its value is carried into GHL's assigned user. Leave blank to skip.
+                  </p>
+                </div>
+              )}
 
               {/* Contact-sync pipeline — only when a direction writes into QuickBooks */}
               {(s.qboSyncDirection === 'ghl_to_qb' || s.qboSyncDirection === 'two_way') && (

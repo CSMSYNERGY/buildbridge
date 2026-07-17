@@ -1,5 +1,5 @@
 {
-  "id": "41443c78-fd76-420d-919b-5b17eb95e55e",
+  "id": "1918c987-8bf9-4035-8f56-a2b1fda915c8",
   "prevId": "c0162ae2-cc22-421c-bab8-7af65205dded",
   "version": "7",
   "dialect": "postgresql",
@@ -117,6 +117,12 @@
         },
         "qbo_contact_sync_pipeline_id": {
           "name": "qbo_contact_sync_pipeline_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "qbo_assigned_user_field": {
+          "name": "qbo_assigned_user_field",
           "type": "text",
           "primaryKey": false,
           "notNull": false

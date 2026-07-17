@@ -99,15 +99,18 @@ function qbCustomerToGhlContact(customer) {
   };
 }
 
-async function syncQbCustomersToGhl(locationId, customers, stats) {
+async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
   // Assigned-user (salesperson) mapping, QB → GHL. Rockwood stores the
-  // salesperson in a QuickBooks Customer custom field; GHL's `assignedTo` needs
-  // a GHL user id, not a name — so two optional mappers drive this (no mapping
-  // configured → this is a no-op and contact sync is unchanged):
-  //   quickbooks / qbo_assigned_user_field : { name: '<QBO custom field name>' }
-  //   quickbooks / assigned_user           : { '<QBO field value>': '<GHL user id>' }
-  const assignedFieldMap = await getMappings(locationId, 'quickbooks', 'qbo_assigned_user_field');
-  const assignedFieldName = assignedFieldMap.name ?? assignedFieldMap.assigned_user ?? null;
+  // salesperson in a QuickBooks Customer custom field, named in Settings
+  // (location_settings.qboAssignedUserField). GHL's `assignedTo` needs a GHL
+  // user id, not a name, so the value→user translation is a mapper. Both
+  // optional — with nothing configured this is a no-op and contact sync is
+  // unchanged:
+  //   Settings field name        : cfg.qboAssignedUserField (or legacy mapper)
+  //   quickbooks / assigned_user : { '<QBO field value>': '<GHL user id>' }
+  const legacyFieldMap = await getMappings(locationId, 'quickbooks', 'qbo_assigned_user_field');
+  const assignedFieldName = cfg?.qboAssignedUserField
+    ?? legacyFieldMap.name ?? legacyFieldMap.assigned_user ?? null;
   const assignedUserMap = assignedFieldName
     ? await getMappings(locationId, 'quickbooks', 'assigned_user')
     : {};
@@ -395,7 +398,7 @@ export async function syncLocation(locationId, settings) {
     const customers = responses.flatMap((q) => q.Customer ?? []);
     const estimates = responses.flatMap((q) => q.Estimate ?? []);
 
-    await syncQbCustomersToGhl(locationId, customers, stats);
+    await syncQbCustomersToGhl(locationId, customers, stats, cfg);
     await syncQbEstimatesToGhl(locationId, estimates, stats);
   }
 

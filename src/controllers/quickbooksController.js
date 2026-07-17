@@ -111,6 +111,7 @@ function serializeSettings(s) {
     qboSyncDirection: s.qboSyncDirection ?? 'off',
     qboMilestoneInvoicing: s.qboMilestoneInvoicing,
     qboContactSyncPipelineId: s.qboContactSyncPipelineId ?? null,
+    qboAssignedUserField: s.qboAssignedUserField ?? null,
     qboInvoiceLeadDays: s.qboInvoiceLeadDays,
   };
 }
@@ -140,6 +141,7 @@ export async function saveQuickBooksSettings(req, res, next) {
       qboSyncDirection,
       qboMilestoneInvoicing,
       qboContactSyncPipelineId,
+      qboAssignedUserField,
       qboInvoiceLeadDays,
     } = req.body;
 
@@ -147,6 +149,7 @@ export async function saveQuickBooksSettings(req, res, next) {
       qboSyncDirection,
       qboMilestoneInvoicing,
       qboContactSyncPipelineId,
+      qboAssignedUserField,
       qboInvoiceLeadDays,
     });
 

@@ -168,6 +168,9 @@ export const locationSettings = pgTable('location_settings', {
   // moves into the Buildings pipeline"). Null → push all changed contacts.
   // Only relevant for directions that write to QBO ('ghl_to_qb' / 'two_way').
   qboContactSyncPipelineId: text('qbo_contact_sync_pipeline_id'),
+  // Name of the QuickBooks Customer custom field that holds the salesperson /
+  // assigned user (read-only QB→GHL). Entered in Settings; blank = disabled.
+  qboAssignedUserField: text('qbo_assigned_user_field'),
   // Default days before a milestone's date to raise its invoice (deposit is
   // always immediate). Copied onto each qb_milestones row at creation time.
   qboInvoiceLeadDays: integer('qbo_invoice_lead_days').notNull().default(3),
