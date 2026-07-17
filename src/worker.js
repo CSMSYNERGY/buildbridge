@@ -11,11 +11,10 @@ import './core/cf-env-bridge.js';
 
 import { createServer } from 'node:http';
 import { httpServerHandler } from 'cloudflare:node';
-import { sql } from 'drizzle-orm';
 import { env } from './core/env.js';
 import app from './index.js';
 import { runDueJobs } from './core/scheduler.js';
-import { db, dbContext, closeRequestDb } from './core/db/client.js';
+import { dbContext, closeRequestDb } from './core/db/client.js';
 
 // Express `app` is a standard (req, res) handler, so it plugs straight into a
 // Node HTTP server. The port is internal to the Worker sandbox — the runtime
@@ -53,15 +52,11 @@ export default {
     );
   },
 
-  // Cron Triggers (wrangler.jsonc `triggers.crons`) — two schedules, branched by
-  // the firing pattern:
-  //   • "*/2 * * * *"  → warm-up: a trivial DB round-trip. Keeps isolates + the
-  //     Hyperdrive path warm so real traffic doesn't land on a cold isolate (the
-  //     first connect in a cold isolate can lose the connect race and fail once).
-  //   • "*/15 * * * *" → the QBO jobs that the integration modules registered at
-  //     import time (through ./index.js). Replaces the in-process setInterval
-  //     scheduler, which the Workers runtime forbids.
-  // waitUntil keeps the isolate alive until the run settles.
+  // Cron Trigger (wrangler.jsonc `triggers.crons` = "*/15 * * * *") — runs the
+  // QBO jobs the integration modules registered at import time (via ./index.js),
+  // replacing the in-process setInterval scheduler the Workers runtime forbids.
+  // Gated by ENABLE_SCHEDULER. waitUntil keeps the isolate alive until it settles.
+  // (A 2-min DB warm-up cron was tried and removed — see wrangler.jsonc.)
   async scheduled(event, _env, ctx) {
     // Establish a per-run DB store (like the Express middleware) so the run gets a
     // single client that is closed when the run finishes.
@@ -69,9 +64,7 @@ export default {
     ctx.waitUntil(
       dbContext.run(store, async () => {
         try {
-          if (event.cron === '*/2 * * * *') {
-            await db.execute(sql`select 1 as warmup`);
-          } else if (env.ENABLE_SCHEDULER) {
+          if (env.ENABLE_SCHEDULER) {
             await runDueJobs();
           } else {
             console.log('[worker] scheduler disabled (ENABLE_SCHEDULER=false) — skipping cron jobs');

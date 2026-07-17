@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
+    "_comment_start": "start/src-index is a legacy Node entry — the app runs on Workers via wrangler (cf:dev / cf:deploy); local dev uses wrangler dev below.",
+    "dev": "wrangler dev",
     "build:frontend": "npm --prefix frontend install && npm --prefix frontend run build",
     "cf:dev": "wrangler dev",
     "cf:deploy": "npm run build:frontend && wrangler deploy",

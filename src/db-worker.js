@@ -29,9 +29,13 @@ const SQL_EXEC_URL = 'https://akiszbinlwxuekncdyze.supabase.co/functions/v1/sql-
 const SUPABASE_ANON_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFraXN6YmlubHd4dWVrbmNkeXplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MzcwMDMsImV4cCI6MjA4OTExMzAwM30.Px6gcZ5zZgeVb99Wh9zDL2Ik_6146QKrDS-y2mtFW_4';
 
-const EDGE_TIMEOUT_MS = 10000;
+// Budgeted so the WORST case (edge timeout, then the Hyperdrive fallback's full
+// connect+query) stays under the main worker's 20s response cap (worker.js), so
+// a slow-edge + slow-Hyperdrive case still returns rows instead of being thrown
+// away as a 503: 6 + (2×2) + 6 = 16s < 20s.
+const EDGE_TIMEOUT_MS = 6000;
 const QUERY_TIMEOUT_MS = 6000;
-const CONNECT_ATTEMPT_MS = 3000;
+const CONNECT_ATTEMPT_MS = 2000;
 const CONNECT_ATTEMPTS = 2;
 
 function withTimeout(promise, ms, label) {
@@ -66,7 +70,16 @@ async function runViaEdge({ sql, params, method, connectionString }) {
     throw new Error(`edge sql-exec: invalid response (HTTP ${res.status})`);
   }
   if (!res.ok) throw new Error(`edge sql-exec: ${data?.error ?? `HTTP ${res.status}`}`);
-  return data.rows;
+
+  const rows = data.rows;
+  // Contract: drizzle pg-proxy 'all' (query-builder selects) needs POSITIONAL
+  // arrays (the Hyperdrive path sets rowMode:'array'). If the out-of-repo edge
+  // function ever returns object-keyed rows, drizzle maps garbage silently — so
+  // fail loud instead, which lets the Hyperdrive fallback take over.
+  if (method === 'all' && Array.isArray(rows) && rows.length && !Array.isArray(rows[0])) {
+    throw new Error("edge sql-exec returned object-keyed rows for method 'all'; expected positional arrays");
+  }
+  return rows;
 }
 
 /** Fallback path: node-postgres over Hyperdrive (healthy-pool days only). */
