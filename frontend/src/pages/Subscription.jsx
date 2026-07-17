@@ -100,7 +100,11 @@ export default function Subscription() {
       {/* Plan cards grouped by app */}
       <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
         {Object.entries(grouped).map(([appSlug, plans]) => {
-          const plan = plans.find((p) => p.billingInterval === billing) ?? plans[0];
+          // Only render the card for the selected interval — never fall back to
+          // another interval's plan (would show the wrong price and subscribe
+          // the user to the wrong-interval plan).
+          const plan = plans.find((p) => p.billingInterval === billing);
+          if (!plan) return null;
           return (
             <Card key={appSlug} className="flex flex-col" style={{ borderColor: '#1b7895' }}>
               <CardHeader>

@@ -49,12 +49,12 @@ export default function QuickBooks() {
   useEffect(() => {
     Promise.all([
       fetchWithAuth('/api/quickbooks/config')
-        .then((r) => r.json())
-        .then((d) => setConfig(d.config ?? null))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => setConfig(d?.config ?? null))
         .catch(() => {}),
       fetchWithAuth('/api/quickbooks/settings')
-        .then((r) => r.json())
-        .then((d) => setSettings(d.settings ?? null))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => setSettings(d?.settings ?? null))
         .catch(() => {}),
       fetchWithAuth('/api/ghl/pipelines')
         .then((r) => (r.ok ? r.json() : { pipelines: [] }))
