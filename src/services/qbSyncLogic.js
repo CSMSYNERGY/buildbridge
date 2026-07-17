@@ -41,6 +41,17 @@ export function shouldUpgradeStatus(current, incoming) {
   return i > c;
 }
 
+/**
+ * Derive a single display name from a GHL contact's fields, preferring an
+ * explicit contactName, then first+last, then a plain name. Returns null only
+ * when nothing usable is present (fixes the old `?? null` that never fired
+ * because ''.join always returns a string).
+ */
+export function deriveContactName({ contactName, firstName, lastName, name } = {}) {
+  const combined = [firstName, lastName].filter(Boolean).join(' ').trim();
+  return (contactName && contactName.trim()) || combined || (name && name.trim()) || null;
+}
+
 /** Read a QBO Customer custom field by name (case-insensitive); null if unset/empty. */
 export function readQbCustomerField(customer, fieldName) {
   if (!fieldName) return null;

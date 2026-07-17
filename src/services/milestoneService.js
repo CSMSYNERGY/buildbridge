@@ -73,14 +73,17 @@ export function parseDate(value) {
 
 function extractContact(payload) {
   const c = payload.contact ?? {};
+  const firstName = c.firstName ?? payload.first_name ?? null;
+  const lastName = c.lastName ?? payload.last_name ?? null;
   const name =
     c.name ??
     payload.full_name ??
     payload.contact_name ??
-    [payload.first_name, payload.last_name].filter(Boolean).join(' ') ??
-    null;
+    ([firstName, lastName].filter(Boolean).join(' ') || null);
   return {
     name: name || null,
+    firstName: firstName || null,
+    lastName: lastName || null,
     email: c.email ?? payload.email ?? null,
     phone: c.phone ?? payload.phone ?? null,
   };

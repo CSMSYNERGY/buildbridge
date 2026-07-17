@@ -17,6 +17,7 @@ import {
   estimateStatus,
   shouldUpgradeStatus,
   readQbCustomerField,
+  deriveContactName,
 } from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -99,6 +100,9 @@ function targetIsNewer(sourceUpdatedAt, targetUpdatedAt) {
 
 function qbCustomerToGhlContact(customer) {
   return {
+    // Map structured name parts so GHL shows a proper first/last, not one blob.
+    firstName: customer.GivenName ?? undefined,
+    lastName: customer.FamilyName ?? undefined,
     name: customer.DisplayName ?? undefined,
     email: customer.PrimaryEmailAddr?.Address ?? undefined,
     phone: customer.PrimaryPhone?.FreeFormNumber ?? undefined,
@@ -251,9 +255,9 @@ async function syncGhlContactsToQb(locationId, since, stats, settings) {
     const link = await getLink(locationId, 'contact', { ghlId: contact.id });
     if (isEcho(ghlUpdatedAt, link)) continue;
 
-    const name = contact.contactName
-      ?? [contact.firstName, contact.lastName].filter(Boolean).join(' ')
-      ?? null;
+    const firstName = contact.firstName ?? undefined;
+    const lastName = contact.lastName ?? undefined;
+    const name = deriveContactName(contact);
 
     if (link) {
       // Read the QB side for SyncToken + LWW comparison
@@ -269,6 +273,8 @@ async function syncGhlContactsToQb(locationId, since, stats, settings) {
         SyncToken: customer.SyncToken,
         sparse: true,
         ...(name ? { DisplayName: name } : {}),
+        ...(firstName ? { GivenName: firstName } : {}),
+        ...(lastName ? { FamilyName: lastName } : {}),
         ...(contact.email ? { PrimaryEmailAddr: { Address: contact.email } } : {}),
         ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: contact.phone } } : {}),
       });
@@ -282,6 +288,8 @@ async function syncGhlContactsToQb(locationId, since, stats, settings) {
       }
       const customer = await findOrCreateCustomer(locationId, {
         name,
+        firstName,
+        lastName,
         email: contact.email,
         phone: contact.phone,
       });

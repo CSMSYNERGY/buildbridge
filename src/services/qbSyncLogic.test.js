@@ -4,6 +4,7 @@ import {
   estimateStatus,
   shouldUpgradeStatus,
   readQbCustomerField,
+  deriveContactName,
 } from './qbSyncLogic.js';
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
@@ -60,6 +61,26 @@ describe('shouldUpgradeStatus — never downgrade', () => {
   });
   it('overwrites an unrecognized current value with a known status', () => {
     expect(shouldUpgradeStatus('Some manual note', 'Estimate sent')).toBe(true);
+  });
+});
+
+describe('deriveContactName — one clean name from GHL fields', () => {
+  it('prefers an explicit contactName', () => {
+    expect(deriveContactName({ contactName: 'Acme LLC', firstName: 'Jo', lastName: 'Bo' })).toBe('Acme LLC');
+  });
+  it('falls back to first + last', () => {
+    expect(deriveContactName({ firstName: 'Jane', lastName: 'Doe' })).toBe('Jane Doe');
+  });
+  it('handles first name only', () => {
+    expect(deriveContactName({ firstName: 'Jane' })).toBe('Jane');
+  });
+  it('falls back to a plain name field', () => {
+    expect(deriveContactName({ name: 'Jane Doe' })).toBe('Jane Doe');
+  });
+  it('returns null when nothing usable is present (no empty strings)', () => {
+    expect(deriveContactName({})).toBeNull();
+    expect(deriveContactName({ firstName: '', lastName: '' })).toBeNull();
+    expect(deriveContactName(undefined)).toBeNull();
   });
 });
 
