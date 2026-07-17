@@ -358,16 +358,24 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
 // ─── Entry points ─────────────────────────────────────────────────────────────
 
 /**
- * Run one two-way sync pass for a location (Rockwood model):
- * contacts + estimates, QB→GHL then GHL→QB, last-write-wins on conflicts.
+ * Run one sync pass for a location (Rockwood model). The location's
+ * qboSyncDirection decides which halves run:
+ *   'qb_to_ghl' → QB→GHL only (read-only against QuickBooks; never writes QBO)
+ *   'ghl_to_qb' → GHL→QB only (push contacts + opportunities into QuickBooks)
+ *   'two_way'   → both, last-write-wins on conflicts
  * Returns per-direction stats.
  */
 export async function syncLocation(locationId, settings) {
   const cfg = settings ?? (await getLocationSettings(locationId));
+  const direction = cfg.qboSyncDirection ?? 'off';
+  const pullFromQb = direction === 'qb_to_ghl' || direction === 'two_way';
+  const pushToQb = direction === 'ghl_to_qb' || direction === 'two_way';
+
   const since = await getSyncSince(locationId);
   const runStartedAt = new Date();
 
   const stats = {
+    direction,
     qbToGhlContactsCreated: 0,
     qbToGhlContactsUpdated: 0,
     qbToGhlEstimatesCreated: 0,
@@ -379,29 +387,35 @@ export async function syncLocation(locationId, settings) {
     skipped: 0,
   };
 
-  // QB → GHL (Change Data Capture)
-  const cdc = await getChangedEntities(locationId, ['Customer', 'Estimate'], since);
-  const responses = cdc?.CDCResponse?.flatMap((r) => r.QueryResponse ?? []) ?? [];
-  const customers = responses.flatMap((q) => q.Customer ?? []);
-  const estimates = responses.flatMap((q) => q.Estimate ?? []);
+  // QB → GHL (Change Data Capture). Skipped entirely for a push-only tenant so
+  // we don't even read QuickBooks needlessly.
+  if (pullFromQb) {
+    const cdc = await getChangedEntities(locationId, ['Customer', 'Estimate'], since);
+    const responses = cdc?.CDCResponse?.flatMap((r) => r.QueryResponse ?? []) ?? [];
+    const customers = responses.flatMap((q) => q.Customer ?? []);
+    const estimates = responses.flatMap((q) => q.Estimate ?? []);
 
-  await syncQbCustomersToGhl(locationId, customers, stats);
-  await syncQbEstimatesToGhl(locationId, estimates, stats);
+    await syncQbCustomersToGhl(locationId, customers, stats);
+    await syncQbEstimatesToGhl(locationId, estimates, stats);
+  }
 
-  // GHL → QB
-  await syncGhlContactsToQb(locationId, since, stats, cfg);
-  await syncGhlOpportunitiesToQb(locationId, since, stats);
+  // GHL → QB. Never runs for a read-only ('qb_to_ghl') tenant like Rockwood, so
+  // BuildBridge makes no writes to their QuickBooks.
+  if (pushToQb) {
+    await syncGhlContactsToQb(locationId, since, stats, cfg);
+    await syncGhlOpportunitiesToQb(locationId, since, stats);
+  }
 
   await setSyncState(locationId, runStartedAt);
-  console.log(`[rockwood] sync ${locationId}:`, JSON.stringify(stats));
+  console.log(`[rockwood] sync ${locationId} (${direction}):`, JSON.stringify(stats));
   return stats;
 }
 
 /**
- * Scheduler job: run the two-way sync for every location that has QuickBooks
- * connected, an active QuickBooks (or Suite) subscription, AND has opted into
- * the two-way sync (Rockwood model) in its settings. Locations that only use
- * milestone invoicing (Yoder model) are skipped here.
+ * Scheduler job: run the contact/estimate sync for every location that has
+ * QuickBooks connected, an active QuickBooks (or Suite) subscription, AND a
+ * sync direction other than 'off'. Locations that only use milestone invoicing
+ * (Yoder model) leave the direction 'off' and are skipped here.
  */
 export async function syncAllLocations() {
   const rows = await db
@@ -414,7 +428,8 @@ export async function syncAllLocations() {
     try {
       if (!(await hasAccess(locationId, 'quickbooks'))) continue;
       const settings = await getLocationSettings(locationId);
-      if (!settings.qboTwoWaySync) continue; // two-way sync not enabled for this tenant
+      const direction = settings.qboSyncDirection ?? 'off';
+      if (direction === 'off') continue; // sync not enabled for this tenant
       await syncLocation(locationId, settings);
       ran++;
     } catch (err) {

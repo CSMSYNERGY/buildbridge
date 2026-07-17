@@ -104,7 +104,7 @@ export default function QuickBooks() {
       const res = await fetchWithAuth('/api/quickbooks/settings', {
         method: 'PUT',
         body: JSON.stringify({
-          qboTwoWaySync: settings.qboTwoWaySync,
+          qboSyncDirection: settings.qboSyncDirection,
           qboMilestoneInvoicing: settings.qboMilestoneInvoicing,
           qboContactSyncPipelineId: settings.qboContactSyncPipelineId || null,
           qboInvoiceLeadDays: Number(settings.qboInvoiceLeadDays) || 0,
@@ -124,7 +124,7 @@ export default function QuickBooks() {
   if (loading) return <p className="text-muted-foreground text-sm">Loading configuration…</p>;
 
   const s = settings ?? {
-    qboTwoWaySync: false,
+    qboSyncDirection: 'off',
     qboMilestoneInvoicing: false,
     qboContactSyncPipelineId: null,
     qboInvoiceLeadDays: 3,
@@ -220,22 +220,34 @@ export default function QuickBooks() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* Two-way sync (Rockwood) */}
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <RefreshCw className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
-                    <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Two-way contact &amp; estimate sync</p>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Keep contacts and estimates in step between QuickBooks and HighLevel (last edit wins).
-                  </p>
+              {/* Contact & estimate sync direction (Rockwood model) */}
+              <div>
+                <div className="flex items-center gap-2">
+                  <RefreshCw className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
+                  <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Contact &amp; estimate sync</p>
                 </div>
-                <Toggle checked={s.qboTwoWaySync} onChange={setField('qboTwoWaySync')} />
+                <p className="text-xs text-muted-foreground mt-1 mb-2">
+                  Choose how contacts and estimates move between QuickBooks and HighLevel.
+                </p>
+                <select
+                  value={s.qboSyncDirection ?? 'off'}
+                  onChange={(e) => setField('qboSyncDirection')(e.target.value)}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <option value="off">Off — no contact/estimate sync</option>
+                  <option value="qb_to_ghl">QuickBooks → HighLevel (read-only; never changes QuickBooks)</option>
+                  <option value="ghl_to_qb">HighLevel → QuickBooks</option>
+                  <option value="two_way">Two-way (last edit wins)</option>
+                </select>
+                {s.qboSyncDirection === 'qb_to_ghl' && (
+                  <p className="text-xs text-muted-foreground mt-1.5">
+                    QuickBooks stays the source of truth — anything updated there flows into HighLevel, and BuildBridge never writes back to QuickBooks.
+                  </p>
+                )}
               </div>
 
-              {/* Contact-sync pipeline (only meaningful when two-way is on) */}
-              {s.qboTwoWaySync && (
+              {/* Contact-sync pipeline — only when a direction writes into QuickBooks */}
+              {(s.qboSyncDirection === 'ghl_to_qb' || s.qboSyncDirection === 'two_way') && (
                 <div className="space-y-1.5 pl-6">
                   <Label htmlFor="pipeline">Push contacts to QuickBooks from pipeline</Label>
                   <select

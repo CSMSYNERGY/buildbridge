@@ -1,6 +1,6 @@
 CREATE TABLE "location_settings" (
 	"location_id" text PRIMARY KEY NOT NULL,
-	"qbo_two_way_sync" boolean DEFAULT false NOT NULL,
+	"qbo_sync_direction" text DEFAULT 'off' NOT NULL,
 	"qbo_milestone_invoicing" boolean DEFAULT false NOT NULL,
 	"qbo_contact_sync_pipeline_id" text,
 	"qbo_invoice_lead_days" integer DEFAULT 3 NOT NULL,

@@ -2,12 +2,14 @@ import { db } from '../core/db/client.js';
 import { locationSettings } from '../core/db/schema.js';
 import { eq } from 'drizzle-orm';
 
-// Per-tenant QuickBooks feature configuration. Both models default OFF so
+// Per-tenant QuickBooks feature configuration. Everything defaults OFF so
 // connecting QuickBooks never silently starts syncing before the tenant opts in
 // (Carolyn 2026-07-15: "can't they be merged and they can use whichever aspects
 // they want?"). A missing row is treated as all-defaults.
+export const SYNC_DIRECTIONS = ['off', 'qb_to_ghl', 'ghl_to_qb', 'two_way'];
+
 const DEFAULTS = {
-  qboTwoWaySync: false,
+  qboSyncDirection: 'off',
   qboMilestoneInvoicing: false,
   qboContactSyncPipelineId: null,
   qboInvoiceLeadDays: 3,
@@ -32,7 +34,11 @@ export async function getLocationSettings(locationId) {
  */
 export async function upsertLocationSettings(locationId, fields = {}) {
   const set = {};
-  if (fields.qboTwoWaySync !== undefined) set.qboTwoWaySync = !!fields.qboTwoWaySync;
+  if (fields.qboSyncDirection !== undefined) {
+    set.qboSyncDirection = SYNC_DIRECTIONS.includes(fields.qboSyncDirection)
+      ? fields.qboSyncDirection
+      : DEFAULTS.qboSyncDirection;
+  }
   if (fields.qboMilestoneInvoicing !== undefined) {
     set.qboMilestoneInvoicing = !!fields.qboMilestoneInvoicing;
   }

@@ -150,18 +150,23 @@ export const qbSyncState = pgTable('qb_sync_state', {
 
 // ─── Location Settings ────────────────────────────────────────────────────────
 // Per-tenant QuickBooks feature configuration. One app, opt-in aspects: a
-// location enables the two-way sync (Rockwood model) and/or milestone
-// auto-invoicing (Yoder model) independently. Both default OFF so connecting
-// QuickBooks never silently starts syncing before the tenant is configured.
+// location chooses a contact/estimate sync direction (Rockwood model) and/or
+// milestone auto-invoicing (Yoder model) independently. Everything defaults OFF
+// so connecting QuickBooks never silently starts syncing before configuration.
 export const locationSettings = pgTable('location_settings', {
   locationId: text('location_id').primaryKey().references(() => locations.id),
-  // Rockwood: reconcile contacts + estimates between QBO and GHL every 15 min.
-  qboTwoWaySync: boolean('qbo_two_way_sync').notNull().default(false),
+  // Contact + estimate sync direction (Rockwood model):
+  //   'off'        → no sync
+  //   'qb_to_ghl'  → read-only from QuickBooks; never writes to QBO (Rockwood)
+  //   'ghl_to_qb'  → push GHL contacts/opportunities into QuickBooks
+  //   'two_way'    → reconcile both directions (last-write-wins)
+  qboSyncDirection: text('qbo_sync_direction').notNull().default('off'),
   // Yoder: opportunity Won → QBO customer + milestone rows → scheduled invoices.
   qboMilestoneInvoicing: boolean('qbo_milestone_invoicing').notNull().default(false),
   // When set, GHL→QBO contact CREATE is limited to contacts that have an
   // opportunity in this pipeline (Carolyn's "push to QuickBooks when the lead
   // moves into the Buildings pipeline"). Null → push all changed contacts.
+  // Only relevant for directions that write to QBO ('ghl_to_qb' / 'two_way').
   qboContactSyncPipelineId: text('qbo_contact_sync_pipeline_id'),
   // Default days before a milestone's date to raise its invoice (deposit is
   // always immediate). Copied onto each qb_milestones row at creation time.

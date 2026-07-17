@@ -108,7 +108,7 @@ export async function getQuickBooksConfig(req, res, next) {
 // Shape the settings row into the public JSON the frontend consumes.
 function serializeSettings(s) {
   return {
-    qboTwoWaySync: s.qboTwoWaySync,
+    qboSyncDirection: s.qboSyncDirection ?? 'off',
     qboMilestoneInvoicing: s.qboMilestoneInvoicing,
     qboContactSyncPipelineId: s.qboContactSyncPipelineId ?? null,
     qboInvoiceLeadDays: s.qboInvoiceLeadDays,
@@ -137,14 +137,14 @@ export async function saveQuickBooksSettings(req, res, next) {
   try {
     const { locationId } = req.user;
     const {
-      qboTwoWaySync,
+      qboSyncDirection,
       qboMilestoneInvoicing,
       qboContactSyncPipelineId,
       qboInvoiceLeadDays,
     } = req.body;
 
     const row = await upsertLocationSettings(locationId, {
-      qboTwoWaySync,
+      qboSyncDirection,
       qboMilestoneInvoicing,
       qboContactSyncPipelineId,
       qboInvoiceLeadDays,

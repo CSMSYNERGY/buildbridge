@@ -1,5 +1,5 @@
 {
-  "id": "ea45e95e-cb39-401e-983f-ac64fbda5e7d",
+  "id": "41443c78-fd76-420d-919b-5b17eb95e55e",
   "prevId": "c0162ae2-cc22-421c-bab8-7af65205dded",
   "version": "7",
   "dialect": "postgresql",
@@ -101,12 +101,12 @@
           "primaryKey": true,
           "notNull": true
         },
-        "qbo_two_way_sync": {
-          "name": "qbo_two_way_sync",
-          "type": "boolean",
+        "qbo_sync_direction": {
+          "name": "qbo_sync_direction",
+          "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": false
+          "default": "'off'"
         },
         "qbo_milestone_invoicing": {
           "name": "qbo_milestone_invoicing",

@@ -53,7 +53,8 @@ export async function updateOpportunity(req, res) {
 
 /**
  * POST /actions/quickbooks-sync
- * Manually trigger a two-way QuickBooks sync pass for the caller's location.
+ * Manually trigger a QuickBooks sync pass for the caller's location. Respects
+ * the location's configured sync direction (no-op when direction is 'off').
  */
 export async function triggerQuickBooksSync(req, res, next) {
   try {
