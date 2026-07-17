@@ -6,6 +6,7 @@ import {
   readQbCustomerField,
   deriveContactName,
   qbAddressToGhl,
+  mergeCustomFields,
 } from './qbSyncLogic.js';
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
@@ -39,8 +40,12 @@ describe('estimateStatus — QBO estimate → status label', () => {
     expect(estimateStatus({ TxnStatus: 'Pending' })).toBe('Estimate created');
     expect(estimateStatus({})).toBe('Estimate created');
   });
-  it('EmailSent outranks an Accepted TxnStatus', () => {
-    expect(estimateStatus({ EmailStatus: 'EmailSent', TxnStatus: 'Accepted' })).toBe('Estimate sent');
+  it('an Accepted estimate outranks EmailSent (it was emailed too, but Accepted is further along)', () => {
+    expect(estimateStatus({ EmailStatus: 'EmailSent', TxnStatus: 'Accepted' })).toBe('Accepted');
+    expect(estimateStatus({ EmailStatus: 'EmailSent', TxnStatus: 'Closed' })).toBe('Accepted');
+  });
+  it('EmailSent with a non-accepted status is "Estimate sent"', () => {
+    expect(estimateStatus({ EmailStatus: 'EmailSent', TxnStatus: 'Pending' })).toBe('Estimate sent');
   });
 });
 
@@ -110,6 +115,36 @@ describe('qbAddressToGhl — QuickBooks address → GHL fields', () => {
   it('returns {} for empty/missing address', () => {
     expect(qbAddressToGhl(null)).toEqual({});
     expect(qbAddressToGhl({})).toEqual({});
+  });
+});
+
+describe('mergeCustomFields — never wipe other custom fields', () => {
+  it('adds a field when none exist', () => {
+    expect(mergeCustomFields([], { id: 'status1', value: 'Invoiced' }))
+      .toEqual([{ id: 'status1', value: 'Invoiced' }]);
+    expect(mergeCustomFields(undefined, { id: 'status1', value: 'Invoiced' }))
+      .toEqual([{ id: 'status1', value: 'Invoiced' }]);
+  });
+  it('preserves the salesperson field when writing status', () => {
+    const existing = [{ id: 'sales1', value: 'Jane Doe' }];
+    expect(mergeCustomFields(existing, { id: 'status1', value: 'Invoiced' })).toEqual([
+      { id: 'sales1', value: 'Jane Doe' },
+      { id: 'status1', value: 'Invoiced' },
+    ]);
+  });
+  it('replaces the prior value for the same field id', () => {
+    const existing = [{ id: 'status1', value: 'Estimate sent' }, { id: 'sales1', value: 'Jane' }];
+    expect(mergeCustomFields(existing, { id: 'status1', value: 'Invoiced' })).toEqual([
+      { id: 'sales1', value: 'Jane' },
+      { id: 'status1', value: 'Invoiced' },
+    ]);
+  });
+  it('normalizes fieldValue/fieldKey shapes from GHL reads', () => {
+    const existing = [{ fieldKey: 'sales1', fieldValue: 'Jane' }];
+    expect(mergeCustomFields(existing, { id: 'status1', value: 'Invoiced' })).toEqual([
+      { id: 'sales1', value: 'Jane' },
+      { id: 'status1', value: 'Invoiced' },
+    ]);
   });
 });
 

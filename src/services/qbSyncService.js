@@ -19,6 +19,7 @@ import {
   readQbCustomerField,
   deriveContactName,
   qbAddressToGhl,
+  mergeCustomFields,
 } from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -140,10 +141,7 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
     if (isEcho(qbUpdatedAt, link)) continue;
 
     const sp = salespersonField(customer);
-    const ghlContact = {
-      ...qbCustomerToGhlContact(customer),
-      ...(sp ? { customFields: [sp] } : {}),
-    };
+    const base = qbCustomerToGhlContact(customer);
 
     if (link) {
       // Fetch GHL side for the LWW comparison
@@ -152,13 +150,19 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
       const ghlUpdatedAt = existing?.contact?.dateUpdated ?? existing?.contact?.updatedAt;
       if (targetIsNewer(qbUpdatedAt, ghlUpdatedAt)) continue; // GHL wins; other pass pushes it
 
-      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, ghlContact);
+      // Merge the salesperson field into the contact's existing custom fields so
+      // this PUT can't wipe the status field set by the sales-doc pass.
+      const payload = sp
+        ? { ...base, customFields: mergeCustomFields(existing?.contact?.customFields, sp) }
+        : base;
+      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
       await touchLink(link.id);
       stats.qbToGhlContactsUpdated++;
     } else {
       const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
         locationId,
-        ...ghlContact,
+        ...base,
+        ...(sp ? { customFields: [sp] } : {}),
       });
       const ghlId = created?.contact?.id ?? created?.id;
       if (!ghlId) {
@@ -208,9 +212,12 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     const currentVal = current?.value ?? current?.fieldValue;
     if (!shouldUpgradeStatus(currentVal, status)) continue;
 
-    await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
-      customFields: [{ id: targetField, value: status }],
+    // Merge into existing custom fields so we never wipe the salesperson field.
+    const customFields = mergeCustomFields(existing?.contact?.customFields, {
+      id: targetField,
+      value: status,
     });
+    await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
     stats.qbStatusUpdated++;
   }
 }

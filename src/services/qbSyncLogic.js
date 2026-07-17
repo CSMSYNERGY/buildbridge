@@ -21,12 +21,29 @@ export const QB_STATUS_RANK = {
   Invoiced: 4,
 };
 
-/** Map a QBO Estimate to a status label. EmailStatus 'EmailSent' outranks TxnStatus. */
+/**
+ * Map a QBO Estimate to a status label. Check acceptance FIRST: an accepted
+ * estimate was almost always emailed too, so "Accepted" must win over
+ * "Estimate sent" or the Accepted rung would be unreachable in practice.
+ */
 export function estimateStatus(estimate) {
-  if ((estimate?.EmailStatus ?? '') === 'EmailSent') return 'Estimate sent';
   const txn = estimate?.TxnStatus ?? '';
   if (txn === 'Accepted' || txn === 'Closed') return 'Accepted';
+  if ((estimate?.EmailStatus ?? '') === 'EmailSent') return 'Estimate sent';
   return 'Estimate created';
+}
+
+/**
+ * Merge one GHL custom field into a contact's existing custom-field array,
+ * replacing any prior value for the same field. Returned as [{id,value}] so a
+ * PUT never wipes other custom fields even if GHL replaces the array wholesale.
+ */
+export function mergeCustomFields(existing, newField) {
+  const targetId = newField.id;
+  const kept = (existing ?? [])
+    .filter((f) => f && (f.id ?? f.fieldKey) != null && f.id !== targetId && f.fieldKey !== targetId)
+    .map((f) => ({ id: f.id ?? f.fieldKey, value: f.value ?? f.fieldValue }));
+  return [...kept, newField];
 }
 
 /**
