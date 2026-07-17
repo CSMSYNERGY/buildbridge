@@ -12,6 +12,12 @@ import {
 import { getMappings } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
+import {
+  syncFlags,
+  estimateStatus,
+  shouldUpgradeStatus,
+  readQbCustomerField,
+} from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
 const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -114,10 +120,7 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
   // null when unconfigured / the QBO customer has no value in that field.
   function salespersonField(customer) {
     if (!sourceField || !targetField) return null;
-    const cf = (customer.CustomField ?? []).find(
-      (f) => (f.Name ?? '').toLowerCase() === sourceField.toLowerCase(),
-    );
-    const value = cf?.StringValue?.trim();
+    const value = readQbCustomerField(customer, sourceField);
     return value ? { id: targetField, value } : null;
   }
 
@@ -161,21 +164,8 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
 
 // QuickBooks sales-doc status → a GHL contact custom field (read-only QB→GHL).
 // Highest status reached wins so we never downgrade (e.g. a re-sent estimate
-// after invoicing won't overwrite "Invoiced").
-const QB_STATUS_RANK = {
-  'Estimate created': 1,
-  'Estimate sent': 2,
-  'Accepted': 3,
-  'Invoiced': 4,
-};
-
-function estimateStatus(estimate) {
-  if ((estimate.EmailStatus ?? '') === 'EmailSent') return 'Estimate sent';
-  const txn = estimate.TxnStatus ?? '';
-  if (txn === 'Accepted' || txn === 'Closed') return 'Accepted';
-  return 'Estimate created';
-}
-
+// after invoicing won't overwrite "Invoiced"). Status/rank logic lives in
+// qbSyncLogic.js (pure + unit-tested).
 async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg) {
   const targetField = cfg?.qboStatusGhlField ?? null;
   if (!targetField) return; // status reflection not configured
@@ -184,8 +174,7 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   const byCustomer = new Map();
   const consider = (customerId, status) => {
     if (!customerId) return;
-    const prev = byCustomer.get(customerId);
-    if (!prev || QB_STATUS_RANK[status] > QB_STATUS_RANK[prev]) {
+    if (shouldUpgradeStatus(byCustomer.get(customerId), status)) {
       byCustomer.set(customerId, status);
     }
   };
@@ -208,7 +197,7 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       (f) => f.id === targetField || f.fieldKey === targetField,
     );
     const currentVal = current?.value ?? current?.fieldValue;
-    if (currentVal && QB_STATUS_RANK[currentVal] >= QB_STATUS_RANK[status]) continue;
+    if (!shouldUpgradeStatus(currentVal, status)) continue;
 
     await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
       customFields: [{ id: targetField, value: status }],
@@ -371,8 +360,7 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
 export async function syncLocation(locationId, settings) {
   const cfg = settings ?? (await getLocationSettings(locationId));
   const direction = cfg.qboSyncDirection ?? 'off';
-  const pullFromQb = direction === 'qb_to_ghl' || direction === 'two_way';
-  const pushToQb = direction === 'ghl_to_qb' || direction === 'two_way';
+  const { pullFromQb, pushToQb } = syncFlags(direction);
 
   const since = await getSyncSince(locationId);
   const runStartedAt = new Date();
