@@ -24,13 +24,14 @@ export default function Home() {
   const [subs, setSubs] = useState([]);
 
   useEffect(() => {
-    fetchWithAuth('/api/subscription/plans')
+    // This location's actual active subscriptions — not the plan catalog.
+    fetchWithAuth('/api/subscription/active')
       .then((r) => r.ok ? r.json() : null)
-      .then((d) => d && setSubs(d.plans ?? []))
+      .then((d) => d && setSubs(d.subscriptions ?? []))
       .catch(() => {});
   }, [fetchWithAuth]);
 
-  const activeSubs = subs.filter((s) => s.status === 'active');
+  const activeSubs = subs;
 
   return (
     <div style={{ position: 'relative' }}>
@@ -76,8 +77,8 @@ export default function Home() {
             ) : (
               <div className="flex flex-wrap gap-2">
                 {activeSubs.map((s) => (
-                  <Badge key={s.id} variant={statusVariant(s.status)}>
-                    {s.name ?? s.planId}
+                  <Badge key={s.subscriptionId ?? s.planId} variant={statusVariant(s.status)}>
+                    {s.planName ?? s.planId}
                   </Badge>
                 ))}
               </div>

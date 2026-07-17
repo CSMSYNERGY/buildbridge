@@ -40,6 +40,18 @@ export async function getPlans(_req, res, next) {
   }
 }
 
+// ─── Current location's active subscriptions ──────────────────────────────────
+
+export async function getMySubscriptions(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const subscriptions = await subscriptionService.getActiveSubscriptions(locationId);
+    res.json({ subscriptions });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ─── Subscription create / cancel ─────────────────────────────────────────────
 
 export async function createSubscriptionHandler(req, res, next) {
