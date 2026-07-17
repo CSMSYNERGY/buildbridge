@@ -62,6 +62,13 @@ export async function createSubscriptionHandler(req, res, next) {
 
     if (!planId) throw createError(400, 'planId is required');
 
+    // Guard against duplicate subscriptions from a double-click / retry: don't
+    // create a second Deposyt subscription for a plan this location already has.
+    const existing = await subscriptionService.getActiveSubscriptions(locationId);
+    if (existing.some((s) => s.planId === planId)) {
+      throw createError(409, 'An active subscription for this plan already exists');
+    }
+
     // Create the subscription in Deposyt first
     const deposytSub = await deposytService.createSubscription(planId, {
       name,

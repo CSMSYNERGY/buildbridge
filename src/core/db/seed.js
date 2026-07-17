@@ -1,6 +1,12 @@
 import 'dotenv/config';
-import { db } from './client.js';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import { plans } from './schema.js';
+
+// Own postgres-js connection (like migrate.js). Routing through client.js would
+// pull in the Workers-only pg-proxy transport, which crashes in a plain Node run.
+const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+const db = drizzle(sql);
 
 const seedPlans = [
   { id: 'smartbuild_monthly',  name: 'SmartBuild Monthly',   appSlug: 'smartbuild',  billingInterval: 'monthly', priceUsd: 15000 },
@@ -20,7 +26,9 @@ try {
   console.log(`Seeded ${seedPlans.length} plans.`);
 } catch (err) {
   console.error('Seed failed:', err);
+  await sql.end();
   process.exit(1);
 }
 
+await sql.end();
 process.exit(0);

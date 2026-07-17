@@ -1,16 +1,20 @@
 import { Router } from 'express';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
+import { safeKeyEqual } from '../core/ghl/middleware.js';
 import { getLocations, getWebhookEvents, replayWebhookEvent } from '../controllers/adminController.js';
 
 const router = Router();
 
 /**
- * Validate the x-admin-key header for internal admin access.
+ * Validate the x-admin-key header for internal admin access. Uses the dedicated
+ * ADMIN_API_KEY when set (privilege separation from the actions API), else
+ * falls back to X_API_KEY. Constant-time compare.
  */
 function requireAdminKey(req, _res, next) {
   const key = req.headers['x-admin-key'];
-  if (!key || key !== env.X_API_KEY) {
+  const expected = env.ADMIN_API_KEY || env.X_API_KEY;
+  if (!safeKeyEqual(key, expected)) {
     return next(createError(401, 'Invalid or missing admin key'));
   }
   next();

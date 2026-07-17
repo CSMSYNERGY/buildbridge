@@ -81,7 +81,9 @@ async function processSubscriptionEvent(eventType, payload) {
     metadata,
   } = sub;
 
-  const locationId = metadata?.locationId;
+  // Use the same extractor as the logging path so `add` can't fail its NOT
+  // NULL/FK on locationId when metadata sits at a nested payload location.
+  const locationId = extractLocationId(payload) ?? metadata?.locationId;
 
   switch (eventType) {
     case 'recurring.subscription.add':
@@ -93,22 +95,28 @@ async function processSubscriptionEvent(eventType, payload) {
       );
       break;
 
-    case 'recurring.subscription.update':
-      await updateSubscription(deposytSubId, {
+    case 'recurring.subscription.update': {
+      const updated = await updateSubscription(deposytSubId, {
         status: status ?? 'active',
         planId,
         currentPeriodStart: current_period_start ? new Date(current_period_start * 1000) : undefined,
         currentPeriodEnd: current_period_end ? new Date(current_period_end * 1000) : undefined,
       });
+      if (!updated) console.warn(`[deposyt] update for unknown subscription ${deposytSubId} — no local row updated`);
       break;
+    }
 
-    case 'recurring.subscription.delete':
-      await cancelSubscription(deposytSubId);
+    case 'recurring.subscription.delete': {
+      const canceled = await cancelSubscription(deposytSubId);
+      if (!canceled) console.warn(`[deposyt] delete for unknown subscription ${deposytSubId} — no local row updated`);
       break;
+    }
 
-    case 'recurring.subscription.pause':
-      await pauseSubscription(deposytSubId);
+    case 'recurring.subscription.pause': {
+      const paused = await pauseSubscription(deposytSubId);
+      if (!paused) console.warn(`[deposyt] pause for unknown subscription ${deposytSubId} — no local row updated`);
       break;
+    }
 
     default:
       console.warn(`[deposyt] Unhandled event type: ${eventType}`);

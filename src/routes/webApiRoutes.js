@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth, clearAuthCookie } from '../core/auth/jwt.js';
+import { createError } from '../core/middleware/errorHandler.js';
 import { ghlSsoController } from '../core/auth/sso.js';
 import { authLimiter, actionLimiter } from '../core/middleware/rateLimiter.js';
 import {
@@ -44,6 +45,16 @@ router.post('/logout', (_req, res) => {
 // ─── Protected ────────────────────────────────────────────────────────────────
 
 router.use(requireAuth);
+
+// Every route below is tenant-scoped (uses req.user.locationId). Reject a
+// session that carries only a companyId (locationId null) up front rather than
+// letting controllers run location-scoped queries against a null id.
+router.use((req, _res, next) => {
+  if (!req.user?.locationId) {
+    return next(createError(400, 'This session has no associated location'));
+  }
+  next();
+});
 
 router.get('/me', getMe);
 router.get('/subscription/plans', getPlans);

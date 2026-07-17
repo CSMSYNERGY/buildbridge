@@ -2,9 +2,10 @@ import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import { env } from '../env.js';
 
-const migrationClient = postgres(env.DATABASE_URL, { max: 1 });
+// Read DATABASE_URL directly (dotenv above loads it) instead of the full app env
+// schema, so a DB-only migration run doesn't require every app secret to be set.
+const migrationClient = postgres(process.env.DATABASE_URL, { max: 1 });
 
 try {
   await migrate(drizzle(migrationClient), {

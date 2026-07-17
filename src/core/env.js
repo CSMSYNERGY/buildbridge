@@ -18,6 +18,9 @@ export const env = cleanEnv(process.env, {
 
   // API Security
   X_API_KEY: str(),
+  // Dedicated admin-endpoint key. Optional: when blank, /admin falls back to
+  // X_API_KEY (set this to a distinct value to separate admin from the actions API).
+  ADMIN_API_KEY: str({ default: '' }),
 
   // JWT
   APP_JWT_SECRET: str({ docs: 'Must be at least 32 characters' }),
