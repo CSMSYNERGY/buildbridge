@@ -18,6 +18,7 @@ import {
   shouldUpgradeStatus,
   readQbCustomerField,
   deriveContactName,
+  qbAddressToGhl,
 } from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -99,13 +100,17 @@ function targetIsNewer(sourceUpdatedAt, targetUpdatedAt) {
 // ─── QB → GHL ─────────────────────────────────────────────────────────────────
 
 function qbCustomerToGhlContact(customer) {
+  const addr = customer.BillAddr ?? customer.ShipAddr;
   return {
     // Map structured name parts so GHL shows a proper first/last, not one blob.
     firstName: customer.GivenName ?? undefined,
     lastName: customer.FamilyName ?? undefined,
     name: customer.DisplayName ?? undefined,
+    ...(customer.CompanyName ? { companyName: customer.CompanyName } : {}),
     email: customer.PrimaryEmailAddr?.Address ?? undefined,
     phone: customer.PrimaryPhone?.FreeFormNumber ?? undefined,
+    // Address (billing preferred, else shipping) → GHL address fields.
+    ...qbAddressToGhl(addr, customer.DisplayName),
   };
 }
 

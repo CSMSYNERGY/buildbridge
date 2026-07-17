@@ -52,6 +52,37 @@ export function deriveContactName({ contactName, firstName, lastName, name } = {
   return (contactName && contactName.trim()) || combined || (name && name.trim()) || null;
 }
 
+/**
+ * Map a QBO address (Customer BillAddr / ShipAddr) to GHL contact address
+ * fields. Handles both structured addresses (City / CountrySubDivisionCode /
+ * PostalCode) and free-form ones (Line1..Line5, where Line1 is often the
+ * recipient name — dropped when it just repeats the customer's display name).
+ * Returns {} when there's nothing to map.
+ */
+export function qbAddressToGhl(addr, displayName) {
+  if (!addr || typeof addr !== 'object') return {};
+  const out = {};
+
+  const hasStructured = addr.City || addr.CountrySubDivisionCode || addr.PostalCode || addr.Country;
+  if (hasStructured) {
+    const street = [addr.Line1, addr.Line2, addr.Line3].filter(Boolean).join(', ');
+    if (street) out.address1 = street;
+    if (addr.City) out.city = addr.City;
+    if (addr.CountrySubDivisionCode) out.state = addr.CountrySubDivisionCode;
+    if (addr.PostalCode) out.postalCode = addr.PostalCode;
+    if (addr.Country) out.country = addr.Country;
+    return out;
+  }
+
+  // Free-form: Line1 is often the recipient name — drop it if it matches.
+  const lines = [addr.Line1, addr.Line2, addr.Line3, addr.Line4, addr.Line5].filter(Boolean);
+  const name = (displayName ?? '').trim();
+  const withoutName = name ? lines.filter((l) => l.trim() !== name) : lines;
+  const street = (withoutName.length ? withoutName : lines).join(', ');
+  if (street) out.address1 = street;
+  return out;
+}
+
 /** Read a QBO Customer custom field by name (case-insensitive); null if unset/empty. */
 export function readQbCustomerField(customer, fieldName) {
   if (!fieldName) return null;

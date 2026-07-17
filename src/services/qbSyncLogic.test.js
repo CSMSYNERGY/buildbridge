@@ -5,6 +5,7 @@ import {
   shouldUpgradeStatus,
   readQbCustomerField,
   deriveContactName,
+  qbAddressToGhl,
 } from './qbSyncLogic.js';
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
@@ -81,6 +82,34 @@ describe('deriveContactName — one clean name from GHL fields', () => {
     expect(deriveContactName({})).toBeNull();
     expect(deriveContactName({ firstName: '', lastName: '' })).toBeNull();
     expect(deriveContactName(undefined)).toBeNull();
+  });
+});
+
+describe('qbAddressToGhl — QuickBooks address → GHL fields', () => {
+  it('maps a structured Customer BillAddr (from the real Invoice payload)', () => {
+    const addr = { Line1: 'PO Box 2005', Line2: '503 Mill Creek Trail', City: 'Hamilton', CountrySubDivisionCode: 'MT', PostalCode: '59840' };
+    expect(qbAddressToGhl(addr, 'Steve Reitz')).toEqual({
+      address1: 'PO Box 2005, 503 Mill Creek Trail',
+      city: 'Hamilton',
+      state: 'MT',
+      postalCode: '59840',
+    });
+  });
+  it('handles a free-form address and drops the leading name line (from the real Estimate payload)', () => {
+    const addr = { Line1: 'Tomie Martin', Line2: '835 Hamilton Heights', Line3: 'Corvallis, MT  59828' };
+    expect(qbAddressToGhl(addr, 'Tomie Martin')).toEqual({
+      address1: '835 Hamilton Heights, Corvallis, MT  59828',
+    });
+  });
+  it('keeps all free-form lines when none matches the name', () => {
+    const addr = { Line1: '835 Hamilton Heights', Line2: 'Corvallis, MT 59828' };
+    expect(qbAddressToGhl(addr, 'Someone Else')).toEqual({
+      address1: '835 Hamilton Heights, Corvallis, MT 59828',
+    });
+  });
+  it('returns {} for empty/missing address', () => {
+    expect(qbAddressToGhl(null)).toEqual({});
+    expect(qbAddressToGhl({})).toEqual({});
   });
 });
 
