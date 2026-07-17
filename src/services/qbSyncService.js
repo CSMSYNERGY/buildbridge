@@ -100,30 +100,25 @@ function qbCustomerToGhlContact(customer) {
 }
 
 async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
-  // Assigned-user (salesperson) mapping, QB → GHL. Rockwood stores the
-  // salesperson in a QuickBooks Customer custom field, named in Settings
-  // (location_settings.qboAssignedUserField). GHL's `assignedTo` needs a GHL
-  // user id, not a name, so the value→user translation is a mapper. Both
-  // optional — with nothing configured this is a no-op and contact sync is
-  // unchanged:
-  //   Settings field name        : cfg.qboAssignedUserField (or legacy mapper)
-  //   quickbooks / assigned_user : { '<QBO field value>': '<GHL user id>' }
+  // Salesperson copy, QB → GHL. Rockwood stores the salesperson in a QuickBooks
+  // Customer custom field (its NAME is set in Settings as qboAssignedUserField);
+  // its value is copied verbatim into a GHL contact custom field
+  // (qboAssignedUserGhlField). Both must be set, else this is a no-op and the
+  // name/email/phone contact sync is unchanged. Pure text copy — no GHL user
+  // lookup needed.
   const legacyFieldMap = await getMappings(locationId, 'quickbooks', 'qbo_assigned_user_field');
-  const assignedFieldName = cfg?.qboAssignedUserField
-    ?? legacyFieldMap.name ?? legacyFieldMap.assigned_user ?? null;
-  const assignedUserMap = assignedFieldName
-    ? await getMappings(locationId, 'quickbooks', 'assigned_user')
-    : {};
+  const sourceField = cfg?.qboAssignedUserField ?? legacyFieldMap.name ?? null;
+  const targetField = cfg?.qboAssignedUserGhlField ?? null;
 
-  // Read the salesperson custom field off a QBO Customer and translate it to the
-  // matching GHL user id (undefined when unset/unmapped so we never clobber it).
-  function resolveAssignedTo(customer) {
-    if (!assignedFieldName) return undefined;
+  // Build the GHL custom-field entry {id,value} carrying the salesperson, or
+  // null when unconfigured / the QBO customer has no value in that field.
+  function salespersonField(customer) {
+    if (!sourceField || !targetField) return null;
     const cf = (customer.CustomField ?? []).find(
-      (f) => (f.Name ?? '').toLowerCase() === assignedFieldName.toLowerCase(),
+      (f) => (f.Name ?? '').toLowerCase() === sourceField.toLowerCase(),
     );
     const value = cf?.StringValue?.trim();
-    return value ? assignedUserMap[value] || undefined : undefined;
+    return value ? { id: targetField, value } : null;
   }
 
   for (const customer of customers) {
@@ -132,10 +127,10 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
 
     if (isEcho(qbUpdatedAt, link)) continue;
 
-    const assignedTo = resolveAssignedTo(customer);
+    const sp = salespersonField(customer);
     const ghlContact = {
       ...qbCustomerToGhlContact(customer),
-      ...(assignedTo ? { assignedTo } : {}),
+      ...(sp ? { customFields: [sp] } : {}),
     };
 
     if (link) {
@@ -164,56 +159,61 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
   }
 }
 
-async function syncQbEstimatesToGhl(locationId, estimates, stats) {
-  const stageMap = await getMappings(locationId, 'quickbooks', 'opportunity_stage');
-  const pipelineMap = await getMappings(locationId, 'quickbooks', 'pipeline');
+// QuickBooks sales-doc status → a GHL contact custom field (read-only QB→GHL).
+// Highest status reached wins so we never downgrade (e.g. a re-sent estimate
+// after invoicing won't overwrite "Invoiced").
+const QB_STATUS_RANK = {
+  'Estimate created': 1,
+  'Estimate sent': 2,
+  'Accepted': 3,
+  'Invoiced': 4,
+};
 
-  for (const estimate of estimates) {
-    const qbUpdatedAt = estimate.MetaData?.LastUpdatedTime;
-    const link = await getLink(locationId, 'estimate', { qbId: estimate.Id });
+function estimateStatus(estimate) {
+  if ((estimate.EmailStatus ?? '') === 'EmailSent') return 'Estimate sent';
+  const txn = estimate.TxnStatus ?? '';
+  if (txn === 'Accepted' || txn === 'Closed') return 'Accepted';
+  return 'Estimate created';
+}
 
-    if (isEcho(qbUpdatedAt, link)) continue;
+async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg) {
+  const targetField = cfg?.qboStatusGhlField ?? null;
+  if (!targetField) return; // status reflection not configured
 
-    const monetaryValue = estimate.TotalAmt;
-    const mappedStage = stageMap[estimate.TxnStatus]; // e.g. 'Accepted' → GHL stage id
-
-    if (link) {
-      await makeGhlRequest(locationId, 'PUT', `/opportunities/${link.ghlId}`, {
-        ...(monetaryValue != null ? { monetaryValue } : {}),
-        ...(mappedStage ? { pipelineStageId: mappedStage } : {}),
-      });
-      await touchLink(link.id);
-      stats.qbToGhlEstimatesUpdated++;
-    } else {
-      // Creating a GHL opportunity requires a pipeline and a contact.
-      const pipelineId = pipelineMap.default;
-      const customerId = estimate.CustomerRef?.value;
-      const contactLink = customerId
-        ? await getLink(locationId, 'contact', { qbId: customerId })
-        : null;
-
-      if (!pipelineId || !contactLink) {
-        console.warn(`[rockwood] skipping QB estimate ${estimate.Id}: ${!pipelineId ? 'no pipeline mapper (quickbooks/pipeline/default)' : `no contact link for QB customer ${customerId}`}`);
-        stats.skipped++;
-        continue;
-      }
-
-      const created = await makeGhlRequest(locationId, 'POST', '/opportunities/', {
-        locationId,
-        pipelineId,
-        contactId: contactLink.ghlId,
-        name: `QB Estimate ${estimate.DocNumber ?? estimate.Id}`,
-        ...(monetaryValue != null ? { monetaryValue } : {}),
-        ...(mappedStage ? { pipelineStageId: mappedStage } : {}),
-      });
-      const ghlId = created?.opportunity?.id ?? created?.id;
-      if (!ghlId) {
-        console.warn(`[rockwood] GHL opportunity create returned no id for QB estimate ${estimate.Id}`);
-        continue;
-      }
-      await upsertLink(locationId, 'estimate', ghlId, estimate.Id);
-      stats.qbToGhlEstimatesCreated++;
+  // Best status per QB customer this run (invoices outrank estimates).
+  const byCustomer = new Map();
+  const consider = (customerId, status) => {
+    if (!customerId) return;
+    const prev = byCustomer.get(customerId);
+    if (!prev || QB_STATUS_RANK[status] > QB_STATUS_RANK[prev]) {
+      byCustomer.set(customerId, status);
     }
+  };
+  for (const est of estimates) consider(est.CustomerRef?.value, estimateStatus(est));
+  for (const inv of invoices) consider(inv.CustomerRef?.value, 'Invoiced');
+
+  for (const [customerId, status] of byCustomer) {
+    const link = await getLink(locationId, 'contact', { qbId: customerId });
+    if (!link) {
+      // No GHL contact linked yet (contacts sync in the same pass may create it
+      // next run); nothing to update this round.
+      stats.skipped++;
+      continue;
+    }
+
+    // Don't downgrade: read the contact's current status value first.
+    const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
+      .catch(() => null);
+    const current = (existing?.contact?.customFields ?? []).find(
+      (f) => f.id === targetField || f.fieldKey === targetField,
+    );
+    const currentVal = current?.value ?? current?.fieldValue;
+    if (currentVal && QB_STATUS_RANK[currentVal] >= QB_STATUS_RANK[status]) continue;
+
+    await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
+      customFields: [{ id: targetField, value: status }],
+    });
+    stats.qbStatusUpdated++;
   }
 }
 
@@ -381,8 +381,7 @@ export async function syncLocation(locationId, settings) {
     direction,
     qbToGhlContactsCreated: 0,
     qbToGhlContactsUpdated: 0,
-    qbToGhlEstimatesCreated: 0,
-    qbToGhlEstimatesUpdated: 0,
+    qbStatusUpdated: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,
     ghlToQbEstimatesCreated: 0,
@@ -391,15 +390,16 @@ export async function syncLocation(locationId, settings) {
   };
 
   // QB → GHL (Change Data Capture). Skipped entirely for a push-only tenant so
-  // we don't even read QuickBooks needlessly.
+  // we don't even read QuickBooks needlessly. Reads only — never writes QBO.
   if (pullFromQb) {
-    const cdc = await getChangedEntities(locationId, ['Customer', 'Estimate'], since);
+    const cdc = await getChangedEntities(locationId, ['Customer', 'Estimate', 'Invoice'], since);
     const responses = cdc?.CDCResponse?.flatMap((r) => r.QueryResponse ?? []) ?? [];
     const customers = responses.flatMap((q) => q.Customer ?? []);
     const estimates = responses.flatMap((q) => q.Estimate ?? []);
+    const invoices = responses.flatMap((q) => q.Invoice ?? []);
 
     await syncQbCustomersToGhl(locationId, customers, stats, cfg);
-    await syncQbEstimatesToGhl(locationId, estimates, stats);
+    await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg);
   }
 
   // GHL → QB. Never runs for a read-only ('qb_to_ghl') tenant like Rockwood, so

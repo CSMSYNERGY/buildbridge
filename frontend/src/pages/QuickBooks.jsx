@@ -41,6 +41,7 @@ export default function QuickBooks() {
   // Per-tenant feature settings
   const [settings, setSettings] = useState(null);
   const [pipelines, setPipelines] = useState([]);
+  const [ghlFields, setGhlFields] = useState([]);
   const [saving, setSaving] = useState(false);
 
   const isConnected = !!config;
@@ -58,6 +59,10 @@ export default function QuickBooks() {
       fetchWithAuth('/api/ghl/pipelines')
         .then((r) => (r.ok ? r.json() : { pipelines: [] }))
         .then((d) => setPipelines(d.pipelines ?? []))
+        .catch(() => {}),
+      fetchWithAuth('/api/ghl/fields')
+        .then((r) => (r.ok ? r.json() : { fields: [] }))
+        .then((d) => setGhlFields(d.fields ?? []))
         .catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [fetchWithAuth]);
@@ -108,6 +113,8 @@ export default function QuickBooks() {
           qboMilestoneInvoicing: settings.qboMilestoneInvoicing,
           qboContactSyncPipelineId: settings.qboContactSyncPipelineId || null,
           qboAssignedUserField: settings.qboAssignedUserField || null,
+          qboAssignedUserGhlField: settings.qboAssignedUserGhlField || null,
+          qboStatusGhlField: settings.qboStatusGhlField || null,
           qboInvoiceLeadDays: Number(settings.qboInvoiceLeadDays) || 0,
         }),
       });
@@ -129,6 +136,8 @@ export default function QuickBooks() {
     qboMilestoneInvoicing: false,
     qboContactSyncPipelineId: null,
     qboAssignedUserField: null,
+    qboAssignedUserGhlField: null,
+    qboStatusGhlField: null,
     qboInvoiceLeadDays: 3,
   };
 
@@ -248,19 +257,54 @@ export default function QuickBooks() {
                 )}
               </div>
 
-              {/* Salesperson: read a QuickBooks custom field → GHL assigned user (QB→GHL) */}
+              {/* What to reflect FROM QuickBooks into GHL (QB→GHL directions) */}
               {(s.qboSyncDirection === 'qb_to_ghl' || s.qboSyncDirection === 'two_way') && (
-                <div className="space-y-1.5 pl-6">
-                  <Label htmlFor="assignedField">QuickBooks salesperson field name</Label>
-                  <Input
-                    id="assignedField"
-                    placeholder="e.g. Salesperson"
-                    value={s.qboAssignedUserField ?? ''}
-                    onChange={(e) => setField('qboAssignedUserField')(e.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    The QuickBooks customer custom field that holds the salesperson — its value is carried into GHL's assigned user. Leave blank to skip.
-                  </p>
+                <div className="space-y-4 pl-6">
+                  {/* Salesperson: QB custom field → GHL custom field */}
+                  <div className="space-y-1.5">
+                    <Label htmlFor="assignedField">Salesperson — QuickBooks field name</Label>
+                    <Input
+                      id="assignedField"
+                      placeholder="e.g. Salesperson"
+                      value={s.qboAssignedUserField ?? ''}
+                      onChange={(e) => setField('qboAssignedUserField')(e.target.value)}
+                    />
+                    <Label htmlFor="assignedGhl" className="pt-1 block">Copy it into this GHL field</Label>
+                    <select
+                      id="assignedGhl"
+                      value={s.qboAssignedUserGhlField ?? ''}
+                      onChange={(e) => setField('qboAssignedUserGhlField')(e.target.value || null)}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <option value="">— none —</option>
+                      {ghlFields.map((f) => (
+                        <option key={f.id ?? f.key} value={f.id ?? f.key}>{f.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground">
+                      The salesperson from that QuickBooks field is copied into this GHL custom field. Set both to enable.
+                    </p>
+                  </div>
+
+                  {/* QB estimate/invoice status → GHL custom field */}
+                  <div className="space-y-1.5">
+                    <Label htmlFor="statusGhl">QuickBooks estimate/invoice status → GHL field</Label>
+                    <select
+                      id="statusGhl"
+                      value={s.qboStatusGhlField ?? ''}
+                      onChange={(e) => setField('qboStatusGhlField')(e.target.value || null)}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <option value="">— none —</option>
+                      {ghlFields.map((f) => (
+                        <option key={f.id ?? f.key} value={f.id ?? f.key}>{f.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-muted-foreground">
+                      When an estimate or invoice is created/sent in QuickBooks, this GHL field is updated
+                      (Estimate created → Estimate sent → Accepted → Invoiced). QuickBooks is never modified.
+                    </p>
+                  </div>
                 </div>
               )}
 

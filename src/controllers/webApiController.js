@@ -124,6 +124,7 @@ export async function getGhlFields(req, res, next) {
     // GHL returns { customFields: [{ id, name, fieldKey, dataType, ... }] }
     const fields = (data?.customFields ?? []).map((f) => ({
       key: f.fieldKey ?? f.id,
+      id: f.id,
       label: f.name,
     }));
 

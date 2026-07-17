@@ -171,6 +171,13 @@ export const locationSettings = pgTable('location_settings', {
   // Name of the QuickBooks Customer custom field that holds the salesperson /
   // assigned user (read-only QB→GHL). Entered in Settings; blank = disabled.
   qboAssignedUserField: text('qbo_assigned_user_field'),
+  // GHL contact custom-field id that the salesperson value is copied into
+  // (QB→GHL). Picked in Settings; blank = don't copy the salesperson.
+  qboAssignedUserGhlField: text('qbo_assigned_user_ghl_field'),
+  // GHL contact custom-field id that reflects QuickBooks sales-doc status
+  // (Estimate created/sent, Accepted, Invoiced). Picked in Settings; blank =
+  // don't reflect status.
+  qboStatusGhlField: text('qbo_status_ghl_field'),
   // Default days before a milestone's date to raise its invoice (deposit is
   // always immediate). Copied onto each qb_milestones row at creation time.
   qboInvoiceLeadDays: integer('qbo_invoice_lead_days').notNull().default(3),

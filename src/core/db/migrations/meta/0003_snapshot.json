@@ -1,5 +1,5 @@
 {
-  "id": "1918c987-8bf9-4035-8f56-a2b1fda915c8",
+  "id": "19a14aab-c6b5-4663-8eec-058b586d0755",
   "prevId": "c0162ae2-cc22-421c-bab8-7af65205dded",
   "version": "7",
   "dialect": "postgresql",
@@ -123,6 +123,18 @@
         },
         "qbo_assigned_user_field": {
           "name": "qbo_assigned_user_field",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "qbo_assigned_user_ghl_field": {
+          "name": "qbo_assigned_user_ghl_field",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "qbo_status_ghl_field": {
+          "name": "qbo_status_ghl_field",
           "type": "text",
           "primaryKey": false,
           "notNull": false

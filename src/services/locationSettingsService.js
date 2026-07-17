@@ -13,6 +13,8 @@ const DEFAULTS = {
   qboMilestoneInvoicing: false,
   qboContactSyncPipelineId: null,
   qboAssignedUserField: null,
+  qboAssignedUserGhlField: null,
+  qboStatusGhlField: null,
   qboInvoiceLeadDays: 3,
 };
 
@@ -50,6 +52,14 @@ export async function upsertLocationSettings(locationId, fields = {}) {
   if (fields.qboAssignedUserField !== undefined) {
     const v = fields.qboAssignedUserField;
     set.qboAssignedUserField = v ? String(v).trim() : null;
+  }
+  if (fields.qboAssignedUserGhlField !== undefined) {
+    const v = fields.qboAssignedUserGhlField;
+    set.qboAssignedUserGhlField = v ? String(v) : null;
+  }
+  if (fields.qboStatusGhlField !== undefined) {
+    const v = fields.qboStatusGhlField;
+    set.qboStatusGhlField = v ? String(v) : null;
   }
   if (fields.qboInvoiceLeadDays !== undefined) {
     const n = Number(fields.qboInvoiceLeadDays);

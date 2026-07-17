@@ -4,6 +4,8 @@ CREATE TABLE "location_settings" (
 	"qbo_milestone_invoicing" boolean DEFAULT false NOT NULL,
 	"qbo_contact_sync_pipeline_id" text,
 	"qbo_assigned_user_field" text,
+	"qbo_assigned_user_ghl_field" text,
+	"qbo_status_ghl_field" text,
 	"qbo_invoice_lead_days" integer DEFAULT 3 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
