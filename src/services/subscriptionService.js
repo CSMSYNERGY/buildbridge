@@ -1,6 +1,6 @@
 import { db } from '../core/db/client.js';
 import { subscriptions, plans } from '../core/db/schema.js';
-import { eq, and, inArray } from 'drizzle-orm';
+import { eq, and, or, gt, isNull, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 
 // Apps covered by the Suite plan
@@ -15,10 +15,11 @@ export async function createSubscription(
   planId,
   periodEnd = null,
 ) {
+  const id = deposytSubId ?? randomUUID();
   const [row] = await db
     .insert(subscriptions)
     .values({
-      id: deposytSubId ?? randomUUID(),
+      id,
       locationId,
       planId,
       status: 'active',
@@ -28,7 +29,16 @@ export async function createSubscription(
     .onConflictDoNothing()
     .returning();
 
-  return row;
+  if (row) return row;
+
+  // Conflict (subscription already exists): re-select so callers never get
+  // undefined (which surfaced as a 201 { subscription: undefined } to clients).
+  const [existing] = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.id, id))
+    .limit(1);
+  return existing ?? null;
 }
 
 /**
@@ -82,6 +92,9 @@ export async function getActiveSubscriptions(locationId) {
       and(
         eq(subscriptions.locationId, locationId),
         eq(subscriptions.status, 'active'),
+        // Backstop a missed cancel/expiry webhook: an "active" row past its
+        // period end no longer grants access.
+        or(isNull(subscriptions.currentPeriodEnd), gt(subscriptions.currentPeriodEnd, new Date())),
       ),
     );
 }

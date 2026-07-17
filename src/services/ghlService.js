@@ -76,13 +76,16 @@ export async function refreshAccessToken(locationId) {
   }
 
   const data = await res.json();
-  const expiresAt = new Date(Date.now() + data.expires_in * 1000);
+  const expiresIn = Number(data.expires_in) || 3600;
+  const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
   await db
     .update(locations)
     .set({
       ghlAccessToken: encrypt(data.access_token),
-      ghlRefreshToken: encrypt(data.refresh_token),
+      // GHL rotates refresh tokens; keep the existing (already-encrypted) one if
+      // none is returned, so we never encrypt(undefined) and crash.
+      ghlRefreshToken: data.refresh_token ? encrypt(data.refresh_token) : loc.ghlRefreshToken,
       ghlTokenExpiresAt: expiresAt,
       updatedAt: new Date(),
     })
@@ -125,11 +128,23 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
     'Content-Type': 'application/json',
   };
 
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     method,
     headers,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
+
+  // A 401 can mean the token was revoked/rotated out-of-band — refresh once and retry.
+  if (res.status === 401) {
+    const newToken = await refreshAccessToken(locationId).catch(() => null);
+    if (newToken) {
+      res = await fetch(url, {
+        method,
+        headers: { ...headers, Authorization: `Bearer ${newToken}` },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+    }
+  }
 
   if (!res.ok) {
     const errBody = await res.text();

@@ -96,7 +96,7 @@ function extractContact(payload) {
  *    mappers (appSlug 'quickbooks', types 'milestone_amount'/'milestone_date').
  * 3. Persists qb_milestones rows; the scheduler invoices them when due.
  */
-export async function handleOpportunityWon({ locationId, payload }) {
+export async function handleOpportunityWon({ eventType, locationId, payload }) {
   // Only act for locations subscribed to QuickBooks (or Suite).
   if (!(await hasAccess(locationId, 'quickbooks'))) {
     console.log(`[yoder] location ${locationId} has no quickbooks access — skipping`);
@@ -111,9 +111,12 @@ export async function handleOpportunityWon({ locationId, payload }) {
     return;
   }
 
-  // If the event carries a stage/status, only act on Won.
+  // Require an actual Won. The explicit 'opportunity.won' event is Won by
+  // definition; a generic 'opportunity.stage_change' must carry status=Won —
+  // otherwise a move to ANY stage would wrongly create milestones.
   const status = (payload.status ?? payload.opportunity?.status ?? '').toString().toLowerCase();
-  if (status && status !== 'won' && status !== 'open won') {
+  const isWon = eventType === 'opportunity.won' || status === 'won' || status === 'open won';
+  if (!isWon) {
     return;
   }
 

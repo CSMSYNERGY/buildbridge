@@ -6,7 +6,7 @@ const registry = new Map(); // eventType → handler[]
 
 /**
  * Register a handler for a GHL event type (e.g. 'opportunity.stage_change').
- * Handler signature: async ({ locationId, payload }) => void
+ * Handler signature: async ({ eventType, locationId, payload }) => void
  */
 export function registerGhlHandler(eventType, handler) {
   if (!registry.has(eventType)) registry.set(eventType, []);
@@ -14,14 +14,16 @@ export function registerGhlHandler(eventType, handler) {
 }
 
 /**
- * Dispatch a GHL event to all registered handlers for its type.
+ * Dispatch a GHL event to all registered handlers for its type. The eventType
+ * is passed through so a handler shared across events (e.g. stage_change vs
+ * won) can tell which one fired it.
  * Returns the number of handlers invoked. Handler errors propagate so the
  * caller can mark the event failed (and the admin replay endpoint can retry).
  */
 export async function dispatchGhlEvent(eventType, { locationId, payload }) {
   const handlers = registry.get(eventType) ?? [];
   for (const handler of handlers) {
-    await handler({ locationId, payload });
+    await handler({ eventType, locationId, payload });
   }
   return handlers.length;
 }

@@ -18,7 +18,10 @@ async function deposytFetch(method, path, body = undefined) {
     throw createError(res.status, `Deposyt API error [${method} ${path}]: ${text}`);
   }
 
-  return res.json();
+  // A cancel (DELETE) can return 204 / empty body — don't blow up on res.json().
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 /**
