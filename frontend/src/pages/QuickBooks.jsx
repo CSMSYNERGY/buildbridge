@@ -106,16 +106,18 @@ export default function QuickBooks() {
   async function handleSaveSettings() {
     setSaving(true);
     try {
+      // Guard the settings-fetch-failure path: `settings` can be null here.
+      const cur = settings ?? {};
       const res = await fetchWithAuth('/api/quickbooks/settings', {
         method: 'PUT',
         body: JSON.stringify({
-          qboSyncDirection: settings.qboSyncDirection,
-          qboMilestoneInvoicing: settings.qboMilestoneInvoicing,
-          qboContactSyncPipelineId: settings.qboContactSyncPipelineId || null,
-          qboAssignedUserField: settings.qboAssignedUserField || null,
-          qboAssignedUserGhlField: settings.qboAssignedUserGhlField || null,
-          qboStatusGhlField: settings.qboStatusGhlField || null,
-          qboInvoiceLeadDays: Number(settings.qboInvoiceLeadDays) || 0,
+          qboSyncDirection: cur.qboSyncDirection ?? 'off',
+          qboMilestoneInvoicing: cur.qboMilestoneInvoicing ?? false,
+          qboContactSyncPipelineId: cur.qboContactSyncPipelineId || null,
+          qboAssignedUserField: cur.qboAssignedUserField || null,
+          qboAssignedUserGhlField: cur.qboAssignedUserGhlField || null,
+          qboStatusGhlField: cur.qboStatusGhlField || null,
+          qboInvoiceLeadDays: Number(cur.qboInvoiceLeadDays) || 0,
         }),
       });
       const data = await res.json();

@@ -148,7 +148,7 @@ export async function getGhlFields(req, res, next) {
     const fields = (data?.customFields ?? []).map((f) => ({
       key: f.fieldKey ?? f.id,
       id: f.id,
-      label: f.name,
+      label: f.name ?? f.fieldKey ?? f.id, // never null → frontend filter won't crash
     }));
 
     res.json({ fields });
@@ -187,6 +187,12 @@ export async function createMapper(req, res, next) {
     const { locationId } = req.user;
     const { appSlug, mapperType, externalKey, ghlValue } = req.body;
 
+    if (!appSlug || !mapperType || !externalKey || !ghlValue) {
+      throw createError(400, 'appSlug, mapperType, externalKey, and ghlValue are required');
+    }
+
+    // Upsert on the (location, app, type, externalKey) unique index so a repeat
+    // save updates the value instead of surfacing a unique-violation as a 500.
     const [row] = await db
       .insert(mappers)
       .values({
@@ -196,6 +202,10 @@ export async function createMapper(req, res, next) {
         mapperType,
         externalKey,
         ghlValue,
+      })
+      .onConflictDoUpdate({
+        target: [mappers.locationId, mappers.appSlug, mappers.mapperType, mappers.externalKey],
+        set: { ghlValue, updatedAt: new Date() },
       })
       .returning();
 

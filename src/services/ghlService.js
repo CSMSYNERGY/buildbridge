@@ -147,8 +147,10 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
   }
 
   if (!res.ok) {
+    // Keep the upstream body server-side only; don't leak it to API clients.
     const errBody = await res.text();
-    throw createError(res.status, `GHL API error [${method} ${path}]: ${errBody}`);
+    console.error(`[ghlService] GHL API error [${method} ${path}] HTTP ${res.status}:`, errBody);
+    throw createError(res.status, `GHL API request failed (${res.status})`);
   }
 
   return res.json();

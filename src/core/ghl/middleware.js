@@ -1,11 +1,22 @@
+import crypto from 'crypto';
 import { db } from '../db/client.js';
 import { subscriptions, plans } from '../db/schema.js';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or, gt, isNull } from 'drizzle-orm';
 import { env } from '../env.js';
 import { createError } from '../middleware/errorHandler.js';
 
 // Apps covered by the Suite plan
 const SUITE_APPS = ['smartbuild', 'idearoom', 'quickbooks', 'monday'];
+
+// Constant-time string compare so a leaked timing side-channel can't be used to
+// guess a shared secret byte-by-byte.
+export function safeKeyEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
 
 /**
  * Validate the internal X-API-Key header.
@@ -13,7 +24,7 @@ const SUITE_APPS = ['smartbuild', 'idearoom', 'quickbooks', 'monday'];
  */
 export function verifyApiKey(req, _res, next) {
   const key = req.headers['x-api-key'];
-  if (!key || key !== env.X_API_KEY) {
+  if (!safeKeyEqual(key, env.X_API_KEY)) {
     return next(createError(401, 'Invalid or missing API key'));
   }
   next();
@@ -42,6 +53,9 @@ export function checkSubscription(appSlug) {
           and(
             eq(subscriptions.locationId, locationId),
             eq(subscriptions.status, 'active'),
+            // Don't grant access on an "active" row past its period end (missed
+            // cancel/expiry webhook backstop).
+            or(isNull(subscriptions.currentPeriodEnd), gt(subscriptions.currentPeriodEnd, new Date())),
           ),
         );
 

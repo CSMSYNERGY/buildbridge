@@ -36,6 +36,9 @@ function requestGhlSsoPayload(timeoutMs = 5000) {
     }, timeoutMs);
 
     function onMessage(event) {
+      // Only trust the parent frame we actually messaged — defeats a sibling/
+      // co-frame injecting a forged SSO payload.
+      if (event.source !== window.parent) return;
       const data = event.data;
       if (data && data.message === 'REQUEST_USER_DATA_RESPONSE' && data.payload) {
         clearTimeout(timer);
