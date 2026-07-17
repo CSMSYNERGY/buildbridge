@@ -3,6 +3,7 @@ import {
   plans,
   mappers,
   integrationCredentials,
+  subscriptions,
 } from '../core/db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { encrypt, decrypt } from '../core/middleware/encrypt.js';
@@ -90,6 +91,16 @@ export async function cancelSubscriptionHandler(req, res, next) {
     const { deposytSubId } = req.body;
 
     if (!deposytSubId) throw createError(400, 'deposytSubId is required');
+
+    // Ownership check FIRST — the subscription must belong to the caller's
+    // location. Without this, any tenant could cancel another tenant's
+    // subscription (and their Deposyt billing) by supplying its id (IDOR).
+    const [owned] = await db
+      .select({ id: subscriptions.id })
+      .from(subscriptions)
+      .where(and(eq(subscriptions.id, deposytSubId), eq(subscriptions.locationId, locationId)))
+      .limit(1);
+    if (!owned) throw createError(404, 'Subscription not found');
 
     // Cancel in Deposyt
     await deposytService.cancelSubscription(deposytSubId);
