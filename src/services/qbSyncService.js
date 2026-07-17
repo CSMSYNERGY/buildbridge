@@ -100,11 +100,40 @@ function qbCustomerToGhlContact(customer) {
 }
 
 async function syncQbCustomersToGhl(locationId, customers, stats) {
+  // Assigned-user (salesperson) mapping, QB → GHL. Rockwood stores the
+  // salesperson in a QuickBooks Customer custom field; GHL's `assignedTo` needs
+  // a GHL user id, not a name — so two optional mappers drive this (no mapping
+  // configured → this is a no-op and contact sync is unchanged):
+  //   quickbooks / qbo_assigned_user_field : { name: '<QBO custom field name>' }
+  //   quickbooks / assigned_user           : { '<QBO field value>': '<GHL user id>' }
+  const assignedFieldMap = await getMappings(locationId, 'quickbooks', 'qbo_assigned_user_field');
+  const assignedFieldName = assignedFieldMap.name ?? assignedFieldMap.assigned_user ?? null;
+  const assignedUserMap = assignedFieldName
+    ? await getMappings(locationId, 'quickbooks', 'assigned_user')
+    : {};
+
+  // Read the salesperson custom field off a QBO Customer and translate it to the
+  // matching GHL user id (undefined when unset/unmapped so we never clobber it).
+  function resolveAssignedTo(customer) {
+    if (!assignedFieldName) return undefined;
+    const cf = (customer.CustomField ?? []).find(
+      (f) => (f.Name ?? '').toLowerCase() === assignedFieldName.toLowerCase(),
+    );
+    const value = cf?.StringValue?.trim();
+    return value ? assignedUserMap[value] || undefined : undefined;
+  }
+
   for (const customer of customers) {
     const qbUpdatedAt = customer.MetaData?.LastUpdatedTime;
     const link = await getLink(locationId, 'contact', { qbId: customer.Id });
 
     if (isEcho(qbUpdatedAt, link)) continue;
+
+    const assignedTo = resolveAssignedTo(customer);
+    const ghlContact = {
+      ...qbCustomerToGhlContact(customer),
+      ...(assignedTo ? { assignedTo } : {}),
+    };
 
     if (link) {
       // Fetch GHL side for the LWW comparison
@@ -113,13 +142,13 @@ async function syncQbCustomersToGhl(locationId, customers, stats) {
       const ghlUpdatedAt = existing?.contact?.dateUpdated ?? existing?.contact?.updatedAt;
       if (targetIsNewer(qbUpdatedAt, ghlUpdatedAt)) continue; // GHL wins; other pass pushes it
 
-      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, qbCustomerToGhlContact(customer));
+      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, ghlContact);
       await touchLink(link.id);
       stats.qbToGhlContactsUpdated++;
     } else {
       const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
         locationId,
-        ...qbCustomerToGhlContact(customer),
+        ...ghlContact,
       });
       const ghlId = created?.contact?.id ?? created?.id;
       if (!ghlId) {
