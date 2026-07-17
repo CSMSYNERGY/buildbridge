@@ -39,7 +39,7 @@ export function getPayloadField(payload, fieldKey) {
       const hit = cf.find(
         (f) => f.key === fieldKey || f.fieldKey === fieldKey || f.id === fieldKey,
       );
-      if (hit !== undefined) return hit.value ?? hit.field_value;
+      if (hit !== undefined) return hit.value ?? hit.fieldValue ?? hit.field_value;
     } else if (typeof cf === 'object' && cf[fieldKey] !== undefined) {
       return cf[fieldKey];
     }

@@ -11,7 +11,14 @@ const AUTH_TAG_LENGTH = 16;
 // on first encrypt/decrypt call (inside a request) avoids that.
 let _key;
 function getKey() {
-  if (!_key) _key = Buffer.from(env.ENCRYPTION_KEY, 'hex'); // 32 bytes
+  if (!_key) {
+    // Validate before use so a mis-set secret fails with a clear message rather
+    // than a silent short/garbage AES key (Buffer.from tolerates bad hex).
+    if (!/^[0-9a-fA-F]{64}$/.test(env.ENCRYPTION_KEY ?? '')) {
+      throw new Error('ENCRYPTION_KEY must be 64 hex characters (32 bytes for AES-256)');
+    }
+    _key = Buffer.from(env.ENCRYPTION_KEY, 'hex'); // 32 bytes
+  }
   return _key;
 }
 

@@ -218,6 +218,9 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       value: status,
     });
     await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
+    // Advance the link cursor so this GHL write isn't re-detected as a
+    // GHL-origin change and pushed back to QBO next cycle (echo suppression).
+    await touchLink(link.id);
     stats.qbStatusUpdated++;
   }
 }

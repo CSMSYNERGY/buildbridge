@@ -3,7 +3,10 @@ import { env } from '../env.js';
 import { createError } from '../middleware/errorHandler.js';
 
 const COOKIE_NAME = 'sb_token';
-const COOKIE_OPTIONS = {
+// Shared attributes so set and clear can't drift. A cookie is only deleted when
+// the clearing Set-Cookie carries the SAME secure/sameSite/partitioned/path —
+// otherwise the embedded-iframe (CHIPS) cookie survives logout.
+const COOKIE_BASE = {
   httpOnly: true,
   secure: env.NODE_ENV === 'production',
   sameSite: 'none',
@@ -11,9 +14,9 @@ const COOKIE_OPTIONS = {
   // browsers that block unpartitioned third-party cookies (the cookie is scoped
   // per top-level site). Browsers that don't support it ignore the attribute.
   partitioned: env.NODE_ENV === 'production',
-  maxAge: 60 * 60 * 24 * 7 * 1000, // 7 days in ms
   path: '/',
 };
+const COOKIE_OPTIONS = { ...COOKIE_BASE, maxAge: 60 * 60 * 24 * 7 * 1000 }; // 7 days in ms
 
 export function setAuthCookie(res, payload) {
   const token = jwt.sign(payload, env.APP_JWT_SECRET, { expiresIn: '7d' });
@@ -22,7 +25,7 @@ export function setAuthCookie(res, payload) {
 }
 
 export function clearAuthCookie(res) {
-  res.clearCookie(COOKIE_NAME, { path: '/' });
+  res.clearCookie(COOKIE_NAME, COOKIE_BASE);
 }
 
 /**

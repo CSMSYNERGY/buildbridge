@@ -263,7 +263,8 @@ export async function queryQuickBooks(locationId, query) {
 
 /** Escape a single-quoted string literal for a QBO query. */
 function qboEscape(value) {
-  return String(value).replace(/'/g, "\\'");
+  // Escape backslashes first (so the escape char itself is neutralized), then quotes.
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 /**

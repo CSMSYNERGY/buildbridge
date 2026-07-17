@@ -12,6 +12,7 @@ import './core/cf-env-bridge.js';
 import { createServer } from 'node:http';
 import { httpServerHandler } from 'cloudflare:node';
 import { sql } from 'drizzle-orm';
+import { env } from './core/env.js';
 import app from './index.js';
 import { runDueJobs } from './core/scheduler.js';
 import { db, dbContext, closeRequestDb } from './core/db/client.js';
@@ -70,8 +71,10 @@ export default {
         try {
           if (event.cron === '*/2 * * * *') {
             await db.execute(sql`select 1 as warmup`);
-          } else {
+          } else if (env.ENABLE_SCHEDULER) {
             await runDueJobs();
+          } else {
+            console.log('[worker] scheduler disabled (ENABLE_SCHEDULER=false) — skipping cron jobs');
           }
         } catch (err) {
           console.error(`[worker] scheduled run failed (${event.cron}):`, err?.message);

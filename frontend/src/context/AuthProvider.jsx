@@ -13,6 +13,16 @@ const isEmbedded = (() => {
 
 const TOKEN_KEY = 'bb_session_token';
 
+// sessionStorage access throws (SecurityError) in the embedded GHL iframe when
+// third-party storage is blocked — guard the read so it never crashes render.
+function readToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Ask the GHL parent frame for the encrypted SSO user data.
  * GHL answers a { message: 'REQUEST_USER_DATA' } post with
@@ -42,7 +52,7 @@ function requestGhlSsoPayload(timeoutMs = 5000) {
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const tokenRef = useRef(sessionStorage.getItem(TOKEN_KEY));
+  const tokenRef = useRef(readToken());
 
   // Centralised fetch that always sends cookies and, when we hold a session token
   // (embedded flow — third-party cookies may be blocked in the iframe), a Bearer header.
