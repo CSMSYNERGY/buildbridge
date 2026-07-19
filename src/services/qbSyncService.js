@@ -20,6 +20,7 @@ import {
   deriveContactName,
   qbAddressToGhl,
   mergeCustomFields,
+  qbCustomFieldEntries,
 } from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -125,13 +126,20 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
   const legacyFieldMap = await getMappings(locationId, 'quickbooks', 'qbo_assigned_user_field');
   const sourceField = cfg?.qboAssignedUserField ?? legacyFieldMap.name ?? null;
   const targetField = cfg?.qboAssignedUserGhlField ?? null;
+  // User-defined QuickBooks-field → Synergy-field mappings (the mapper UI).
+  const customFieldMap = await getMappings(locationId, 'quickbooks', 'custom_field');
 
-  // Build the GHL custom-field entry {id,value} carrying the salesperson, or
-  // null when unconfigured / the QBO customer has no value in that field.
-  function salespersonField(customer) {
-    if (!sourceField || !targetField) return null;
-    const value = readQbCustomerField(customer, sourceField);
-    return value ? { id: targetField, value } : null;
+  // All GHL custom-field entries {id,value} to write for a customer: the
+  // salesperson (if configured) plus every user-defined field mapping. Skips
+  // fields with no value on this customer.
+  function contactCustomFields(customer) {
+    const entries = [];
+    if (sourceField && targetField) {
+      const value = readQbCustomerField(customer, sourceField);
+      if (value) entries.push({ id: targetField, value });
+    }
+    entries.push(...qbCustomFieldEntries(customer, customFieldMap));
+    return entries;
   }
 
   for (const customer of customers) {
@@ -140,7 +148,7 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
 
     if (isEcho(qbUpdatedAt, link)) continue;
 
-    const sp = salespersonField(customer);
+    const cfEntries = contactCustomFields(customer);
     const base = qbCustomerToGhlContact(customer);
 
     if (link) {
@@ -150,10 +158,16 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
       const ghlUpdatedAt = existing?.contact?.dateUpdated ?? existing?.contact?.updatedAt;
       if (targetIsNewer(qbUpdatedAt, ghlUpdatedAt)) continue; // GHL wins; other pass pushes it
 
-      // Merge the salesperson field into the contact's existing custom fields so
-      // this PUT can't wipe the status field set by the sales-doc pass.
-      const payload = sp
-        ? { ...base, customFields: mergeCustomFields(existing?.contact?.customFields, sp) }
+      // Merge our fields into the contact's existing custom fields so this PUT
+      // can't wipe fields set by the sales-doc-status pass (or vice versa).
+      const payload = cfEntries.length
+        ? {
+            ...base,
+            customFields: cfEntries.reduce(
+              (acc, f) => mergeCustomFields(acc, f),
+              existing?.contact?.customFields ?? [],
+            ),
+          }
         : base;
       await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
       await touchLink(link.id);
@@ -162,7 +176,7 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
       const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
         locationId,
         ...base,
-        ...(sp ? { customFields: [sp] } : {}),
+        ...(cfEntries.length ? { customFields: cfEntries } : {}),
       });
       const ghlId = created?.contact?.id ?? created?.id;
       if (!ghlId) {

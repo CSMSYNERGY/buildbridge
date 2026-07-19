@@ -109,7 +109,9 @@ function parseQboCustomFields(preferences) {
   const out = [];
   for (const n of Object.keys(labels)) {
     if (labels[n] && enabled[n] !== false) {
-      out.push({ id: `SalesCustom${n}`, name: labels[n] });
+      // Key by the field's label/Name — that's what the customer's CustomField
+      // entries expose (CustomField[].Name), so the sync can match on it.
+      out.push({ id: labels[n], name: labels[n] });
     }
   }
   return out;

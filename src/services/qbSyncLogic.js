@@ -100,6 +100,22 @@ export function qbAddressToGhl(addr, displayName) {
   return out;
 }
 
+/**
+ * Build GHL contact customFields entries [{id, value}] from configured
+ * QuickBooks→GHL custom-field mappings (mappings = { '<QBO field label>':
+ * '<GHL field id>' }). Reads each QBO field off the customer by name; skips
+ * fields that are unset on this customer or unmapped.
+ */
+export function qbCustomFieldEntries(customer, mappings) {
+  const out = [];
+  for (const [qbField, ghlId] of Object.entries(mappings ?? {})) {
+    if (!ghlId) continue;
+    const value = readQbCustomerField(customer, qbField);
+    if (value) out.push({ id: ghlId, value });
+  }
+  return out;
+}
+
 /** Read a QBO Customer custom field by name (case-insensitive); null if unset/empty. */
 export function readQbCustomerField(customer, fieldName) {
   if (!fieldName) return null;

@@ -7,6 +7,7 @@ import {
   deriveContactName,
   qbAddressToGhl,
   mergeCustomFields,
+  qbCustomFieldEntries,
 } from './qbSyncLogic.js';
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
@@ -145,6 +146,27 @@ describe('mergeCustomFields — never wipe other custom fields', () => {
       { id: 'sales1', value: 'Jane' },
       { id: 'status1', value: 'Invoiced' },
     ]);
+  });
+});
+
+describe('qbCustomFieldEntries — mapped QuickBooks fields → GHL entries', () => {
+  const customer = {
+    CustomField: [
+      { Name: 'Crew', StringValue: 'Team A' },
+      { Name: 'PO Number', StringValue: '  9987 ' },
+      { Name: 'Empty', StringValue: '' },
+    ],
+  };
+  it('maps configured fields to {id,value}, trimming and skipping empty/unmapped', () => {
+    const mappings = { Crew: 'ghlCrew', 'PO Number': 'ghlPo', Empty: 'ghlEmpty', Missing: 'ghlMissing' };
+    expect(qbCustomFieldEntries(customer, mappings)).toEqual([
+      { id: 'ghlCrew', value: 'Team A' },
+      { id: 'ghlPo', value: '9987' },
+    ]);
+  });
+  it('returns [] for no/empty mappings', () => {
+    expect(qbCustomFieldEntries(customer, {})).toEqual([]);
+    expect(qbCustomFieldEntries(customer, undefined)).toEqual([]);
   });
 });
 
