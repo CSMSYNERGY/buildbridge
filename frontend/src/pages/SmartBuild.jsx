@@ -6,7 +6,7 @@ import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { Eye, EyeOff, RefreshCw, ChevronDown, ChevronUp, CheckCircle2, XCircle, LogOut } from 'lucide-react';
+import { Eye, EyeOff, RefreshCw, ChevronDown, ChevronUp, CheckCircle2, XCircle, LogOut, X, ArrowRight } from 'lucide-react';
 
 export default function SmartBuild() {
   const { fetchWithAuth } = useAuth();
@@ -23,6 +23,12 @@ export default function SmartBuild() {
   const [credentialsOpen, setCredentialsOpen] = useState(true);
   const [disconnecting, setDisconnecting] = useState(false);
 
+  // Field mappings (SmartBuild field → Synergy field)
+  const [ghlFields, setGhlFields] = useState([]);
+  const [mappings, setMappings] = useState([]);
+  const [mapDraft, setMapDraft] = useState({ sb: '', ghl: '' });
+  const [savingMap, setSavingMap] = useState(false);
+
   useEffect(() => {
     fetchWithAuth('/api/smartbuild/config')
       .then((r) => r.json())
@@ -38,7 +44,58 @@ export default function SmartBuild() {
       .finally(() => setLoading(false));
   }, [fetchWithAuth]);
 
+  // Load Synergy (GHL) fields + this location's SmartBuild field mappings.
+  useEffect(() => {
+    fetchWithAuth('/api/ghl/fields')
+      .then((r) => (r.ok ? r.json() : { fields: [] }))
+      .then((d) => setGhlFields(d.fields ?? []))
+      .catch(() => {});
+    fetchWithAuth('/api/mappers?appSlug=smartbuild')
+      .then((r) => (r.ok ? r.json() : { mappers: [] }))
+      .then((d) => setMappings((d.mappers ?? []).filter((m) => m.mapperType === 'custom_field')))
+      .catch(() => {});
+  }, [fetchWithAuth]);
+
   const set = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+
+  const usedGhl = new Set(mappings.map((m) => m.ghlValue));
+  const ghlLabel = (id) => ghlFields.find((f) => (f.id ?? f.key) === id)?.label ?? id;
+
+  async function addMapping() {
+    const sb = mapDraft.sb.trim();
+    if (!sb || !mapDraft.ghl) return;
+    setSavingMap(true);
+    try {
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'smartbuild',
+          mapperType: 'custom_field',
+          externalKey: sb,
+          ghlValue: mapDraft.ghl,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to add mapping');
+      setMappings((prev) => [...prev.filter((m) => m.id !== data.mapper.id), data.mapper]);
+      setMapDraft({ sb: '', ghl: '' });
+      toast({ title: 'Mapping added' });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingMap(false);
+    }
+  }
+
+  async function deleteMapping(id) {
+    try {
+      const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove mapping');
+      setMappings((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
 
   async function handleSave(e) {
     e.preventDefault();
@@ -272,6 +329,81 @@ export default function SmartBuild() {
             </Button>
           </form>
         </CardContent>}
+      </Card>
+
+      {/* Field mappings — SmartBuild field → Synergy field */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base" style={{ color: '#3d3672' }}>Field mappings</CardTitle>
+          <CardDescription>
+            Map a SmartBuild field to a Synergy field. Enter the SmartBuild field key, then pick the Synergy field it fills.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {mappings.length > 0 ? (
+            <ul className="space-y-2">
+              {mappings.map((m) => (
+                <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  <span className="font-mono text-xs truncate" style={{ color: '#3d3672' }}>{m.externalKey}</span>
+                  <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate" style={{ color: '#1b7895' }}>{ghlLabel(m.ghlValue)}</span>
+                  <button
+                    type="button"
+                    onClick={() => deleteMapping(m.id)}
+                    className="ml-auto shrink-0 text-muted-foreground hover:text-destructive"
+                    aria-label="Remove mapping"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">No field mappings yet.</p>
+          )}
+
+          <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
+            <div className="space-y-1 min-w-0">
+              <Label htmlFor="sbField" className="text-xs">SmartBuild field</Label>
+              <Input
+                id="sbField"
+                placeholder="e.g. job_name"
+                value={mapDraft.sb}
+                onChange={(e) => setMapDraft((d) => ({ ...d, sb: e.target.value }))}
+              />
+            </div>
+            <ArrowRight className="mb-2.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <div className="space-y-1 min-w-0">
+              <Label htmlFor="sbGhl" className="text-xs">Synergy field</Label>
+              <select
+                id="sbGhl"
+                value={mapDraft.ghl}
+                onChange={(e) => setMapDraft((d) => ({ ...d, ghl: e.target.value }))}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">Select…</option>
+                {ghlFields.map((f) => {
+                  const id = f.id ?? f.key;
+                  return (
+                    <option key={id} value={id} disabled={usedGhl.has(id)}>
+                      {f.label}{usedGhl.has(id) ? ' (mapped)' : ''}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+          </div>
+
+          <Button
+            type="button"
+            onClick={addMapping}
+            disabled={savingMap || !mapDraft.sb.trim() || !mapDraft.ghl}
+            className="text-white"
+            style={{ backgroundColor: '#3d3672' }}
+          >
+            {savingMap ? 'Adding…' : 'Add mapping'}
+          </Button>
+        </CardContent>
       </Card>
     </div>
     </div>
