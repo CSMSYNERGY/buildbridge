@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams, Link } from 'react-router';
+import { useSearchParams } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
 import { useToast } from '../components/ui/toast.jsx';
 import { Button } from '../components/ui/button.jsx';
@@ -49,6 +49,7 @@ export default function QuickBooks() {
   const [mappings, setMappings] = useState([]);
   const [mapDraft, setMapDraft] = useState({ qb: '', ghl: '' });
   const [savingMap, setSavingMap] = useState(false);
+  const [milestoneMaps, setMilestoneMaps] = useState([]);
 
   const isConnected = !!config;
 
@@ -76,7 +77,11 @@ export default function QuickBooks() {
         .catch(() => {}),
       fetchWithAuth('/api/mappers?appSlug=quickbooks')
         .then((r) => (r.ok ? r.json() : { mappers: [] }))
-        .then((d) => setMappings((d.mappers ?? []).filter((m) => m.mapperType === 'custom_field')))
+        .then((d) => {
+          const all = d.mappers ?? [];
+          setMappings(all.filter((m) => m.mapperType === 'custom_field'));
+          setMilestoneMaps(all.filter((m) => m.mapperType === 'milestone_amount' || m.mapperType === 'milestone_date'));
+        })
         .catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [fetchWithAuth]);
@@ -181,6 +186,41 @@ export default function QuickBooks() {
       const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to remove mapping');
       setMappings((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
+
+  // ── Milestone field mapping (amount/date per milestone → Synergy field) ─────
+  const MILESTONES = [
+    { type: 'deposit', label: 'Deposit', hasDate: false },
+    { type: 'materials_delivery', label: 'Materials Delivery', hasDate: true },
+    { type: 'roof_completion', label: 'Roof Completion', hasDate: true },
+    { type: 'project_completion', label: 'Project Completion', hasDate: true },
+  ];
+  const msMap = (kind, type) => milestoneMaps.find((m) => m.mapperType === kind && m.externalKey === type);
+
+  async function setMilestoneMap(kind, type, ghlValue) {
+    try {
+      if (!ghlValue) {
+        const existing = msMap(kind, type);
+        if (existing) {
+          const res = await fetchWithAuth(`/api/mappers/${existing.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to clear mapping');
+          setMilestoneMaps((prev) => prev.filter((m) => m.id !== existing.id));
+        }
+        return;
+      }
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({ appSlug: 'quickbooks', mapperType: kind, externalKey: type, ghlValue }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save mapping');
+      setMilestoneMaps((prev) => [
+        ...prev.filter((m) => !(m.mapperType === kind && m.externalKey === type)),
+        data.mapper,
+      ]);
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     }
@@ -420,12 +460,43 @@ export default function QuickBooks() {
                       The deposit is invoiced immediately on Won; the others this many days before their date.
                     </p>
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    Map each milestone's amount and date fields under{' '}
-                    <Link to="/buildbridge/mappers" className="underline" style={{ color: '#1b7895' }}>Mappers</Link>{' '}
-                    (app <span className="font-mono">quickbooks</span>, types{' '}
-                    <span className="font-mono">milestone_amount</span> / <span className="font-mono">milestone_date</span>).
-                  </p>
+                  <div className="space-y-2 pt-1">
+                    <p className="text-xs font-medium" style={{ color: '#3d3672' }}>Milestone field mapping</p>
+                    <p className="text-xs text-muted-foreground">
+                      Pick the Synergy field that holds each milestone's amount (and date). The deposit has no date — it invoices on Won.
+                    </p>
+                    {MILESTONES.map((ms) => (
+                      <div key={ms.type} className="grid grid-cols-[120px_1fr] items-center gap-2">
+                        <span className="text-xs" style={{ color: '#3d3672' }}>{ms.label}</span>
+                        <div className="flex gap-2">
+                          <select
+                            aria-label={`${ms.label} amount field`}
+                            value={msMap('milestone_amount', ms.type)?.ghlValue ?? ''}
+                            onChange={(e) => setMilestoneMap('milestone_amount', ms.type, e.target.value)}
+                            className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <option value="">Amount field…</option>
+                            {ghlFields.map((f) => (
+                              <option key={`a-${ms.type}-${f.id ?? f.key}`} value={f.key ?? f.id}>{f.label}</option>
+                            ))}
+                          </select>
+                          {ms.hasDate && (
+                            <select
+                              aria-label={`${ms.label} date field`}
+                              value={msMap('milestone_date', ms.type)?.ghlValue ?? ''}
+                              onChange={(e) => setMilestoneMap('milestone_date', ms.type, e.target.value)}
+                              className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <option value="">Date field…</option>
+                              {ghlFields.map((f) => (
+                                <option key={`d-${ms.type}-${f.id ?? f.key}`} value={f.key ?? f.id}>{f.label}</option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
