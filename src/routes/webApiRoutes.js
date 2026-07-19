@@ -25,6 +25,7 @@ import {
   disconnectQuickBooks,
   getQuickBooksSettings,
   saveQuickBooksSettings,
+  getQuickBooksFields,
 } from '../controllers/quickbooksController.js';
 
 const router = Router();
@@ -85,5 +86,7 @@ router.delete('/quickbooks/config', actionLimiter, disconnectQuickBooks);
 // QuickBooks per-tenant feature settings (two-way sync / milestone invoicing)
 router.get('/quickbooks/settings', getQuickBooksSettings);
 router.put('/quickbooks/settings', actionLimiter, saveQuickBooksSettings);
+// QuickBooks company custom fields (for the field-mapper dropdown)
+router.get('/quickbooks/fields', getQuickBooksFields);
 
 export default router;

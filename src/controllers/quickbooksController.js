@@ -10,6 +10,7 @@ import {
   saveCredentials,
   getCredentialsOrNull,
   revokeToken,
+  makeQuickBooksRequest,
 } from '../services/quickbooksService.js';
 import {
   getLocationSettings,
@@ -78,6 +79,55 @@ export async function handleQuickBooksCallback(req, res, next) {
     });
 
     res.redirect(`${RETURN_PATH}?connected=1`);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Parse QuickBooks-defined custom fields out of the QBO Preferences payload.
+// QBO exposes sales-form custom fields as paired entries under
+// SalesFormsPrefs.CustomField: UseSalesCustom<N> (enabled?) + SalesCustomName<N>
+// (the label). We return the enabled ones as { id, name }.
+// NOTE: the exact QBO Preferences shape can vary by tier — this is defensive and
+// needs live validation once a real QuickBooks company is connected.
+function parseQboCustomFields(preferences) {
+  const groups = preferences?.SalesFormsPrefs?.CustomField ?? [];
+  const flat = [];
+  for (const g of groups) {
+    if (Array.isArray(g?.CustomField)) flat.push(...g.CustomField);
+    else if (g) flat.push(g);
+  }
+  const enabled = {};
+  const labels = {};
+  for (const f of flat) {
+    const name = f?.Name ?? '';
+    let m = name.match(/UseSalesCustom(\d+)/i);
+    if (m) enabled[m[1]] = f.BooleanValue === true || f.Value === 'true' || f.StringValue === 'true';
+    m = name.match(/SalesCustomName(\d+)/i);
+    if (m) labels[m[1]] = f.StringValue ?? f.Value ?? '';
+  }
+  const out = [];
+  for (const n of Object.keys(labels)) {
+    if (labels[n] && enabled[n] !== false) {
+      out.push({ id: `SalesCustom${n}`, name: labels[n] });
+    }
+  }
+  return out;
+}
+
+/**
+ * GET /api/quickbooks/fields
+ * The connected QuickBooks company's custom fields, for the mapper dropdown.
+ * Returns { fields: [{ id, name }] }; empty list when QuickBooks isn't connected.
+ */
+export async function getQuickBooksFields(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const creds = await getCredentialsOrNull(locationId);
+    if (!creds) return res.json({ fields: [] }); // not connected yet
+
+    const data = await makeQuickBooksRequest(locationId, 'GET', '/preferences?minorversion=75');
+    res.json({ fields: parseQboCustomFields(data?.Preferences) });
   } catch (err) {
     next(err);
   }

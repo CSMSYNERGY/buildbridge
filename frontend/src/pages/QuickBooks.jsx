@@ -7,7 +7,7 @@ import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { CheckCircle2, XCircle, LogOut, Link2, RefreshCw, Receipt } from 'lucide-react';
+import { CheckCircle2, XCircle, LogOut, Link2, RefreshCw, Receipt, X, ArrowRight } from 'lucide-react';
 
 // Small controlled on/off switch (no dedicated Switch component in the kit).
 function Toggle({ checked, onChange, disabled }) {
@@ -44,6 +44,12 @@ export default function QuickBooks() {
   const [ghlFields, setGhlFields] = useState([]);
   const [saving, setSaving] = useState(false);
 
+  // Custom-field mappings (QuickBooks field ↔ Synergy field)
+  const [qbFields, setQbFields] = useState([]);
+  const [mappings, setMappings] = useState([]);
+  const [mapDraft, setMapDraft] = useState({ qb: '', ghl: '' });
+  const [savingMap, setSavingMap] = useState(false);
+
   const isConnected = !!config;
 
   useEffect(() => {
@@ -63,6 +69,14 @@ export default function QuickBooks() {
       fetchWithAuth('/api/ghl/fields')
         .then((r) => (r.ok ? r.json() : { fields: [] }))
         .then((d) => setGhlFields(d.fields ?? []))
+        .catch(() => {}),
+      fetchWithAuth('/api/quickbooks/fields')
+        .then((r) => (r.ok ? r.json() : { fields: [] }))
+        .then((d) => setQbFields(d.fields ?? []))
+        .catch(() => {}),
+      fetchWithAuth('/api/mappers?appSlug=quickbooks')
+        .then((r) => (r.ok ? r.json() : { mappers: [] }))
+        .then((d) => setMappings((d.mappers ?? []).filter((m) => m.mapperType === 'custom_field')))
         .catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [fetchWithAuth]);
@@ -128,6 +142,47 @@ export default function QuickBooks() {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ── Custom-field mapping helpers ───────────────────────────────────────────
+  const usedQb = new Set(mappings.map((m) => m.externalKey));
+  const usedGhl = new Set(mappings.map((m) => m.ghlValue));
+  const qbLabel = (id) => qbFields.find((f) => f.id === id)?.name ?? id;
+  const ghlLabel = (id) => ghlFields.find((f) => (f.id ?? f.key) === id)?.label ?? id;
+
+  async function addMapping() {
+    if (!mapDraft.qb || !mapDraft.ghl) return;
+    setSavingMap(true);
+    try {
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType: 'custom_field',
+          externalKey: mapDraft.qb,
+          ghlValue: mapDraft.ghl,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to add mapping');
+      setMappings((prev) => [...prev.filter((m) => m.id !== data.mapper.id), data.mapper]);
+      setMapDraft({ qb: '', ghl: '' });
+      toast({ title: 'Mapping added' });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingMap(false);
+    }
+  }
+
+  async function deleteMapping(id) {
+    try {
+      const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove mapping');
+      setMappings((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
     }
   }
 
@@ -385,6 +440,99 @@ export default function QuickBooks() {
                   {saving ? 'Saving…' : 'Save settings'}
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Field mappings — QuickBooks custom field ↔ Synergy field */}
+        {isConnected && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base" style={{ color: '#3d3672' }}>Field mappings</CardTitle>
+              <CardDescription>
+                Map a QuickBooks custom field to a Synergy field. A field that's already mapped is greyed
+                out so it can't be used twice.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {mappings.length > 0 ? (
+                <ul className="space-y-2">
+                  {mappings.map((m) => (
+                    <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                      <span className="font-medium truncate" style={{ color: '#3d3672' }}>{qbLabel(m.externalKey)}</span>
+                      <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate" style={{ color: '#1b7895' }}>{ghlLabel(m.ghlValue)}</span>
+                      <button
+                        type="button"
+                        onClick={() => deleteMapping(m.id)}
+                        className="ml-auto shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label="Remove mapping"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground">No field mappings yet.</p>
+              )}
+
+              {/* Add a mapping: QuickBooks field → Synergy field */}
+              <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
+                <div className="space-y-1 min-w-0">
+                  <Label htmlFor="mapQb" className="text-xs">QuickBooks field</Label>
+                  <select
+                    id="mapQb"
+                    value={mapDraft.qb}
+                    onChange={(e) => setMapDraft((d) => ({ ...d, qb: e.target.value }))}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="">Select…</option>
+                    {qbFields.map((f) => (
+                      <option key={f.id} value={f.id} disabled={usedQb.has(f.id)}>
+                        {f.name}{usedQb.has(f.id) ? ' (mapped)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <ArrowRight className="mb-2.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="space-y-1 min-w-0">
+                  <Label htmlFor="mapGhl" className="text-xs">Synergy field</Label>
+                  <select
+                    id="mapGhl"
+                    value={mapDraft.ghl}
+                    onChange={(e) => setMapDraft((d) => ({ ...d, ghl: e.target.value }))}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="">Select…</option>
+                    {ghlFields.map((f) => {
+                      const id = f.id ?? f.key;
+                      return (
+                        <option key={id} value={id} disabled={usedGhl.has(id)}>
+                          {f.label}{usedGhl.has(id) ? ' (mapped)' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                onClick={addMapping}
+                disabled={savingMap || !mapDraft.qb || !mapDraft.ghl}
+                className="text-white"
+                style={{ backgroundColor: '#3d3672' }}
+              >
+                {savingMap ? 'Adding…' : 'Add mapping'}
+              </Button>
+
+              {qbFields.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  No QuickBooks custom fields found yet. Reconnect QuickBooks (and make sure custom fields are
+                  set up in the QuickBooks company), then reload to populate this list.
+                </p>
+              )}
             </CardContent>
           </Card>
         )}
