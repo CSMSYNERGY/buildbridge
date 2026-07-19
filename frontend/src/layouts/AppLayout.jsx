@@ -7,7 +7,6 @@ import { Button } from '../components/ui/button.jsx';
 const NAV_ITEMS = [
   { to: '/buildbridge',              label: 'Home',              end: true },
   { to: '/buildbridge/subscription', label: 'Subscription'                },
-  { to: '/buildbridge/mappers',      label: 'Mappers'                     },
   { to: '/buildbridge/smartbuild',   label: 'SmartBuild Config'           },
   { to: '/buildbridge/quickbooks',   label: 'QuickBooks'                  },
 ];
