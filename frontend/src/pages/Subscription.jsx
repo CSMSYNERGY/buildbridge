@@ -128,7 +128,7 @@ export default function Subscription() {
                   </li>
                   <li className="flex items-center gap-2">
                     <Check className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
-                    GHL workflow actions
+                    Synergy workflow actions
                   </li>
                   {appSlug === 'suite' && (
                     <li className="flex items-center gap-2">

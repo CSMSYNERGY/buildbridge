@@ -8,7 +8,7 @@ import { CreditCard, Sliders, Hammer, ArrowRight } from 'lucide-react';
 
 const QUICK_LINKS = [
   { to: '/buildbridge/subscription', label: 'Manage Subscription', icon: CreditCard, description: 'View and change your plan' },
-  { to: '/buildbridge/mappers',      label: 'Configure Mappers',   icon: Sliders,     description: 'Map integration fields to GHL' },
+  { to: '/buildbridge/quickbooks',   label: 'QuickBooks',          icon: Sliders,     description: 'Connect QuickBooks and map fields' },
   { to: '/buildbridge/smartbuild',   label: 'SmartBuild Config',   icon: Hammer,      description: 'Set up your SmartBuild credentials' },
 ];
 

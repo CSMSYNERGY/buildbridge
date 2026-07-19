@@ -17,7 +17,7 @@ export default function AppLayout() {
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        {embedded ? 'Signing you in from HighLevel…' : 'Loading…'}
+        {embedded ? 'Signing you in from Synergy…' : 'Loading…'}
       </div>
     );
   }
@@ -31,10 +31,10 @@ export default function AppLayout() {
         <p className="text-sm font-medium">We couldn't sign you in automatically.</p>
         <p className="max-w-sm text-xs text-muted-foreground">
           Reload this page to retry, or open BuildBridge in its own tab and log in with
-          your HighLevel account.
+          your Synergy account.
         </p>
         <Button asChild size="sm" style={{ backgroundColor: '#3d3672' }}>
-          <a href="/auth" target="_top" rel="noreferrer">Log in with HighLevel</a>
+          <a href="/auth" target="_top" rel="noreferrer">Log in with Synergy</a>
         </Button>
       </div>
     );

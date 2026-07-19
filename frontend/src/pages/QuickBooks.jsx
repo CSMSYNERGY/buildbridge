@@ -7,7 +7,7 @@ import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { CheckCircle2, XCircle, LogOut, Link2, RefreshCw, Receipt, X, ArrowRight } from 'lucide-react';
+import { CheckCircle2, XCircle, LogOut, Link2, RefreshCw, Receipt, X, ArrowRight, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
 
 // Small controlled on/off switch (no dedicated Switch component in the kit).
 function Toggle({ checked, onChange, disabled }) {
@@ -50,6 +50,7 @@ export default function QuickBooks() {
   const [mapDraft, setMapDraft] = useState({ qb: '', ghl: '' });
   const [savingMap, setSavingMap] = useState(false);
   const [milestoneMaps, setMilestoneMaps] = useState([]);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   const isConnected = !!config;
 
@@ -335,7 +336,7 @@ export default function QuickBooks() {
                   <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Contact &amp; estimate sync</p>
                 </div>
                 <p className="text-xs text-muted-foreground mt-1 mb-2">
-                  Choose how contacts and estimates move between QuickBooks and HighLevel.
+                  Choose how contacts and estimates move between QuickBooks and Synergy.
                 </p>
                 <select
                   value={s.qboSyncDirection ?? 'off'}
@@ -343,13 +344,13 @@ export default function QuickBooks() {
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <option value="off">Off — no contact/estimate sync</option>
-                  <option value="qb_to_ghl">QuickBooks → HighLevel (read-only; never changes QuickBooks)</option>
-                  <option value="ghl_to_qb">HighLevel → QuickBooks</option>
+                  <option value="qb_to_ghl">QuickBooks → Synergy (read-only; never changes QuickBooks)</option>
+                  <option value="ghl_to_qb">Synergy → QuickBooks</option>
                   <option value="two_way">Two-way (last edit wins)</option>
                 </select>
                 {s.qboSyncDirection === 'qb_to_ghl' && (
                   <p className="text-xs text-muted-foreground mt-1.5">
-                    QuickBooks stays the source of truth — anything updated there flows into HighLevel, and BuildBridge never writes back to QuickBooks.
+                    QuickBooks stays the source of truth — anything updated there flows into Synergy, and BuildBridge never writes back to QuickBooks.
                   </p>
                 )}
               </div>
@@ -357,7 +358,7 @@ export default function QuickBooks() {
               {/* What to reflect FROM QuickBooks into GHL (QB→GHL directions) */}
               {(s.qboSyncDirection === 'qb_to_ghl' || s.qboSyncDirection === 'two_way') && (
                 <div className="space-y-4 pl-6">
-                  {/* Salesperson: QB custom field → GHL custom field */}
+                  {/* Salesperson: QB custom field → Synergy custom field */}
                   <div className="space-y-1.5">
                     <Label htmlFor="assignedField">Salesperson — QuickBooks field name</Label>
                     <Input
@@ -366,7 +367,7 @@ export default function QuickBooks() {
                       value={s.qboAssignedUserField ?? ''}
                       onChange={(e) => setField('qboAssignedUserField')(e.target.value)}
                     />
-                    <Label htmlFor="assignedGhl" className="pt-1 block">Copy it into this GHL field</Label>
+                    <Label htmlFor="assignedGhl" className="pt-1 block">Copy it into this Synergy field</Label>
                     <select
                       id="assignedGhl"
                       value={s.qboAssignedUserGhlField ?? ''}
@@ -379,13 +380,13 @@ export default function QuickBooks() {
                       ))}
                     </select>
                     <p className="text-xs text-muted-foreground">
-                      The salesperson from that QuickBooks field is copied into this GHL custom field. Set both to enable.
+                      The salesperson from that QuickBooks field is copied into this Synergy custom field. Set both to enable.
                     </p>
                   </div>
 
-                  {/* QB estimate/invoice status → GHL custom field */}
+                  {/* QB estimate/invoice status → Synergy custom field */}
                   <div className="space-y-1.5">
-                    <Label htmlFor="statusGhl">QuickBooks estimate/invoice status → GHL field</Label>
+                    <Label htmlFor="statusGhl">QuickBooks estimate/invoice status → Synergy field</Label>
                     <select
                       id="statusGhl"
                       value={s.qboStatusGhlField ?? ''}
@@ -398,7 +399,7 @@ export default function QuickBooks() {
                       ))}
                     </select>
                     <p className="text-xs text-muted-foreground">
-                      When an estimate or invoice is created/sent in QuickBooks, this GHL field is updated
+                      When an estimate or invoice is created/sent in QuickBooks, this Synergy field is updated
                       (Estimate created → Estimate sent → Accepted → Invoiced). QuickBooks is never modified.
                     </p>
                   </div>
@@ -607,6 +608,49 @@ export default function QuickBooks() {
             </CardContent>
           </Card>
         )}
+
+        {/* Embedded setup guide — the config is the top of the page; this reference sits below it */}
+        <Card>
+          <CardHeader className="cursor-pointer select-none" onClick={() => setGuideOpen((v) => !v)}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <BookOpen className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
+                <CardTitle className="text-base" style={{ color: '#3d3672' }}>How the QuickBooks integration works</CardTitle>
+              </div>
+              {guideOpen
+                ? <ChevronUp className="h-4 w-4 shrink-0 text-muted-foreground" />
+                : <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />}
+            </div>
+            <CardDescription>A quick plain-English guide for setting this up.</CardDescription>
+          </CardHeader>
+          {guideOpen && (
+            <CardContent className="space-y-4 text-sm text-muted-foreground">
+              <div>
+                <p className="font-medium" style={{ color: '#3d3672' }}>What it does</p>
+                <p className="mt-1">BuildBridge links QuickBooks and Synergy so information flows automatically — no double entry. Use either or both:</p>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  <li><strong>Keep Synergy up to date from QuickBooks</strong> — contact details, salesperson, and estimate/invoice status appear in Synergy. QuickBooks is never changed.</li>
+                  <li><strong>Automatic milestone invoicing</strong> — when a deal is Won, create the QuickBooks customer and schedule staged invoices.</li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium" style={{ color: '#3d3672' }}>Setup</p>
+                <ol className="mt-1 list-decimal space-y-1 pl-5">
+                  <li>Click <strong>Connect to QuickBooks</strong> and approve access at Intuit (no passwords are stored).</li>
+                  <li>Choose a <strong>Contact &amp; estimate sync</strong> direction — QuickBooks → Synergy is read-only and safe.</li>
+                  <li>Map the fields you want under <strong>Field mappings</strong> (QuickBooks field → Synergy field).</li>
+                  <li>Optionally turn on <strong>milestone auto-invoicing</strong> and map each milestone's amount/date field.</li>
+                  <li>Save. BuildBridge checks for updates automatically about every 15 minutes.</li>
+                </ol>
+              </div>
+              <div>
+                <p className="font-medium" style={{ color: '#3d3672' }}>Common questions</p>
+                <p className="mt-1"><strong>Will this change my QuickBooks?</strong> Not in QuickBooks → Synergy mode — it only reads. It writes to QuickBooks only if you pick "Synergy → QuickBooks", "Two-way", or milestone invoicing.</p>
+                <p className="mt-1"><strong>Is it secure?</strong> You approve access on Intuit's own sign-in; your password is never stored. You can disconnect any time above.</p>
+              </div>
+            </CardContent>
+          )}
+        </Card>
       </div>
     </div>
   );
