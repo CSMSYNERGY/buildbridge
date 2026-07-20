@@ -13,6 +13,8 @@
     "build:frontend": "npm --prefix frontend install && npm --prefix frontend run build",
     "cf:dev": "wrangler dev",
     "cf:deploy": "npm run build:frontend && wrangler deploy",
+    "verify:deploy": "node scripts/verify-deploy.mjs",
+    "deploy": "npm run cf:deploy && npm run verify:deploy",
     "migrate": "node src/core/db/migrate.js",
     "seed": "node src/core/db/seed.js",
     "db:generate": "drizzle-kit generate",

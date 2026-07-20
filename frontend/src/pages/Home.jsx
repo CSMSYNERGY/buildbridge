@@ -25,7 +25,7 @@ export default function Home() {
 
   useEffect(() => {
     // This location's actual active subscriptions — not the plan catalog.
-    fetchWithAuth('/api/subscription/active')
+    fetchWithAuth('/api/subscription/mine')
       .then((r) => r.ok ? r.json() : null)
       .then((d) => d && setSubs(d.subscriptions ?? []))
       .catch(() => {});
