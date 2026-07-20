@@ -52,6 +52,12 @@ export default function QuickBooks() {
   const [milestoneMaps, setMilestoneMaps] = useState([]);
   const [guideOpen, setGuideOpen] = useState(false);
 
+  // Item mappings (QuickBooks item ↔ Synergy field)
+  const [qbItems, setQbItems] = useState([]);
+  const [itemMaps, setItemMaps] = useState([]);
+  const [itemDraft, setItemDraft] = useState({ item: '', ghl: '' });
+  const [savingItemMap, setSavingItemMap] = useState(false);
+
   const isConnected = !!config;
 
   useEffect(() => {
@@ -76,12 +82,17 @@ export default function QuickBooks() {
         .then((r) => (r.ok ? r.json() : { fields: [] }))
         .then((d) => setQbFields(d.fields ?? []))
         .catch(() => {}),
+      fetchWithAuth('/api/quickbooks/items')
+        .then((r) => (r.ok ? r.json() : { items: [] }))
+        .then((d) => setQbItems(d.items ?? []))
+        .catch(() => {}),
       fetchWithAuth('/api/mappers?appSlug=quickbooks')
         .then((r) => (r.ok ? r.json() : { mappers: [] }))
         .then((d) => {
           const all = d.mappers ?? [];
           setMappings(all.filter((m) => m.mapperType === 'custom_field'));
           setMilestoneMaps(all.filter((m) => m.mapperType === 'milestone_amount' || m.mapperType === 'milestone_date'));
+          setItemMaps(all.filter((m) => m.mapperType === 'qb_item'));
         })
         .catch(() => {}),
     ]).finally(() => setLoading(false));
@@ -187,6 +198,50 @@ export default function QuickBooks() {
       const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to remove mapping');
       setMappings((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
+
+  // ── Item mapping helpers (QuickBooks item ↔ Synergy field) ─────────────────
+  const usedItems = new Set(itemMaps.map((m) => m.externalKey));
+  const usedItemGhl = new Set(itemMaps.map((m) => m.ghlValue));
+  const itemLabel = (id) => {
+    const it = qbItems.find((i) => i.id === id);
+    if (!it) return id;
+    return it.unitPrice != null ? `${it.name} ($${it.unitPrice})` : it.name;
+  };
+
+  async function addItemMapping() {
+    if (!itemDraft.item || !itemDraft.ghl) return;
+    setSavingItemMap(true);
+    try {
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType: 'qb_item',
+          externalKey: itemDraft.item,
+          ghlValue: itemDraft.ghl,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to add item mapping');
+      setItemMaps((prev) => [...prev.filter((m) => m.id !== data.mapper.id), data.mapper]);
+      setItemDraft({ item: '', ghl: '' });
+      toast({ title: 'Item mapping added' });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingItemMap(false);
+    }
+  }
+
+  async function deleteItemMapping(id) {
+    try {
+      const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove item mapping');
+      setItemMaps((prev) => prev.filter((m) => m.id !== id));
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     }
@@ -609,6 +664,100 @@ export default function QuickBooks() {
           </Card>
         )}
 
+        {/* Item mappings — QuickBooks item ↔ Synergy field */}
+        {isConnected && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base" style={{ color: '#3d3672' }}>Item mappings</CardTitle>
+              <CardDescription>
+                Map a QuickBooks item (product/service — e.g. a building, ramp, or window) to the Synergy
+                field that selects it. When a deal is invoiced, the mapped item is billed instead of the
+                generic default item. An item that's already mapped is greyed out.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {itemMaps.length > 0 ? (
+                <ul className="space-y-2">
+                  {itemMaps.map((m) => (
+                    <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                      <span className="font-medium truncate" style={{ color: '#3d3672' }}>{itemLabel(m.externalKey)}</span>
+                      <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate" style={{ color: '#1b7895' }}>{ghlLabel(m.ghlValue)}</span>
+                      <button
+                        type="button"
+                        onClick={() => deleteItemMapping(m.id)}
+                        className="ml-auto shrink-0 text-muted-foreground hover:text-destructive"
+                        aria-label="Remove item mapping"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground">No item mappings yet.</p>
+              )}
+
+              {/* Add a mapping: QuickBooks item → Synergy field */}
+              <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
+                <div className="space-y-1 min-w-0">
+                  <Label htmlFor="mapItem" className="text-xs">QuickBooks item</Label>
+                  <select
+                    id="mapItem"
+                    value={itemDraft.item}
+                    onChange={(e) => setItemDraft((d) => ({ ...d, item: e.target.value }))}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="">Select…</option>
+                    {qbItems.map((i) => (
+                      <option key={i.id} value={i.id} disabled={usedItems.has(i.id)}>
+                        {i.name}{i.unitPrice != null ? ` ($${i.unitPrice})` : ''}{usedItems.has(i.id) ? ' (mapped)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <ArrowRight className="mb-2.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="space-y-1 min-w-0">
+                  <Label htmlFor="mapItemGhl" className="text-xs">Synergy field</Label>
+                  <select
+                    id="mapItemGhl"
+                    value={itemDraft.ghl}
+                    onChange={(e) => setItemDraft((d) => ({ ...d, ghl: e.target.value }))}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="">Select…</option>
+                    {ghlFields.map((f) => {
+                      const id = f.id ?? f.key;
+                      return (
+                        <option key={id} value={id} disabled={usedItemGhl.has(id)}>
+                          {f.label}{usedItemGhl.has(id) ? ' (mapped)' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                onClick={addItemMapping}
+                disabled={savingItemMap || !itemDraft.item || !itemDraft.ghl}
+                className="text-white"
+                style={{ backgroundColor: '#3d3672' }}
+              >
+                {savingItemMap ? 'Adding…' : 'Add item mapping'}
+              </Button>
+
+              {qbItems.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  No QuickBooks items found yet. Make sure Products &amp; Services exist in the QuickBooks
+                  company, then reconnect / reload to populate this list.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Embedded setup guide — the config is the top of the page; this reference sits below it */}
         <Card>
           <CardHeader className="cursor-pointer select-none" onClick={() => setGuideOpen((v) => !v)}>
@@ -639,6 +788,7 @@ export default function QuickBooks() {
                   <li>Click <strong>Connect to QuickBooks</strong> and approve access at Intuit (no passwords are stored).</li>
                   <li>Choose a <strong>Contact &amp; estimate sync</strong> direction — QuickBooks → Synergy is read-only and safe.</li>
                   <li>Map the fields you want under <strong>Field mappings</strong> (QuickBooks field → Synergy field).</li>
+                  <li>Optionally map QuickBooks <strong>items</strong> (buildings, ramps, windows…) under <strong>Item mappings</strong> so invoices/estimates bill the right line item.</li>
                   <li>Optionally turn on <strong>milestone auto-invoicing</strong> and map each milestone's amount/date field.</li>
                   <li>Save. BuildBridge checks for updates automatically about every 15 minutes.</li>
                 </ol>

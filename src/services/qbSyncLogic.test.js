@@ -8,6 +8,7 @@ import {
   qbAddressToGhl,
   mergeCustomFields,
   qbCustomFieldEntries,
+  resolveItemRef,
 } from './qbSyncLogic.js';
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
@@ -185,5 +186,41 @@ describe('readQbCustomerField — salesperson custom field read', () => {
     expect(readQbCustomerField({ CustomField: [{ Name: 'Salesperson', StringValue: '   ' }] }, 'Salesperson')).toBeNull();
     expect(readQbCustomerField({}, 'Salesperson')).toBeNull();
     expect(readQbCustomerField(customer, null)).toBeNull();
+  });
+});
+
+describe('resolveItemRef — QBO item selection from qb_item mappings', () => {
+  it('returns null when there are no item mappings (caller falls back to default item "1")', () => {
+    expect(resolveItemRef([], {})).toBeNull();
+    expect(resolveItemRef(undefined, {})).toBeNull();
+    expect(resolveItemRef(null)).toBeNull();
+  });
+
+  it('uses the single mapped item as the location default even without a matching field value', () => {
+    const maps = [{ externalKey: '42', ghlValue: 'building_type' }];
+    expect(resolveItemRef(maps, {})).toBe('42');
+    expect(resolveItemRef(maps, { building_type: '' })).toBe('42');
+  });
+
+  it('prefers the item whose mapped GHL field is set/truthy on the deal', () => {
+    const maps = [
+      { externalKey: '10', ghlValue: 'has_ramp' },
+      { externalKey: '20', ghlValue: 'has_window' },
+    ];
+    expect(resolveItemRef(maps, { has_window: 'yes' })).toBe('20');
+    expect(resolveItemRef(maps, { has_ramp: true, has_window: 'yes' })).toBe('10'); // first match wins
+  });
+
+  it('returns null when multiple items are mapped but none of their fields are set (ambiguous)', () => {
+    const maps = [
+      { externalKey: '10', ghlValue: 'has_ramp' },
+      { externalKey: '20', ghlValue: 'has_window' },
+    ];
+    expect(resolveItemRef(maps, {})).toBeNull();
+    expect(resolveItemRef(maps, { has_ramp: '', has_window: false })).toBeNull();
+  });
+
+  it('ignores malformed rows (missing externalKey) and coerces the id to a string', () => {
+    expect(resolveItemRef([{ ghlValue: 'x' }, { externalKey: 7, ghlValue: 'y' }], { y: 1 })).toBe('7');
   });
 });

@@ -2,7 +2,8 @@ import { db } from '../core/db/client.js';
 import { qbMilestones, qbSyncState, integrationCredentials } from '../core/db/schema.js';
 import { eq, and, or, isNull, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { getMappings } from './mapperService.js';
+import { getMappings, listMappers } from './mapperService.js';
+import { resolveItemRef } from './qbSyncLogic.js';
 import { findOrCreateCustomer, createInvoice } from './quickbooksService.js';
 import { makeGhlRequest } from './ghlService.js';
 import { hasAccess } from './subscriptionService.js';
@@ -189,6 +190,18 @@ export async function invoiceDueMilestones() {
     return enabledByLocation.get(locId);
   }
 
+  // Per-location QBO item mapping (mapperType 'qb_item'), cached for this run.
+  // Milestone invoicing has no per-deal GHL field context, so this resolves to
+  // the tenant's single mapped item as the line item (or null → QBO default '1').
+  const itemRefByLocation = new Map();
+  async function itemRefFor(locId) {
+    if (!itemRefByLocation.has(locId)) {
+      const maps = await listMappers(locId, 'quickbooks', 'qb_item');
+      itemRefByLocation.set(locId, resolveItemRef(maps));
+    }
+    return itemRefByLocation.get(locId);
+  }
+
   let invoiced = 0;
   for (const m of due) {
     if (!(await invoicingEnabled(m.locationId))) continue;
@@ -198,6 +211,7 @@ export async function invoiceDueMilestones() {
         amountCents: m.amountCents,
         description: `${MILESTONE_LABELS[m.milestoneType] ?? m.milestoneType} — opportunity ${m.opportunityId}`,
         dueDate: m.milestoneDate ? m.milestoneDate.toISOString().slice(0, 10) : undefined,
+        itemRef: await itemRefFor(m.locationId),
       });
 
       await db

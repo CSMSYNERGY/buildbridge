@@ -125,3 +125,30 @@ export function readQbCustomerField(customer, fieldName) {
   const value = cf?.StringValue?.trim();
   return value || null;
 }
+
+/**
+ * Pick the QBO Item id to put on an invoice/estimate line from the tenant's
+ * configured item mappings (mapperType 'qb_item'; each row externalKey = QBO
+ * Item Id, ghlValue = the GHL/Synergy field that selects it) and this deal's
+ * GHL field values. Returns the item id, or null when the caller should fall
+ * back to QBO's built-in default item.
+ *
+ *   1. Prefer an item whose mapped GHL field is set/truthy on this deal.
+ *   2. Else, if exactly one item is mapped, use it as the location default.
+ *   3. Else null (ambiguous — don't guess which item to bill).
+ */
+export function resolveItemRef(itemMappings, ghlFieldValues = {}) {
+  const maps = Array.isArray(itemMappings) ? itemMappings.filter((m) => m && m.externalKey) : [];
+  if (maps.length === 0) return null;
+
+  const values = ghlFieldValues ?? {};
+  for (const m of maps) {
+    const v = m.ghlValue != null ? values[m.ghlValue] : undefined;
+    if (v !== undefined && v !== null && v !== '' && v !== false) {
+      return String(m.externalKey);
+    }
+  }
+
+  if (maps.length === 1) return String(maps[0].externalKey);
+  return null;
+}

@@ -51,18 +51,6 @@ export async function getPlans(_req, res, next) {
   }
 }
 
-// ─── Current location's active subscriptions ──────────────────────────────────
-
-export async function getMySubscriptions(req, res, next) {
-  try {
-    const { locationId } = req.user;
-    const subscriptions = await subscriptionService.getActiveSubscriptions(locationId);
-    res.json({ subscriptions });
-  } catch (err) {
-    next(err);
-  }
-}
-
 // ─── Subscription create / cancel ─────────────────────────────────────────────
 
 export async function createSubscriptionHandler(req, res, next) {
@@ -181,14 +169,39 @@ export async function getGhlFields(req, res, next) {
   try {
     const { locationId } = req.user;
 
-    const data = await makeGhlRequest(locationId, 'GET', '/contacts/custom-fields');
-
-    // GHL returns { customFields: [{ id, name, fieldKey, dataType, ... }] }
-    const fields = (data?.customFields ?? []).map((f) => ({
+    // Never null → the frontend mapper dropdown won't crash on a missing label.
+    // Opportunity fields are suffixed so they're distinguishable from a contact
+    // field with the same name in the dropdown.
+    const mapField = (f, model) => ({
       key: f.fieldKey ?? f.id,
       id: f.id,
-      label: f.name ?? f.fieldKey ?? f.id, // never null → frontend filter won't crash
-    }));
+      model,
+      label: `${f.name ?? f.fieldKey ?? f.id}${model === 'opportunity' ? ' (opportunity)' : ''}`,
+    });
+
+    // Contact custom fields — the primary set most mappings use.
+    // GHL returns { customFields: [{ id, name, fieldKey, dataType, ... }] }
+    const contactData = await makeGhlRequest(locationId, 'GET', '/contacts/custom-fields');
+    const fields = (contactData?.customFields ?? []).map((f) => mapField(f, 'contact'));
+
+    // Opportunity custom fields — best-effort. The GHL v2 endpoint/shape can vary
+    // by account, so a failure here must NOT break the (working) contact list.
+    try {
+      const oppData = await makeGhlRequest(
+        locationId,
+        'GET',
+        `/locations/${encodeURIComponent(locationId)}/customFields?model=opportunity`,
+      );
+      const seen = new Set(fields.map((f) => f.id));
+      for (const f of oppData?.customFields ?? []) {
+        if (f?.id && !seen.has(f.id)) {
+          seen.add(f.id);
+          fields.push(mapField(f, 'opportunity'));
+        }
+      }
+    } catch (e) {
+      console.warn(`[ghl] opportunity custom-fields fetch failed for ${locationId}: ${e?.message || e}`);
+    }
 
     res.json({ fields });
   } catch (err) {

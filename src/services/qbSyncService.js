@@ -9,7 +9,7 @@ import {
   makeQuickBooksRequest,
   upsertEstimate,
 } from './quickbooksService.js';
-import { getMappings } from './mapperService.js';
+import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
 import {
@@ -21,6 +21,7 @@ import {
   qbAddressToGhl,
   mergeCustomFields,
   qbCustomFieldEntries,
+  resolveItemRef,
 } from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -336,6 +337,11 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
   );
   const opportunities = data?.opportunities ?? [];
 
+  // The location's QBO item mapping (mapperType 'qb_item') → the line item to
+  // bill; null falls back to QBO's default item. Resolved once per pass.
+  const itemMaps = await listMappers(locationId, 'quickbooks', 'qb_item');
+  const defaultItemRef = resolveItemRef(itemMaps);
+
   for (const opp of opportunities) {
     const ghlUpdatedAt = opp.updatedAt ?? opp.dateUpdated;
     if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) continue;
@@ -360,6 +366,7 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
         qbCustomerId: estimate.CustomerRef?.value,
         amountCents,
         description: opp.name,
+        itemRef: defaultItemRef,
       });
       await touchLink(link.id);
       stats.ghlToQbEstimatesUpdated++;
@@ -377,6 +384,7 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
         qbCustomerId: contactLink.qbId,
         amountCents,
         description: opp.name,
+        itemRef: defaultItemRef,
       });
       await upsertLink(locationId, 'estimate', opp.id, estimate.Id);
       stats.ghlToQbEstimatesCreated++;

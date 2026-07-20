@@ -11,6 +11,7 @@ import {
   getCredentialsOrNull,
   revokeToken,
   makeQuickBooksRequest,
+  listItems,
 } from '../services/quickbooksService.js';
 import {
   getLocationSettings,
@@ -130,6 +131,25 @@ export async function getQuickBooksFields(req, res, next) {
 
     const data = await makeQuickBooksRequest(locationId, 'GET', '/preferences?minorversion=75');
     res.json({ fields: parseQboCustomFields(data?.Preferences) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/quickbooks/items
+ * The connected QuickBooks company's active items (Products & Services), for the
+ * item-mapper dropdown. Returns { items: [{ id, name, type, unitPrice, description }] };
+ * empty list when QuickBooks isn't connected.
+ */
+export async function getQuickBooksItems(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const creds = await getCredentialsOrNull(locationId);
+    if (!creds) return res.json({ items: [] }); // not connected yet
+
+    const items = await listItems(locationId);
+    res.json({ items });
   } catch (err) {
     next(err);
   }

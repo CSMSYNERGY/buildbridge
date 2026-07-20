@@ -261,6 +261,26 @@ export async function queryQuickBooks(locationId, query) {
   return data.QueryResponse ?? {};
 }
 
+/**
+ * List the connected company's active Items (Products & Services), for the
+ * item-mapper dropdown. Yoder Barnes has <30 items, so a single page (1000 max)
+ * is plenty. Returns [{ id, name, type, unitPrice, description }].
+ */
+export async function listItems(locationId) {
+  const q = await queryQuickBooks(
+    locationId,
+    'SELECT * FROM Item WHERE Active = true MAXRESULTS 1000',
+  );
+  const items = q.Item ?? [];
+  return items.map((it) => ({
+    id: String(it.Id),
+    name: it.Name ?? it.FullyQualifiedName ?? String(it.Id),
+    type: it.Type ?? null,
+    unitPrice: typeof it.UnitPrice === 'number' ? it.UnitPrice : null,
+    description: it.Description ?? null,
+  }));
+}
+
 /** Escape a single-quoted string literal for a QBO query. */
 function qboEscape(value) {
   // Escape backslashes first (so the escape char itself is neutralized), then quotes.
@@ -304,7 +324,7 @@ export async function findOrCreateCustomer(locationId, { name, firstName, lastNa
  * Create a QBO Invoice for a customer with a single line item.
  * amountCents is an integer; description labels the line.
  */
-export async function createInvoice(locationId, { qbCustomerId, amountCents, description, dueDate }) {
+export async function createInvoice(locationId, { qbCustomerId, amountCents, description, dueDate, itemRef }) {
   if (!qbCustomerId) throw createError(400, 'qbCustomerId is required');
   if (!Number.isFinite(amountCents) || amountCents <= 0) {
     throw createError(400, 'amountCents must be a positive number');
@@ -319,9 +339,10 @@ export async function createInvoice(locationId, { qbCustomerId, amountCents, des
         DetailType: 'SalesItemLineDetail',
         Amount: amount,
         Description: description ?? undefined,
-        // ItemRef "1" is QBO's default Services item; override per-location via
-        // a mapper (appSlug 'quickbooks', type 'qb_item') in the caller.
-        SalesItemLineDetail: { ItemRef: { value: '1' } },
+        // ItemRef "1" is QBO's default Services item; the caller can override it
+        // with the tenant's real item via a mapper (appSlug 'quickbooks', type
+        // 'qb_item') — resolved to `itemRef` before the call.
+        SalesItemLineDetail: { ItemRef: { value: String(itemRef || '1') } },
       },
     ],
   };
@@ -335,7 +356,7 @@ export async function createInvoice(locationId, { qbCustomerId, amountCents, des
  * Pass qbEstimateId + syncToken to update (QBO requires sparse update with SyncToken).
  */
 export async function upsertEstimate(locationId, {
-  qbEstimateId, syncToken, qbCustomerId, amountCents, description,
+  qbEstimateId, syncToken, qbCustomerId, amountCents, description, itemRef,
 }) {
   const amount = Math.round(amountCents) / 100;
   const body = {
@@ -346,7 +367,7 @@ export async function upsertEstimate(locationId, {
         DetailType: 'SalesItemLineDetail',
         Amount: amount,
         Description: description ?? undefined,
-        SalesItemLineDetail: { ItemRef: { value: '1' } },
+        SalesItemLineDetail: { ItemRef: { value: String(itemRef || '1') } },
       },
     ],
   };

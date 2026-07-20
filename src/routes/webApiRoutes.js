@@ -26,6 +26,7 @@ import {
   getQuickBooksSettings,
   saveQuickBooksSettings,
   getQuickBooksFields,
+  getQuickBooksItems,
 } from '../controllers/quickbooksController.js';
 
 const router = Router();
@@ -91,5 +92,7 @@ router.get('/quickbooks/settings', getQuickBooksSettings);
 router.put('/quickbooks/settings', actionLimiter, saveQuickBooksSettings);
 // QuickBooks company custom fields (for the field-mapper dropdown)
 router.get('/quickbooks/fields', getQuickBooksFields);
+// QuickBooks company items / products & services (for the item-mapper dropdown)
+router.get('/quickbooks/items', getQuickBooksItems);
 
 export default router;
