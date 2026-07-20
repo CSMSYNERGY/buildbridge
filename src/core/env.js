@@ -34,8 +34,10 @@ export const env = cleanEnv(process.env, {
   // SmartBuild
   SMARTBUILD_BASE_URL: url(),
 
-  // Deposyt
-  DEPOSYT_PRIVATE_API_KEY: str(),
+  // Deposyt (legacy). The private API key is no longer read at runtime — NMI
+  // handles billing now — so it's optional to avoid a boot-crash if it's pruned
+  // from the environment. The webhook signing key is still consumed.
+  DEPOSYT_PRIVATE_API_KEY: str({ default: '' }),
   DEPOSYT_WEBHOOK_SIGNING_KEY: str(),
 
   // NMI / Deposyt gateway — recurring billing via the Payment API (transact.php)

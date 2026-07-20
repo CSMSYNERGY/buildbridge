@@ -17,7 +17,9 @@ console.log('[startup] PORT:', process.env.PORT);
 const required = [
   'GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'GHL_SCOPES', 'GHL_SHARED_SECRET',
   'REDIRECT_URI', 'X_API_KEY', 'APP_JWT_SECRET', 'DATABASE_URL',
-  'ENCRYPTION_KEY', 'SMARTBUILD_BASE_URL', 'DEPOSYT_PRIVATE_API_KEY',
+  'ENCRYPTION_KEY', 'SMARTBUILD_BASE_URL',
+  // DEPOSYT_PRIVATE_API_KEY is no longer read at runtime (NMI replaced Deposyt
+  // for billing); only the webhook signing key is still consumed.
   'DEPOSYT_WEBHOOK_SIGNING_KEY',
 ];
 const missing = required.filter((k) => !process.env[k]);

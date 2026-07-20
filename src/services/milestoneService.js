@@ -197,7 +197,19 @@ export async function invoiceDueMilestones() {
   async function itemRefFor(locId) {
     if (!itemRefByLocation.has(locId)) {
       const maps = await listMappers(locId, 'quickbooks', 'qb_item');
-      itemRefByLocation.set(locId, resolveItemRef(maps));
+      const ref = resolveItemRef(maps);
+      // Milestone invoicing has no per-deal GHL field context, so item selection
+      // only works with a SINGLE mapped item. If a location mapped 2+ items,
+      // resolveItemRef returns null and we'd silently bill QBO's default item —
+      // warn loudly instead of failing silently (see also the estimate path,
+      // which DOES resolve per-deal).
+      if (ref === null && maps.length > 1) {
+        console.warn(
+          `[milestone] location ${locId} has ${maps.length} qb_item mappings but milestone invoicing ` +
+          `can't pick per-deal — invoices will use QBO's default item. Map exactly one item for milestone invoicing.`,
+        );
+      }
+      itemRefByLocation.set(locId, ref);
     }
     return itemRefByLocation.get(locId);
   }

@@ -59,7 +59,7 @@ export async function updateSubscription(deposytSubId, fields) {
  */
 export async function cancelSubscription(deposytSubId) {
   return updateSubscription(deposytSubId, {
-    status: 'cancelled',
+    status: 'canceled',
     canceledAt: new Date(),
   });
 }

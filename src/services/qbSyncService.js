@@ -329,6 +329,21 @@ async function syncGhlContactsToQb(locationId, since, stats, settings) {
   }
 }
 
+// Flatten a GHL opportunity's custom fields into { <fieldId>: value } so the
+// qb_item mapper (whose ghlValue is the GHL custom-field id) can select an item.
+// GHL has used a few shapes over API versions; handle them defensively.
+function oppGhlFieldValues(opp) {
+  const out = {};
+  const cfs = Array.isArray(opp?.customFields) ? opp.customFields : [];
+  for (const cf of cfs) {
+    const key = cf?.id ?? cf?.key ?? cf?.fieldKey;
+    if (!key) continue;
+    const val = cf?.fieldValue ?? cf?.value ?? cf?.fieldValueString ?? cf?.fieldValueArray ?? cf?.selectedOptions;
+    if (val !== undefined && val !== null && val !== '') out[key] = val;
+  }
+  return out;
+}
+
 async function syncGhlOpportunitiesToQb(locationId, since, stats) {
   const data = await makeGhlRequest(
     locationId,
@@ -340,9 +355,12 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
   // The location's QBO item mapping (mapperType 'qb_item') → the line item to
   // bill; null falls back to QBO's default item. Resolved once per pass.
   const itemMaps = await listMappers(locationId, 'quickbooks', 'qb_item');
-  const defaultItemRef = resolveItemRef(itemMaps);
 
   for (const opp of opportunities) {
+    // The QBO item to bill for THIS deal, resolved from the deal's own GHL
+    // custom-field values (so a 2+ item mapping picks the item the deal's
+    // selecting field points at; null → QBO's default item).
+    const itemRef = resolveItemRef(itemMaps, oppGhlFieldValues(opp));
     const ghlUpdatedAt = opp.updatedAt ?? opp.dateUpdated;
     if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) continue;
 
@@ -366,7 +384,7 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
         qbCustomerId: estimate.CustomerRef?.value,
         amountCents,
         description: opp.name,
-        itemRef: defaultItemRef,
+        itemRef,
       });
       await touchLink(link.id);
       stats.ghlToQbEstimatesUpdated++;
@@ -384,7 +402,7 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
         qbCustomerId: contactLink.qbId,
         amountCents,
         description: opp.name,
-        itemRef: defaultItemRef,
+        itemRef,
       });
       await upsertLink(locationId, 'estimate', opp.id, estimate.Id);
       stats.ghlToQbEstimatesCreated++;

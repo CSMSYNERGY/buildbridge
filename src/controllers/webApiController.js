@@ -84,16 +84,18 @@ export async function createSubscriptionHandler(req, res, next) {
       locationId,
     });
 
-    // Estimate the current period end from the plan's billing interval; a gateway
-    // webhook can refine it later.
-    const days = plan.billingInterval === 'annual' ? 365 : 30;
-    const periodEnd = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
+    // Access is gated on subscription STATUS, not a guessed period end. NMI's
+    // transact.php recurring flow has no BuildBridge webhook to refine an
+    // estimate, so a 30/365-day guess would wrongly revoke access on renewal day
+    // while NMI keeps billing (getActiveSubscriptions / checkSubscription filter
+    // out rows past currentPeriodEnd). Store null → treated as active until the
+    // subscription is explicitly cancelled. TODO: wire an NMI recurring-charge
+    // postback to set the real next-charge date and detect failed renewals.
     const sub = await subscriptionService.createSubscription(
       locationId,
       nmiSub.subscriptionId,
       planId,
-      periodEnd,
+      null,
     );
 
     res.status(201).json({ subscription: sub });
@@ -179,9 +181,15 @@ export async function getGhlFields(req, res, next) {
       label: `${f.name ?? f.fieldKey ?? f.id}${model === 'opportunity' ? ' (opportunity)' : ''}`,
     });
 
-    // Contact custom fields — the primary set most mappings use.
-    // GHL returns { customFields: [{ id, name, fieldKey, dataType, ... }] }
-    const contactData = await makeGhlRequest(locationId, 'GET', '/contacts/custom-fields');
+    // Contact custom fields — the primary set most mappings use. GHL v2 exposes
+    // custom fields under the LOCATION (not /contacts/custom-fields, which 404s
+    // and would blank every mapper dropdown). Returns { customFields: [{ id,
+    // name, fieldKey, dataType, model, ... }] }.
+    const contactData = await makeGhlRequest(
+      locationId,
+      'GET',
+      `/locations/${encodeURIComponent(locationId)}/customFields?model=contact`,
+    );
     const fields = (contactData?.customFields ?? []).map((f) => mapField(f, 'contact'));
 
     // Opportunity custom fields — best-effort. The GHL v2 endpoint/shape can vary
