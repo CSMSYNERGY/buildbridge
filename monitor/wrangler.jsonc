@@ -1,0 +1,37 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "buildbridge-monitor",
+  "main": "worker.js",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+
+  // Independent watchdog worker — deployed separately from BuildBridge so it
+  // keeps checking (and can still email) even if a BuildBridge deploy breaks
+  // the main worker. Deploy from this directory:  wrangler deploy
+  "workers_dev": false,
+  "compatibility_date": "2025-09-01",
+
+  "observability": { "enabled": true },
+
+  // Check every 5 minutes. Alerts are edge-triggered (down / recovered), so
+  // this frequency does not produce repeated emails during a sustained outage.
+  "triggers": { "crons": ["*/5 * * * *"] },
+
+  "vars": {
+    "TARGET_BASE_URL": "https://buildbridge.csmsynergy.com",
+    "ALERT_TO": "ahsan@csmsynergy.com",
+    "ALERT_FROM": "buildbridge-monitor@csmsynergy.com"
+  },
+
+  // Cloudflare Email Sending. Requires csmsynergy.com onboarded to Email
+  // Sending (adds cf-bounce.* records only — does NOT touch the root MX; see
+  // SETUP.md). `destination_address` locks sends to this one address.
+  "send_email": [
+    { "name": "ALERT_EMAIL", "destination_address": "ahsan@csmsynergy.com" }
+  ],
+
+  // Stores last-known status so alerts fire only on a state change.
+  // Namespace created 2026-07-20 (wrangler kv namespace create MONITOR_STATE).
+  "kv_namespaces": [
+    { "binding": "MONITOR_STATE", "id": "12fd5622fa08489aa1db2708ef71c352" }
+  ]
+}
