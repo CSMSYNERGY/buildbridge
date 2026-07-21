@@ -240,7 +240,13 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
 
   if (!res.ok) {
     const errBody = await res.text();
-    throw createError(res.status, `QuickBooks API error [${method} ${path}]: ${errBody}`);
+    // Full QBO response body only in dev — it can contain QuickBooks data, which
+    // must never be logged in production (Intuit requirement). The thrown error
+    // (logged by the error handler) carries only the status + path, never the body.
+    if (env.NODE_ENV !== 'production') {
+      console.error(`[quickbooksService] QBO API error [${method} ${path}] HTTP ${res.status}:`, errBody);
+    }
+    throw createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}]`);
   }
 
   return res.json();

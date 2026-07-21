@@ -147,9 +147,15 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
   }
 
   if (!res.ok) {
-    // Keep the upstream body server-side only; don't leak it to API clients.
     const errBody = await res.text();
-    console.error(`[ghlService] GHL API error [${method} ${path}] HTTP ${res.status}:`, errBody);
+    // Never log the raw upstream body in production — it can carry customer data
+    // (Intuit/GHL requirement: don't log QuickBooks/customer data). Status + path
+    // only in prod; full body only in dev for debugging.
+    if (env.NODE_ENV === 'production') {
+      console.error(`[ghlService] GHL API error [${method} ${path}] HTTP ${res.status}`);
+    } else {
+      console.error(`[ghlService] GHL API error [${method} ${path}] HTTP ${res.status}:`, errBody);
+    }
     throw createError(res.status, `GHL API request failed (${res.status})`);
   }
 

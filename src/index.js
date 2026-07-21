@@ -40,7 +40,12 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", nmiOrigin],
+      // No 'unsafe-inline' for scripts: the SPA loads only external module
+      // scripts (Vite build) + Collect.js from the gateway, so inline <script>
+      // stays blocked — the CSP backstop against injected-inline-script XSS.
+      scriptSrc: ["'self'", nmiOrigin],
+      // styleSrc keeps 'unsafe-inline' — the UI relies on inline styles and
+      // inline styles are not a script-execution vector.
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
       // Collect.js tokenization talks to the gateway origin.
@@ -55,6 +60,9 @@ app.use(helmet({
   },
   // Also disable X-Frame-Options header for iframe embedding
   frameguard: false,
+  // Don't leak the URL (which can carry an SSO key on the /api/sso/decrypt GET)
+  // to third parties via the Referer header.
+  referrerPolicy: { policy: 'no-referrer' },
 }));
 
 // CORS
@@ -107,6 +115,29 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
     res.set('Cache-Control', 'no-store');
+  }
+  next();
+});
+
+// CSRF defense — verify state-changing requests originate from the app itself.
+// The session cookie is SameSite=None (required so it works inside the GHL
+// iframe), so a cross-site form POST could otherwise ride the cookie. Browsers
+// always attach Origin on a cross-origin state-changing request, so a CSRF POST
+// is caught here. Origin-less server-to-server calls (GHL workflow /actions with
+// X-API-KEY, and /webhooks with signature verification) are NOT a cookie-CSRF
+// vector and are allowed; the SPA's own fetches carry the app's Origin and pass.
+const APP_ORIGIN = (() => { try { return new URL(env.SMARTBUILD_BASE_URL).origin; } catch { return null; } })();
+app.use((req, res, next) => {
+  const m = req.method;
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return next();
+  if (req.path.startsWith('/webhooks')) return next(); // external, signature-verified
+  let source = req.get('origin') || null;
+  if (!source) {
+    const ref = req.get('referer');
+    if (ref) { try { source = new URL(ref).origin; } catch { source = null; } }
+  }
+  if (source && APP_ORIGIN && source !== APP_ORIGIN) {
+    return res.status(403).json({ error: 'Cross-origin request blocked' });
   }
   next();
 });

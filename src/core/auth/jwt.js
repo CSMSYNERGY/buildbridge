@@ -16,10 +16,13 @@ const COOKIE_BASE = {
   partitioned: env.NODE_ENV === 'production',
   path: '/',
 };
-const COOKIE_OPTIONS = { ...COOKIE_BASE, maxAge: 60 * 60 * 24 * 7 * 1000 }; // 7 days in ms
+// 24h session. The embedded GHL app re-runs SSO on each load (GHL supplies a
+// fresh key), so the cookie is re-minted routinely — a shorter lifetime bounds
+// the blast radius of a captured/replayed SSO key without disrupting real use.
+const COOKIE_OPTIONS = { ...COOKIE_BASE, maxAge: 60 * 60 * 24 * 1000 }; // 24 hours in ms
 
 export function setAuthCookie(res, payload) {
-  const token = jwt.sign(payload, env.APP_JWT_SECRET, { expiresIn: '7d' });
+  const token = jwt.sign(payload, env.APP_JWT_SECRET, { expiresIn: '24h' }); // match COOKIE_OPTIONS maxAge
   res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
   return token;
 }
