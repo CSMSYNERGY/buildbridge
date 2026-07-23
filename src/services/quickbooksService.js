@@ -71,6 +71,41 @@ function captureTid(context, res) {
   return tid;
 }
 
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * fetch() to Intuit with automatic retry of TRANSIENT failures — Intuit's go-live
+ * requirement to retry failed authorization/authentication/API requests. Retries only on a
+ * thrown network error or HTTP 429/500/502/503/504, with exponential backoff (honoring
+ * Retry-After, capped). Non-retryable 4xx (400/401/403 = bad grant/credentials) are NOT
+ * retried — a retry can't fix them. Bounded (maxRetries) with small, capped waits so the
+ * whole call stays within the Worker's ~20s request budget; on persistent failure it
+ * returns the last response so the caller throws with the intuit_tid attached.
+ */
+async function fetchIntuit(context, url, options, maxRetries = 2) {
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, options);
+    } catch (e) {
+      if (attempt >= maxRetries) throw e;
+      const wait = Math.min(500 * 2 ** attempt, 4000);
+      console.warn(`[quickbooksService] ${context} network error — retry ${attempt + 1}/${maxRetries} in ${wait}ms: ${e.message}`);
+      await sleep(wait);
+      continue;
+    }
+    if (RETRYABLE_STATUS.has(res.status) && attempt < maxRetries) {
+      const ra = Number(res.headers.get('Retry-After'));
+      const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 5000) : Math.min(500 * 2 ** attempt, 4000);
+      console.warn(`[quickbooksService] ${context} → HTTP ${res.status} — retry ${attempt + 1}/${maxRetries} in ${wait}ms`);
+      await sleep(wait);
+      continue;
+    }
+    return res;
+  }
+}
+
 /**
  * Exchange an OAuth authorization code for access + refresh tokens.
  * Returns the raw token response from Intuit.
@@ -78,7 +113,7 @@ function captureTid(context, res) {
 export async function exchangeCodeForTokens(code) {
   assertConfigured();
 
-  const res = await fetch(TOKEN_URL, {
+  const res = await fetchIntuit('OAuth token exchange', TOKEN_URL, {
     method: 'POST',
     headers: {
       Authorization: basicAuthHeader(),
@@ -168,7 +203,7 @@ export async function refreshAccessToken(locationId) {
   assertConfigured();
   const creds = await getCredentials(locationId);
 
-  const res = await fetch(TOKEN_URL, {
+  const res = await fetchIntuit('OAuth token refresh', TOKEN_URL, {
     method: 'POST',
     headers: {
       Authorization: basicAuthHeader(),
@@ -245,7 +280,7 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
   }
 
   const url = `${apiBase()}/v3/company/${creds.realmId}${path}`;
-  const res = await fetch(url, {
+  const res = await fetchIntuit(`QBO ${method} ${path}`, url, {
     method,
     headers: {
       Authorization: `Bearer ${creds.accessToken}`,
