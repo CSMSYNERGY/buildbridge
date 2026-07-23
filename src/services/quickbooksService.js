@@ -57,6 +57,21 @@ export function getAuthorizeUrl(state) {
 }
 
 /**
+ * Capture + log the Intuit transaction id (`intuit_tid`) from a QBO / OAuth response.
+ * Intuit's go-live requirements mandate logging this id for every response so it can be
+ * handed to Intuit support when troubleshooting. It carries NO QuickBooks company data, so
+ * it is safe to log in ALL environments (unlike response bodies, which stay dev-only).
+ * Returns the tid so callers can also attach it to thrown errors.
+ */
+function captureTid(context, res) {
+  let tid = '';
+  try { tid = res.headers.get('intuit_tid') || ''; } catch { /* headers unavailable */ }
+  const line = `[quickbooksService] ${context} → HTTP ${res.status} intuit_tid=${tid || 'none'}`;
+  if (res.ok) console.log(line); else console.error(line);
+  return tid;
+}
+
+/**
  * Exchange an OAuth authorization code for access + refresh tokens.
  * Returns the raw token response from Intuit.
  */
@@ -77,9 +92,10 @@ export async function exchangeCodeForTokens(code) {
     }),
   });
 
+  const tid = captureTid('OAuth token exchange', res);
   if (!res.ok) {
     const body = await res.text();
-    throw createError(502, `QuickBooks token exchange failed (HTTP ${res.status}): ${body}`);
+    throw createError(502, `QuickBooks token exchange failed (HTTP ${res.status}, intuit_tid=${tid || 'none'}): ${body}`);
   }
 
   return res.json();
@@ -165,9 +181,10 @@ export async function refreshAccessToken(locationId) {
     }),
   });
 
+  const tid = captureTid('OAuth token refresh', res);
   if (!res.ok) {
     const body = await res.text();
-    throw createError(502, `QuickBooks token refresh failed (HTTP ${res.status}): ${body}`);
+    throw createError(502, `QuickBooks token refresh failed (HTTP ${res.status}, intuit_tid=${tid || 'none'}): ${body}`);
   }
 
   const data = await res.json();
@@ -238,15 +255,19 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 
+  // Log the Intuit transaction id for EVERY response (success + error), in all envs —
+  // Intuit's go-live troubleshooting requirement. It carries no QuickBooks company data.
+  const tid = captureTid(`QBO ${method} ${path}`, res);
+
   if (!res.ok) {
-    const errBody = await res.text();
-    // Full QBO response body only in dev — it can contain QuickBooks data, which
-    // must never be logged in production (Intuit requirement). The thrown error
-    // (logged by the error handler) carries only the status + path, never the body.
+    // The response BODY can contain QuickBooks company data → logged only in dev. The
+    // intuit_tid + status are already logged above (prod-safe) and are attached to the
+    // thrown error so downstream handlers keep the troubleshooting id.
     if (env.NODE_ENV !== 'production') {
-      console.error(`[quickbooksService] QBO API error [${method} ${path}] HTTP ${res.status}:`, errBody);
+      const errBody = await res.text();
+      console.error(`[quickbooksService] QBO error body [${method} ${path}]:`, errBody);
     }
-    throw createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}]`);
+    throw createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}] intuit_tid=${tid || 'none'}`);
   }
 
   return res.json();
