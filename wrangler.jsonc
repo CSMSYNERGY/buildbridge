@@ -77,7 +77,16 @@
     "NODE_ENV": "production",
     "GHL_BASE_URL": "https://services.leadconnectorhq.com",
     "GHL_DEFAULT_API_VERSION": "2021-07-28",
-    "GHL_SCOPES": "locations.readonly contacts.readonly opportunities.readonly",
+    // Scope audit 2026-07-24 (verified live against the production worker logs):
+    //   contacts.write               — QB→GHL sync creates/updates contacts (POST/PUT /contacts)
+    //                                  and reflectSalesDocStatus writes the status custom field;
+    //                                  without it the cron sync dies with GHL 401.
+    //   locations/customFields.readonly — getGhlFields (GET /locations/{id}/customFields);
+    //                                  without it every mapper's "Synergy field" dropdown is empty.
+    //   users.readonly               — best-effort display-name fetch in the OAuth callback.
+    // The marketplace app profile must list the SAME scopes BEFORE this is deployed,
+    // and existing locations must reconnect (OAuth choose-location flow) to re-grant.
+    "GHL_SCOPES": "locations.readonly contacts.readonly contacts.write opportunities.readonly locations/customFields.readonly users.readonly",
     // TODO(deploy): replace `example` with the real workers.dev subdomain (or a
     // custom domain) once known — must match the GHL marketplace redirect URI.
     "REDIRECT_URI": "https://buildbridge.csmsynergy.com/auth/callback",
@@ -87,6 +96,6 @@
     // are secrets (set via `wrangler secret put`), never committed here.
     // QBO_ENVIRONMENT: sandbox → sandbox-quickbooks.api.intuit.com; production → quickbooks.api.intuit.com.
     "QBO_REDIRECT_URI": "https://buildbridge.csmsynergy.com/auth/quickbooks/callback",
-    "QBO_ENVIRONMENT": "sandbox"
+    "QBO_ENVIRONMENT": "production"
   }
 }
