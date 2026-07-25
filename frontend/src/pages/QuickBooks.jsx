@@ -307,12 +307,17 @@ export default function QuickBooks() {
           pointerEvents: 'none', userSelect: 'none', zIndex: 0,
         }}
       />
-      <div className="max-w-lg space-y-6" style={{ position: 'relative', zIndex: 1 }}>
-        <div>
+      {/* Page is a wide shell: the connection/status cards stay in a readable narrow
+          column, while the settings + mappings sit side by side below (see the grid) so
+          the space to the right of Integration Settings isn't wasted. */}
+      <div className="max-w-6xl space-y-6" style={{ position: 'relative', zIndex: 1 }}>
+        <div className="max-w-lg">
           <h1 className="text-3xl font-bold tracking-tight" style={{ color: '#3d3672' }}>QuickBooks Config</h1>
           <p className="text-muted-foreground mt-1">Connect your QuickBooks Online company via secure OAuth.</p>
         </div>
 
+        {/* Connection + connect/disconnect stay narrow — they are short, single-column content */}
+        <div className="max-w-lg space-y-6">
         {/* Connection Status */}
         <Card>
           <CardContent className="pt-4 pb-4">
@@ -374,7 +379,15 @@ export default function QuickBooks() {
           </Card>
         )}
 
-        {/* Feature Settings — one app, opt into whichever aspects this client uses */}
+        </div>{/* /narrow column */}
+
+        {/* ── Config grid: Integration Settings on the left, the mapping cards on the
+             right so the space beside the settings form is used. Stacks on < lg. ── */}
+        {isConnected && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+        {/* LEFT column — Feature Settings: one app, opt into whichever aspects this client uses */}
+        <div className="space-y-6">
         {isConnected && (
           <Card>
             <CardHeader>
@@ -571,6 +584,11 @@ export default function QuickBooks() {
           </Card>
         )}
 
+        </div>{/* /left column */}
+
+        {/* RIGHT column — the two mapping cards */}
+        <div className="space-y-6">
+
         {/* Field mappings — QuickBooks custom field ↔ Synergy field */}
         {isConnected && (
           <Card>
@@ -757,6 +775,10 @@ export default function QuickBooks() {
             </CardContent>
           </Card>
         )}
+
+        </div>{/* /right column */}
+        </div>
+        )}{/* /config grid */}
 
         {/* Embedded setup guide — the config is the top of the page; this reference sits below it */}
         <Card>
