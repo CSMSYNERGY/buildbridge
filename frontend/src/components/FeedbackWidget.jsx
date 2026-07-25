@@ -70,7 +70,9 @@ export default function FeedbackWidget() {
         onClick={() => setView('menu')}
         aria-label="Send feedback"
         style={{
-          position: 'fixed', right: 20, bottom: 20, zIndex: 999999,
+          position: 'fixed', right: 20, zIndex: 999999,
+          // Stay above the zone GHL clips off the bottom of the iframe.
+          bottom: 'calc(20px + var(--bb-clip-bottom, 0px))',
           background: accent, color: '#FFF', border: 'none', borderRadius: 999,
           padding: '10px 16px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
           boxShadow: '0 4px 14px rgba(0,0,0,0.25)',

@@ -13,7 +13,41 @@ const QUICKBOOKS_SLUG = 'quickbooks';
 const AUTHORIZE_URL = 'https://appcenter.intuit.com/connect/oauth2';
 const TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
 const REVOKE_URL = 'https://developer.api.intuit.com/v2/oauth2/tokens/revoke';
-const SCOPE = 'com.intuit.quickbooks.accounting';
+// `com.intuit.quickbooks.accounting` — the REST v3 API (customers, estimates, invoices).
+// `app-foundations.custom-field-definitions.read` — REQUIRED to read the modern
+//   "Custom fields" definitions (QBO Settings → Custom fields) over the App
+//   Foundations GraphQL API. The legacy REST Preferences payload only exposes the
+//   first three STRING *sales-form* custom fields, so Customer-associated fields and
+//   fields 4-10 are invisible without this scope.
+// The Intuit app must ALSO have this scope enabled in the developer portal, and an
+// already-connected company must re-authorize before its token carries it.
+const SCOPE = 'com.intuit.quickbooks.accounting app-foundations.custom-field-definitions.read';
+
+// App Foundations GraphQL endpoint. PRODUCTION ONLY — Intuit does not expose this
+// API in sandbox, so custom-field definitions simply come back empty there (the
+// caller degrades to the legacy Preferences list rather than failing).
+const GRAPHQL_URL = 'https://qb.api.intuit.com/graphql';
+
+// Read query, matching Intuit's own sample app (IntuitDeveloper/Sampleapp-Customfields-Nodejs).
+// Only the fields we actually consume are requested.
+const CUSTOM_FIELD_DEFINITIONS_QUERY = `
+query GetCustomFieldDefinitions {
+  appFoundationsCustomFieldDefinitions {
+    edges {
+      node {
+        id
+        legacyIDV2
+        label
+        dataType
+        active
+        associations {
+          associatedEntity
+          active
+        }
+      }
+    }
+  }
+}`;
 
 function apiBase() {
   if (env.QBO_API_BASE_URL) return env.QBO_API_BASE_URL; // explicit override (testing/mocks)
@@ -259,6 +293,94 @@ export async function revokeToken(locationId) {
   }
 }
 
+/** Resolve credentials, refreshing the access token if expired or near expiry. */
+async function getFreshCredentials(locationId) {
+  let creds = await getCredentials(locationId);
+  const bufferMs = 60 * 1000;
+  const expiresAt = creds.expiresAt ? new Date(creds.expiresAt) : null;
+  if (!expiresAt || expiresAt.getTime() - Date.now() < bufferMs) {
+    creds = await refreshAccessToken(locationId);
+  }
+  return creds;
+}
+
+/**
+ * Read the company's modern custom-field DEFINITIONS via the App Foundations
+ * GraphQL API (QBO Settings → Custom fields).
+ *
+ * Why this exists: the REST Preferences payload only carries the first three STRING
+ * *sales-form* custom fields, so anything created in the newer Custom fields manager
+ * — including Customer-associated fields, which is what the QuickBooks→Synergy
+ * salesperson mapping needs — is invisible to REST.
+ *
+ * Returns [] instead of throwing when the API is unavailable for this company
+ * (sandbox, non-Advanced tier, or the scope not yet granted). Callers merge the
+ * result with the legacy list, so an empty return simply means "nothing extra".
+ *
+ * @param {string} locationId
+ * @returns {Promise<Array<{id:string,name:string,dataType:string,entities:string[],legacyId:string|null}>>}
+ */
+export async function getCustomFieldDefinitions(locationId) {
+  assertConfigured();
+  const creds = await getFreshCredentials(locationId);
+
+  const res = await fetchIntuit('QBO GraphQL customFieldDefinitions', GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${creds.accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      // Required by App Foundations — the realm is NOT in the URL for GraphQL.
+      'intuit-realm-id': creds.realmId,
+    },
+    body: JSON.stringify({ query: CUSTOM_FIELD_DEFINITIONS_QUERY }),
+  });
+
+  const tid = captureTid('QBO GraphQL customFieldDefinitions', res);
+
+  if (!res.ok) {
+    // 401/403 here almost always means the token predates the
+    // app-foundations.custom-field-definitions.read scope (company must
+    // re-authorize) or the company is not on a tier that exposes the API.
+    console.error(
+      `[quickbooksService] custom-field definitions unavailable (HTTP ${res.status}, intuit_tid=${tid || 'none'}) — token may predate the app-foundations scope, or the tier does not expose this API`,
+    );
+    return [];
+  }
+
+  let payload;
+  try {
+    payload = await res.json();
+  } catch {
+    console.error('[quickbooksService] custom-field definitions: non-JSON response');
+    return [];
+  }
+
+  // GraphQL reports failures in a 200 with an `errors` array.
+  if (Array.isArray(payload?.errors) && payload.errors.length) {
+    // Messages describe schema/authz problems, not company data — safe to log.
+    console.error(
+      '[quickbooksService] custom-field definitions GraphQL errors:',
+      payload.errors.map((e) => e?.message).filter(Boolean).join(' | ').slice(0, 500),
+    );
+    return [];
+  }
+
+  const edges = payload?.data?.appFoundationsCustomFieldDefinitions?.edges ?? [];
+  return edges
+    .map((e) => e?.node)
+    .filter((n) => n && n.active !== false && n.label)
+    .map((n) => ({
+      id: n.label,                 // keyed by label: entity CustomField[].Name matches the label
+      name: n.label,
+      dataType: n.dataType ?? null,
+      legacyId: n.legacyIDV2 ?? null,
+      entities: (n.associations ?? [])
+        .filter((a) => a && a.active !== false && a.associatedEntity)
+        .map((a) => a.associatedEntity),
+    }));
+}
+
 /**
  * Make an authenticated QuickBooks Online API request on behalf of a location.
  * Automatically refreshes the access token if it is expired or near expiry.
@@ -270,14 +392,7 @@ export async function revokeToken(locationId) {
  */
 export async function makeQuickBooksRequest(locationId, method, path, body = undefined) {
   assertConfigured();
-  let creds = await getCredentials(locationId);
-
-  // Refresh if expired or within 60 seconds of expiry.
-  const bufferMs = 60 * 1000;
-  const expiresAt = creds.expiresAt ? new Date(creds.expiresAt) : null;
-  if (!expiresAt || expiresAt.getTime() - Date.now() < bufferMs) {
-    creds = await refreshAccessToken(locationId);
-  }
+  const creds = await getFreshCredentials(locationId);
 
   const url = `${apiBase()}/v3/company/${creds.realmId}${path}`;
   const res = await fetchIntuit(`QBO ${method} ${path}`, url, {
@@ -302,7 +417,14 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
       const errBody = await res.text();
       console.error(`[quickbooksService] QBO error body [${method} ${path}]:`, errBody);
     }
-    throw createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}] intuit_tid=${tid || 'none'}`);
+    const err = createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}] intuit_tid=${tid || 'none'}`);
+    // Metadata for the durable error log (errorLogService.recordThrown). The
+    // intuit_tid is what Intuit support asks for, so it rides along explicitly.
+    err.upstream = 'qbo';
+    err.upstreamStatus = res.status;
+    err.kind = 'qbo_api_error';
+    err.intuitTid = tid || null;
+    throw err;
   }
 
   return res.json();

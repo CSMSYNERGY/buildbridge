@@ -67,6 +67,40 @@ export const webhookEvents = pgTable('webhook_events', {
   index('webhook_events_status_idx').on(t.status),
 ]);
 
+// ─── Error Events ─────────────────────────────────────────────────────────────
+// Durable error log (see migrations/0004_error_events.sql). Deduplicated on
+// `fingerprint` via a unique partial index over unresolved rows, so a repeating
+// failure increments occurrence_count instead of adding rows.
+// NOTE: intentionally NOT foreign-keyed to locations — an error must be
+// recordable even when it happened for an unknown/unsaved location.
+export const errorEvents = pgTable('error_events', {
+  id: text('id').primaryKey(),
+  fingerprint: text('fingerprint').notNull(),
+  source: text('source').notNull(),                     // 'backend' | 'frontend' | 'cron' | 'webhook'
+  severity: text('severity').notNull().default('error'),
+  locationId: text('location_id'),
+  appSlug: text('app_slug'),
+  kind: text('kind'),
+  message: text('message').notNull(),
+  httpStatus: integer('http_status'),
+  httpMethod: text('http_method'),
+  path: text('path'),
+  upstream: text('upstream'),
+  upstreamStatus: integer('upstream_status'),
+  upstreamRef: text('upstream_ref'),
+  stack: text('stack'),
+  context: jsonb('context'),
+  userAgent: text('user_agent'),
+  occurrenceCount: integer('occurrence_count').notNull().default(1),
+  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  resolutionNote: text('resolution_note'),
+}, (t) => [
+  index('error_events_last_seen_idx').on(t.lastSeenAt),
+  index('error_events_location_idx').on(t.locationId),
+]);
+
 // ─── Mappers ──────────────────────────────────────────────────────────────────
 export const mappers = pgTable('mappers', {
   id: text('id').primaryKey(),

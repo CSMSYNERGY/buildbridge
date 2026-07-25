@@ -12,6 +12,7 @@ import {
 import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
+import { recordThrown } from './errorLogService.js';
 import {
   syncFlags,
   estimateStatus,
@@ -488,6 +489,15 @@ export async function syncAllLocations() {
       ran++;
     } catch (err) {
       console.error(`[rockwood] sync failed for ${locationId}:`, err.message);
+      // Durable record — this loop previously failed silently every 15 min (the
+      // only trace was an open `wrangler tail`). See errorLogService.
+      await recordThrown(err, {
+        source: 'cron',
+        kind: err.kind ?? 'qbo_sync_failed',
+        appSlug: 'quickbooks',
+        locationId,
+        context: { job: 'rockwood-quickbooks-sync' },
+      });
     }
   }
   return ran;

@@ -1,7 +1,10 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router';
 import { AuthProvider } from './context/AuthProvider.jsx';
 import { ToastProvider } from './components/ui/toast.jsx';
 import FeedbackWidget from './components/FeedbackWidget.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
+import { installGlobalErrorReporting } from './lib/reportError.js';
 import AppLayout from './layouts/AppLayout.jsx';
 import Home from './pages/Home.jsx';
 import Subscription from './pages/Subscription.jsx';
@@ -9,7 +12,11 @@ import SmartBuild from './pages/SmartBuild.jsx';
 import QuickBooks from './pages/QuickBooks.jsx';
 
 export default function App() {
+  // Global window.onerror / unhandledrejection → error_events.
+  useEffect(() => { installGlobalErrorReporting(); }, []);
+
   return (
+    <ErrorBoundary>
     <BrowserRouter>
       <AuthProvider>
         <ToastProvider>
@@ -28,5 +35,6 @@ export default function App() {
         </ToastProvider>
       </AuthProvider>
     </BrowserRouter>
+    </ErrorBoundary>
   );
 }

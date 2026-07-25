@@ -1,6 +1,8 @@
 // Minimal in-process job scheduler. Suited to the single-instance Railway
 // deployment; jobs must be idempotent since restarts re-run them.
 
+import { recordThrown } from '../services/errorLogService.js';
+
 const jobs = []; // { name, intervalMs, fn, timer }
 let started = false;
 
@@ -55,6 +57,14 @@ export async function runDueJobs() {
       await job.fn();
     } catch (err) {
       console.error(`[scheduler] job "${job.name}" failed:`, err.message);
+      // Backstop record: a job that throws OUT of its own per-tenant handling
+      // (which records its own errors) still lands in error_events, so no cron
+      // failure is invisible once the tail is closed.
+      await recordThrown(err, {
+        source: 'cron',
+        kind: 'cron_job_failed',
+        context: { job: job.name },
+      });
     }
   }
 }

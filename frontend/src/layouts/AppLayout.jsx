@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthProvider.jsx';
 import { Hammer, LogOut } from 'lucide-react';
 import { cn } from '../lib/utils.js';
 import { Button } from '../components/ui/button.jsx';
+import useParentClipCompensation from '../hooks/useParentClipCompensation.js';
 
 const NAV_ITEMS = [
   { to: '/buildbridge',              label: 'Home',              end: true },
@@ -13,6 +14,10 @@ const NAV_ITEMS = [
 
 export default function AppLayout() {
   const { user, logout, loading, embedded } = useAuth();
+
+  // Embedded in GHL: measure how much of the iframe the parent clips below the
+  // viewport and publish --bb-clip-bottom so bottom spacing compensates.
+  useParentClipCompensation(embedded);
 
   if (loading) {
     return (
@@ -44,7 +49,7 @@ export default function AppLayout() {
     <div className="flex min-h-screen flex-col bg-background">
       {/* ── Top navigation bar ─────────────────────────────────────── */}
       <header
-        className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-4 px-4"
+        className="sticky top-0 z-40 flex h-12 shrink-0 items-center gap-4 px-4"
         style={{ backgroundColor: '#3d3672' }}
       >
         {/* Brand */}
@@ -109,7 +114,13 @@ export default function AppLayout() {
       </header>
 
       {/* ── Page content ───────────────────────────────────────────── */}
-      <main className="flex-1 p-4 sm:p-6">
+      {/* Bottom padding grows by however much of the iframe GHL clips below
+          the viewport (see useParentClipCompensation), so the end of the page
+          is always scrollable into view. */}
+      <main
+        className="flex-1 px-4 pt-4 sm:px-6"
+        style={{ paddingBottom: 'calc(1.5rem + var(--bb-clip-bottom, 0px))' }}
+      >
         <Outlet />
       </main>
     </div>

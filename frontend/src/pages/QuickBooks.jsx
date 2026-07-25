@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
 import { useToast } from '../components/ui/toast.jsx';
@@ -113,9 +113,69 @@ export default function QuickBooks() {
     }
   }, [searchParams, setSearchParams, toast]);
 
-  function handleConnect() {
-    // Full-page navigation into the server-side OAuth flow.
-    window.location.href = '/auth/quickbooks/connect';
+  // OAuth must run in its own top-level tab: inside the GHL iframe a same-window
+  // navigation dead-ends (no Bearer header on navigations + Intuit refuses to
+  // render framed). While the tab is open we poll config until the connection
+  // lands, then flip the UI without a manual refresh.
+  const [connecting, setConnecting] = useState(false);
+  const [authUrl, setAuthUrl] = useState(null); // fallback link when the popup is blocked
+  const pollRef = useRef(null);
+
+  useEffect(() => () => clearInterval(pollRef.current), []); // cleanup on unmount
+
+  function startConnectPolling() {
+    clearInterval(pollRef.current);
+    setConnecting(true);
+    const startedAt = Date.now();
+    pollRef.current = setInterval(async () => {
+      if (Date.now() - startedAt > 3 * 60 * 1000) { // give up after 3 minutes
+        clearInterval(pollRef.current);
+        setConnecting(false);
+        return;
+      }
+      try {
+        const r = await fetchWithAuth('/api/quickbooks/config');
+        const d = r.ok ? await r.json() : null;
+        if (d?.config) {
+          clearInterval(pollRef.current);
+          setConnecting(false);
+          setAuthUrl(null);
+          setConfig(d.config);
+          toast({ title: 'QuickBooks connected' });
+          // Populate the now-unlocked cards (settings, QB fields, QB items).
+          fetchWithAuth('/api/quickbooks/settings')
+            .then((res) => (res.ok ? res.json() : null))
+            .then((s) => setSettings(s?.settings ?? null))
+            .catch(() => {});
+          fetchWithAuth('/api/quickbooks/fields')
+            .then((res) => (res.ok ? res.json() : { fields: [] }))
+            .then((s) => setQbFields(s.fields ?? []))
+            .catch(() => {});
+          fetchWithAuth('/api/quickbooks/items')
+            .then((res) => (res.ok ? res.json() : { items: [] }))
+            .then((s) => setQbItems(s.items ?? []))
+            .catch(() => {});
+        }
+      } catch { /* transient poll failure — keep polling */ }
+    }, 3000);
+  }
+
+  async function handleConnect() {
+    // Open the tab synchronously inside the click gesture (popup blockers),
+    // then point it at Intuit once the authorize URL arrives.
+    const oauthTab = window.open('', '_blank');
+    try {
+      const res = await fetchWithAuth('/api/quickbooks/connect-url');
+      if (!res.ok) throw new Error(`Could not start the QuickBooks connection (${res.status})`);
+      const data = await res.json();
+      if (!data?.url) throw new Error('No authorize URL returned');
+      if (oauthTab) oauthTab.location.href = data.url;
+      else setAuthUrl(data.url); // popup blocked — render a user-clickable link instead
+      startConnectPolling();
+    } catch (err) {
+      if (oauthTab) oauthTab.close();
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
   }
 
   async function handleDisconnect() {
@@ -361,20 +421,30 @@ export default function QuickBooks() {
             <CardHeader>
               <CardTitle className="text-base" style={{ color: '#3d3672' }}>Connect QuickBooks</CardTitle>
               <CardDescription>
-                You'll be redirected to Intuit to authorize access. Tokens are encrypted at rest and
-                refreshed automatically — no passwords are stored.
+                Intuit opens in a new tab — approve access there and this page updates
+                automatically. Tokens are encrypted at rest and refreshed automatically —
+                no passwords are stored.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <Button
                 type="button"
                 onClick={handleConnect}
+                disabled={connecting}
                 className="w-full gap-2 text-white"
                 style={{ backgroundColor: '#3d3672' }}
               >
                 <Link2 className="h-4 w-4" />
-                Connect to QuickBooks
+                {connecting ? 'Waiting for Intuit… (finish in the new tab)' : 'Connect to QuickBooks'}
               </Button>
+              {authUrl && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Pop-up blocked?{' '}
+                  <a href={authUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#1b7895' }}>
+                    Open Intuit in a new tab
+                  </a>
+                </p>
+              )}
             </CardContent>
           </Card>
         )}

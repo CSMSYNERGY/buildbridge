@@ -44,7 +44,11 @@ export function ToastProvider({ children }) {
             </ToastPrimitive.Close>
           </ToastPrimitive.Root>
         ))}
-        <ToastPrimitive.Viewport className="fixed bottom-0 right-0 z-[100] flex max-h-screen w-full flex-col-reverse gap-2 p-4 sm:max-w-[420px]" />
+        <ToastPrimitive.Viewport
+          className="fixed right-0 z-[100] flex max-h-screen w-full flex-col-reverse gap-2 p-4 sm:max-w-[420px]"
+          // Sit above the zone GHL clips off the bottom of the embedded iframe.
+          style={{ bottom: 'var(--bb-clip-bottom, 0px)' }}
+        />
       </ToastPrimitive.Provider>
     </ToastContext.Provider>
   );

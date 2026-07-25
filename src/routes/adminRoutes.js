@@ -3,6 +3,7 @@ import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { safeKeyEqual } from '../core/ghl/middleware.js';
 import { getLocations, getWebhookEvents, replayWebhookEvent } from '../controllers/adminController.js';
+import { listErrors, resolveError, errorSummary } from '../controllers/errorLogController.js';
 
 const router = Router();
 
@@ -30,5 +31,14 @@ router.get('/webhook-events', getWebhookEvents);
 
 // POST /admin/webhook-events/:eventId/replay — re-process a stored event
 router.post('/webhook-events/:eventId/replay', replayWebhookEvent);
+
+// ─── Error log (error_events) ───────────────────────────────────────────────
+// GET  /admin/errors/summary          — open issues grouped by source/upstream/kind
+// GET  /admin/errors?status=open      — triage list, newest activity first
+// POST /admin/errors/:id/resolve      — mark fixed (frees the dedupe fingerprint)
+// NOTE: /summary is declared before /:id routes so it isn't captured as an id.
+router.get('/errors/summary', errorSummary);
+router.get('/errors', listErrors);
+router.post('/errors/:id/resolve', resolveError);
 
 export default router;

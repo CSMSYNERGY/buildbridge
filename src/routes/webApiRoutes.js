@@ -20,8 +20,10 @@ import {
   deleteSmartBuildConfig,
   testSmartBuildConnection,
 } from '../controllers/webApiController.js';
+import { ingestClientError } from '../controllers/errorLogController.js';
 import {
   getQuickBooksConfig,
+  getQuickBooksConnectUrl,
   disconnectQuickBooks,
   getQuickBooksSettings,
   saveQuickBooksSettings,
@@ -47,6 +49,12 @@ router.post('/logout', (_req, res) => {
 // Plans are public pricing info, so the Subscription page renders standalone
 // (e.g. opened directly, outside the GHL SSO iframe). Subscribing still requires auth.
 router.get('/subscription/plans', getPlans);
+
+// POST /api/client-errors — browser-side error ingest. Unauthenticated on purpose:
+// crashes during the SSO handshake happen before a session exists, and those are
+// the ones most worth seeing. Bounded by the rate limiter + server-side dedupe,
+// and `source` is forced to 'frontend' so backend/cron rows can't be forged.
+router.post('/client-errors', ingestClientError);
 
 // ─── Protected ────────────────────────────────────────────────────────────────
 
@@ -85,6 +93,10 @@ router.post('/smartbuild/test', actionLimiter, testSmartBuildConnection);
 
 // QuickBooks integration config (OAuth connect/callback live under /auth/quickbooks)
 router.get('/quickbooks/config', getQuickBooksConfig);
+// Intuit authorize URL for the SPA to open in a new top-level tab (the embedded
+// iframe can't navigate itself into OAuth: no Bearer on navigations + Intuit
+// refuses framing)
+router.get('/quickbooks/connect-url', getQuickBooksConnectUrl);
 router.delete('/quickbooks/config', actionLimiter, disconnectQuickBooks);
 
 // QuickBooks per-tenant feature settings (two-way sync / milestone invoicing)

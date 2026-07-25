@@ -156,7 +156,14 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
     } else {
       console.error(`[ghlService] GHL API error [${method} ${path}] HTTP ${res.status}:`, errBody);
     }
-    throw createError(res.status, `GHL API request failed (${res.status})`);
+    const err = createError(res.status, `GHL API request failed (${res.status})`);
+    // Metadata for the durable error log (see errorLogService.recordThrown). Note
+    // the upstream BODY is deliberately not attached — it can carry customer data.
+    err.upstream = 'ghl';
+    err.upstreamStatus = res.status;
+    err.kind = 'ghl_api_error';
+    err.ghlPath = `${method} ${path}`;
+    throw err;
   }
 
   return res.json();
