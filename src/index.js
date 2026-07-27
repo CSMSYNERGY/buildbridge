@@ -71,6 +71,22 @@ app.use(cors({
   credentials: true,
 }));
 
+// IdeaRoom's inbound webhook takes the body as a raw Buffer, BEFORE the parsers below.
+// Those parsers only match application/json and form bodies; anything else — text/plain,
+// a vendor `application/vnd.x+json` type, a missing Content-Type — leaves req.body
+// undefined, and the handler would then store an EMPTY payload while still answering 200.
+// That is silent, permanent lead loss on a route whose whole promise is "we captured your
+// bytes". Verified live: 614KB sent as text/plain returned 200 with nothing stored.
+// Taking the bytes here (express.raw sets req._body, so the parsers below skip the route)
+// means the handler always holds the real body and decides how to interpret it.
+//
+// The 5mb limit replaces body-parser's 100kb default for this route only. A 413 is raised
+// inside the parser, i.e. BEFORE the handler can persist anything, so a big configured
+// building would have been dropped with no webhook_events row and no error_events row.
+// IdeaRoom's own published samples are 15-22KB, so this is generous headroom, and it is
+// scoped to this one path rather than raising the ceiling app-wide.
+app.use('/webhooks/idearoom', express.raw({ type: '*/*', limit: '5mb' }));
+
 // Body parsing — capture rawBody for webhook signature verification
 app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },

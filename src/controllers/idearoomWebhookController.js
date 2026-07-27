@@ -1,4 +1,4 @@
-import { logWebhookEvent, isDuplicateEvent, markEventProcessed, markEventFailed } from '../core/webhooks/eventLog.js';
+import { claimWebhookEvent, markEventProcessed, markEventFailed } from '../core/webhooks/eventLog.js';
 import { resolveByToken, extractLead, isActionable, pushLeadToGhl, eventKeyFor } from '../services/idearoomService.js';
 import { recordError } from '../services/errorLogService.js';
 
@@ -27,29 +27,97 @@ async function eventIdFor(locationId, payload) {
   return `idearoom:${locationId}:sha:${hex}`;
 }
 
+/**
+ * Interpret the raw body. The route takes bytes (see the express.raw mount in index.js),
+ * so parsing happens here where a failure can still be CAPTURED rather than rejected by
+ * body-parser with a 400 before the handler ever runs.
+ *
+ * Order: JSON (what IdeaRoom sends) → form-encoded → keep the bytes verbatim. The last
+ * branch is the point of doing this at all: a body we cannot parse is still stored, so a
+ * truncated or double-encoded delivery is diagnosable instead of vanishing.
+ */
+function parseInbound(body) {
+  if (Buffer.isBuffer(body)) {
+    const raw = body.toString('utf8');
+    const trimmed = raw.trim();
+    if (!trimmed) return { payload: {}, note: 'empty_body' };
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object') return { payload: parsed };
+      } catch {
+        // fall through — keep the bytes below rather than 400ing the sender
+      }
+    }
+    if (trimmed.includes('=')) {
+      try {
+        const obj = {};
+        for (const [k, v] of new URLSearchParams(trimmed)) obj[k] = v;
+        if (Object.keys(obj).length) return { payload: obj, note: 'form_encoded' };
+      } catch { /* fall through */ }
+    }
+    // Truncate defensively: the column is jsonb, and an unbounded blob is not worth
+    // storing in full to diagnose a malformed sender.
+    return { payload: { _raw: raw.slice(0, 100000) }, note: 'unparsed_body' };
+  }
+  // Already an object (another parser won the route, or a direct internal call).
+  if (body && typeof body === 'object') return { payload: body };
+  return { payload: { _raw: String(body ?? '') }, note: 'unparsed_body' };
+}
+
 export async function handleIdearoomWebhook(req, res) {
   const token = req.params?.token;
-  const settings = await resolveByToken(token);
+
+  // The token lookup is INSIDE the try: it is a DB call, and a transient failure here
+  // must return the same retryable 503 as a capture failure. Left outside, the rejection
+  // reached Express's error handler as a 500 — a different signal to a sender's retry
+  // policy, for the same underlying cause.
+  let settings;
+  try {
+    settings = await resolveByToken(token);
+  } catch (err) {
+    await recordError({
+      source: 'idearoom-webhook', kind: 'idearoom_token_lookup_failed', appSlug: 'idearoom',
+      severity: 'fatal', httpStatus: 503, httpMethod: 'POST', path: '/webhooks/idearoom',
+      message: `Could not resolve IdeaRoom webhook token: ${err?.message ?? err}`,
+      stack: err?.stack, upstream: 'db', context: { stage: 'token_lookup' },
+    }).catch(() => {});
+    return res.status(503).json({ error: 'Temporarily unable to accept the lead — please retry.' });
+  }
+
   if (!settings) {
     // Deliberately indistinguishable from a wrong path.
     return res.status(404).json({ error: 'Not found' });
   }
   const locationId = settings.locationId;
-  const payload = (req.body && typeof req.body === 'object') ? req.body : { _raw: String(req.body ?? '') };
+  const { payload, note } = parseInbound(req.body);
 
   let eventId;
   try {
     eventId = await eventIdFor(locationId, payload);
 
-    if (await isDuplicateEvent(eventId)) {
-      return res.json({ received: true, duplicate: true });
-    }
-
-    // 1. Capture first — before we try to understand anything. Record IdeaRoom's own
-    // eventType (created/updated/visited/checkout-opened/payment-prepared) so an operator
-    // can see which of their five triggers are actually pointed at us.
+    // 1. Capture and claim in one round trip — before we try to understand anything.
+    // Record IdeaRoom's own eventType (created/updated/visited/checkout-opened/
+    // payment-prepared) so an operator can see which of their triggers point at us.
     const eventType = String(payload?.eventType ?? '').toLowerCase().slice(0, 60) || 'lead';
-    await logWebhookEvent({ id: eventId, source: 'idearoom', eventType, locationId, payload });
+    const { claimed, alreadyProcessed } = await claimWebhookEvent({
+      id: eventId, source: 'idearoom', eventType, locationId, payload,
+    });
+    if (alreadyProcessed) return res.json({ received: true, duplicate: true });
+    // Not claimed and not processed → an earlier attempt left it pending/failed, so this
+    // delivery reprocesses it. The raw body is already stored from that attempt.
+    void claimed;
+
+    // A body we could not parse is stored (that is the point) but it is still a fault
+    // someone has to see — otherwise it looks like a normal unmappable lead forever.
+    if (note === 'unparsed_body') {
+      await recordError({
+        source: 'idearoom-webhook', kind: 'idearoom_unparsable_body', appSlug: 'idearoom',
+        severity: 'warn', locationId, httpMethod: 'POST', path: '/webhooks/idearoom',
+        message: 'IdeaRoom sent a body that is neither JSON nor form-encoded — stored raw for inspection',
+        context: { eventId, contentType: String(req.get('content-type') ?? '(none)').slice(0, 120) },
+      }).catch(() => {});
+    }
   } catch (err) {
     // Even the capture failed (DB down). This one IS worth a retry from IdeaRoom.
     await recordError({

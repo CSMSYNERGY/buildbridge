@@ -41,8 +41,15 @@ router.post('/ghl', verifyApiKey, handleGhlWebhook);
 // No verifyApiKey: the per-location token IN THE PATH is the credential, because the URL is
 // all IdeaRoom's team is given (they cannot be relied on to send a custom header). The
 // handler resolves the token to a location, stores the raw body, then pushes to GHL.
-// Own idempotency (keyed on IdeaRoom's lead id, else a body hash), so the generic
-// idempotencyCheck above — which keys on body.id — is deliberately not used here.
+// Own idempotency (keyed on IdeaRoom's design hash + event + counters, else a body hash),
+// so the generic idempotencyCheck above — which keys on body.id — is deliberately not used.
 router.post('/idearoom/:token', handleIdearoomWebhook);
+
+// Any other verb on the same path. Without this, Express's default 404 renders
+// "Cannot GET /webhooks/idearoom/<token>" as HTML — reflecting the secret straight back
+// into browser history, screenshots, proxy logs and error trackers. Since the path token
+// IS the only credential here, that is a credential leak, not just noise. Answer with the
+// same opaque JSON 404 the unknown-token case returns.
+router.all('/idearoom/:token', (_req, res) => res.status(404).json({ error: 'Not found' }));
 
 export default router;

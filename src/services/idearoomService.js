@@ -45,7 +45,47 @@ export async function issueWebhookToken(locationId, { rotate = false } = {}) {
   }
   const token = randomToken();
   await upsertLocationSettings(locationId, { idearoomWebhookToken: token });
+  // Drop the old token from this isolate's cache so a rotation takes effect here at once
+  // rather than after the TTL. Other isolates still honour it until their entry expires.
+  invalidateTokenCache(current?.idearoomWebhookToken);
   return { token, url: webhookUrlFor(token), rotated: Boolean(current?.idearoomWebhookToken) };
+}
+
+// Short-lived per-isolate cache for the token lookup.
+//
+// On this deployment a single query is a service-binding hop to a Supabase edge function
+// (~3s measured), and the token→settings lookup runs on EVERY delivery before anything
+// else can happen. Caching it removes that hop from the critical path on a warm isolate,
+// which is the difference between a sender timing out and not.
+//
+// Safe to cache because the TTL is short and the failure modes are benign in the right
+// direction: settings changes (enable/disable, pipeline) take effect within the TTL, and a
+// ROTATED or removed token is only honoured for the remainder of that window — so the
+// staleness cannot resurrect a token this process never saw. Negative results are cached
+// too, so a scan for valid tokens cannot use us as a DB amplifier.
+const TOKEN_CACHE_TTL_MS = 30_000;
+const tokenCache = new Map(); // token -> { at, row }
+
+function cacheGet(token) {
+  const hit = tokenCache.get(token);
+  if (!hit) return undefined;
+  if (Date.now() - hit.at > TOKEN_CACHE_TTL_MS) {
+    tokenCache.delete(token);
+    return undefined;
+  }
+  return hit.row;
+}
+
+function cacheSet(token, row) {
+  // Bound the map: an isolate is short-lived, but a token-guessing burst must not grow it
+  // without limit.
+  if (tokenCache.size > 500) tokenCache.clear();
+  tokenCache.set(token, { at: Date.now(), row });
+}
+
+/** Drop a token from this isolate's cache — used after a rotation writes a new one. */
+export function invalidateTokenCache(token) {
+  if (token) tokenCache.delete(token);
 }
 
 /**
@@ -54,12 +94,18 @@ export async function issueWebhookToken(locationId, { rotate = false } = {}) {
  */
 export async function resolveByToken(token) {
   if (typeof token !== 'string' || token.length < 16 || token.length > 128) return null;
+
+  const cached = cacheGet(token);
+  if (cached !== undefined) return cached;
+
   const [row] = await db
     .select()
     .from(locationSettings)
     .where(and(eq(locationSettings.idearoomWebhookToken, token), isNotNull(locationSettings.idearoomWebhookToken)))
     .limit(1);
-  return row ?? null;
+  const result = row ?? null;
+  cacheSet(token, result);
+  return result;
 }
 
 // ─── Field extraction ─────────────────────────────────────────────────────────
