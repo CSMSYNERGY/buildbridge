@@ -86,7 +86,10 @@
     //   users.readonly               — best-effort display-name fetch in the OAuth callback.
     // The marketplace app profile must list the SAME scopes BEFORE this is deployed,
     // and existing locations must reconnect (OAuth choose-location flow) to re-grant.
-    "GHL_SCOPES": "locations.readonly contacts.readonly contacts.write opportunities.readonly locations/customFields.readonly users.readonly",
+    // opportunities.write is required by the IdeaRoom webhook (POST /opportunities/).
+    // NOTE: existing installs do NOT gain a scope on token refresh — a location connected
+    // before this line changed must reconnect GHL before opportunity creation will work.
+    "GHL_SCOPES": "locations.readonly contacts.readonly contacts.write opportunities.readonly opportunities.write locations/customFields.readonly users.readonly",
     // TODO(deploy): replace `example` with the real workers.dev subdomain (or a
     // custom domain) once known — must match the GHL marketplace redirect URI.
     "REDIRECT_URI": "https://buildbridge.csmsynergy.com/auth/callback",

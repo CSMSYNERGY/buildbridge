@@ -30,6 +30,12 @@ import {
   getQuickBooksFields,
   getQuickBooksItems,
 } from '../controllers/quickbooksController.js';
+import {
+  getIdearoomSettings,
+  saveIdearoomSettings,
+  issueIdearoomWebhook,
+  getIdearoomLeads,
+} from '../controllers/idearoomController.js';
 
 const router = Router();
 
@@ -84,6 +90,13 @@ router.get('/mappers', getMappers);
 router.post('/mappers', actionLimiter, createMapper);
 router.put('/mappers/:id', actionLimiter, updateMapper);
 router.delete('/mappers/:id', actionLimiter, deleteMapper);
+
+// IdeaRoom inbound lead webhook: issue/rotate the URL, configure where leads land, and
+// inspect raw inbound leads (the webhook itself is public-by-design at /webhooks/idearoom/:token)
+router.get('/idearoom/settings', getIdearoomSettings);
+router.put('/idearoom/settings', actionLimiter, saveIdearoomSettings);
+router.post('/idearoom/webhook', actionLimiter, issueIdearoomWebhook);
+router.get('/idearoom/leads', getIdearoomLeads);
 
 // SmartBuild integration config
 router.get('/smartbuild/config', getSmartBuildConfig);

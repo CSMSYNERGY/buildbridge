@@ -2,10 +2,15 @@ import { db } from '../core/db/client.js';
 import { locationSettings } from '../core/db/schema.js';
 import { eq } from 'drizzle-orm';
 
-// Per-tenant QuickBooks feature configuration. Everything defaults OFF so
-// connecting QuickBooks never silently starts syncing before the tenant opts in
-// (Carolyn 2026-07-15: "can't they be merged and they can use whichever aspects
-// they want?"). A missing row is treated as all-defaults.
+// Per-tenant integration configuration (QuickBooks + IdeaRoom). Everything defaults
+// OFF so connecting an integration never silently starts syncing before the tenant
+// opts in (Carolyn 2026-07-15: "can't they be merged and they can use whichever
+// aspects they want?"). A missing row is treated as all-defaults.
+//
+// NOTE for anyone adding a field here: `upsertLocationSettings` writes an explicit
+// whitelist, so a new column MUST be given both a DEFAULTS entry and its own branch
+// below. Miss the branch and writes silently no-op — the caller sees a success
+// response and the value never lands.
 export const SYNC_DIRECTIONS = ['off', 'qb_to_ghl', 'ghl_to_qb', 'two_way'];
 
 const DEFAULTS = {
@@ -16,11 +21,16 @@ const DEFAULTS = {
   qboAssignedUserGhlField: null,
   qboStatusGhlField: null,
   qboInvoiceLeadDays: 3,
+  idearoomWebhookToken: null,
+  idearoomPipelineId: null,
+  idearoomStageId: null,
+  idearoomTag: 'idearoom-lead',
+  idearoomEnabled: false,
 };
 
 /**
- * Read a location's QuickBooks settings. Returns DEFAULTS (merged onto the
- * locationId) when no row exists — callers can always read the flags safely.
+ * Read a location's settings. Returns DEFAULTS (merged onto the locationId) when no
+ * row exists — callers can always read the flags safely.
  */
 export async function getLocationSettings(locationId) {
   const [row] = await db
@@ -64,6 +74,25 @@ export async function upsertLocationSettings(locationId, fields = {}) {
   if (fields.qboInvoiceLeadDays !== undefined) {
     const n = Number(fields.qboInvoiceLeadDays);
     set.qboInvoiceLeadDays = Number.isFinite(n) && n >= 0 ? Math.round(n) : DEFAULTS.qboInvoiceLeadDays;
+  }
+  if (fields.idearoomWebhookToken !== undefined) {
+    const v = fields.idearoomWebhookToken;
+    set.idearoomWebhookToken = v ? String(v) : null;
+  }
+  if (fields.idearoomPipelineId !== undefined) {
+    const v = fields.idearoomPipelineId;
+    set.idearoomPipelineId = v ? String(v) : null;
+  }
+  if (fields.idearoomStageId !== undefined) {
+    const v = fields.idearoomStageId;
+    set.idearoomStageId = v ? String(v) : null;
+  }
+  if (fields.idearoomTag !== undefined) {
+    const v = String(fields.idearoomTag ?? '').trim();
+    set.idearoomTag = v || DEFAULTS.idearoomTag;
+  }
+  if (fields.idearoomEnabled !== undefined) {
+    set.idearoomEnabled = !!fields.idearoomEnabled;
   }
 
   const [row] = await db

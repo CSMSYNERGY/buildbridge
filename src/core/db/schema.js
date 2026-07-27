@@ -54,7 +54,7 @@ export const subscriptions = pgTable('subscriptions', {
 // ─── Webhook Events ───────────────────────────────────────────────────────────
 export const webhookEvents = pgTable('webhook_events', {
   id: text('id').primaryKey(),                          // idempotency key
-  source: text('source').notNull(),                     // 'ghl' | 'deposyt'
+  source: text('source').notNull(),                     // 'ghl' | 'deposyt' | 'idearoom'
   eventType: text('event_type').notNull(),
   locationId: text('location_id'),
   payload: jsonb('payload').notNull(),
@@ -215,6 +215,20 @@ export const locationSettings = pgTable('location_settings', {
   // Default days before a milestone's date to raise its invoice (deposit is
   // always immediate). Copied onto each qb_milestones row at creation time.
   qboInvoiceLeadDays: integer('qbo_invoice_lead_days').notNull().default(3),
+  // ── IdeaRoom inbound lead webhook (migration 0005) ──
+  // The secret in the URL we hand IdeaRoom: POST /webhooks/idearoom/<token>. Per location,
+  // unguessable, uniquely indexed for reverse lookup, and rotatable (rotation instantly
+  // invalidates the old URL). Null → no webhook issued for this location yet.
+  idearoomWebhookToken: text('idearoom_webhook_token'),
+  // Where an IdeaRoom lead's opportunity lands. Both null → create/update the contact only
+  // (GHL has no opportunity without a pipeline stage).
+  idearoomPipelineId: text('idearoom_pipeline_id'),
+  idearoomStageId: text('idearoom_stage_id'),
+  // Tag stamped on every contact from IdeaRoom so the source is visible + workflow-able.
+  idearoomTag: text('idearoom_tag').notNull().default('idearoom-lead'),
+  // Holding a token is not consent to process: leads are stored but not pushed to GHL
+  // until an operator turns this on.
+  idearoomEnabled: boolean('idearoom_enabled').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
