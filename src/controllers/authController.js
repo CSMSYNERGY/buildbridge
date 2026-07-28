@@ -28,7 +28,11 @@ const STATE_COOKIE_OPTIONS = {
  */
 export function redirectToGHL(req, res) {
   const nonce = crypto.randomUUID();
-  const state = jwt.sign({ nonce, purpose: STATE_PURPOSE }, env.APP_JWT_SECRET, { expiresIn: '10m' });
+  // `retried` rides INSIDE the signed state, not on the URL: REDIRECT_URI is fixed, so any
+  // query param we put on /auth is gone by the time GHL calls /auth/callback. Carrying it
+  // in the state is what makes the callback's one-shot retry guard actually terminate.
+  const retried = String(req.query.retried || '') === '1';
+  const state = jwt.sign({ nonce, purpose: STATE_PURPOSE, retried }, env.APP_JWT_SECRET, { expiresIn: '10m' });
   res.cookie(STATE_COOKIE, nonce, STATE_COOKIE_OPTIONS);
 
   const params = new URLSearchParams({
@@ -54,19 +58,74 @@ export async function handleCallback(req, res, next) {
     if (error) throw createError(400, `GHL OAuth error: ${error}`);
     if (!code) throw createError(400, 'Missing authorization code');
 
-    // CSRF check: the signed state nonce must match the cookie set at /auth on
-    // this same browser. Blocks login-CSRF / cross-tenant session fixation.
+    // Two install paths reach this callback:
+    //
+    //  • App-initiated (/auth) — we minted a signed `state` and a matching nonce
+    //    cookie, so we verify the double-submit pair. Blocks login-CSRF /
+    //    cross-tenant session fixation.
+    //  • Marketplace-initiated — GHL's "Install" button starts the OAuth on GHL's
+    //    side, so the callback arrives with a bare `code`: no `state` we signed and
+    //    no nonce cookie on this browser. This is the plug-and-play install path
+    //    and must work, but it cannot be trusted to mint a session — so it installs
+    //    the location WITHOUT setting the auth cookie. The user gets their session
+    //    the normal way, through /api/sso/decrypt, when they open BuildBridge from
+    //    the GHL menu. An unverifiable callback therefore grants nothing.
+    //
+    // A `state` that IS present but doesn't verify is a real forgery signal and is
+    // still rejected outright.
     step = 'state_verify';
-    const stateCookie = req.cookies?.[STATE_COOKIE];
-    let stateOk = false;
-    try {
-      const decoded = jwt.verify(String(state ?? ''), env.APP_JWT_SECRET);
-      stateOk = decoded.purpose === STATE_PURPOSE && !!decoded.nonce && decoded.nonce === stateCookie;
-    } catch {
-      stateOk = false;
+    const marketplaceInstall = !state;
+    if (marketplaceInstall) {
+      console.log('[auth/callback] No state param — treating as a marketplace-initiated install');
+      res.clearCookie(STATE_COOKIE, { path: '/' }); // drop any stale nonce
+    } else {
+      const stateCookie = req.cookies?.[STATE_COOKIE];
+      let stateOk = false;
+      try {
+        const decoded = jwt.verify(String(state), env.APP_JWT_SECRET);
+        stateOk = decoded.purpose === STATE_PURPOSE && !!decoded.nonce && decoded.nonce === stateCookie;
+      } catch {
+        stateOk = false;
+      }
+      if (!stateOk) {
+        // The overwhelmingly common cause is not forgery, it is TIME: both the state JWT
+        // and its nonce cookie live 10 minutes, so pausing on GHL's location picker, or
+        // reloading / back-buttoning onto this callback, lands here. Dead-ending on an
+        // opaque 400 left the tenant stuck with nothing to click — the same failure the
+        // errorHandler notes blocked every marketplace install for days.
+        //
+        // So restart the flow instead of refusing: bounce to /auth, which mints a FRESH
+        // state + cookie. This accepts nothing from the bad callback (the code is never
+        // exchanged), it only offers the user a clean retry — which is also why it is safe
+        // for an attacker-triggered callback: all they can cause is a redirect.
+        //
+        // One-shot guard. Read `retried` back out of the state we signed, ignoring
+        // expiry — that is the whole point: the two ways to land here are an EXPIRED
+        // state and a MISSING nonce cookie, and both must be able to report "already
+        // retried" or the redirect below loops forever.
+        //
+        // A state with a genuinely invalid SIGNATURE cannot carry the flag, so it takes
+        // the restart path once and then errors on the second pass (verified by the
+        // termination test). That is fine: restarting grants nothing — the bad code is
+        // never exchanged — so the worst an attacker achieves is sending a browser to a
+        // fresh, legitimate GHL authorize page.
+        let retried = false;
+        try {
+          const stale = jwt.verify(String(state), env.APP_JWT_SECRET, { ignoreExpiration: true });
+          retried = stale?.purpose === STATE_PURPOSE && stale?.retried === true;
+        } catch { /* unsignable state → fall through to the error below */ }
+        if (!retried) {
+          console.warn('[auth/callback] state invalid/expired — restarting the OAuth flow once');
+          res.clearCookie(STATE_COOKIE, { path: '/' });
+          return res.redirect('/auth?retried=1');
+        }
+        throw createError(
+          400,
+          'That sign-in link expired before it could be used. Open BuildBridge from the Synergy menu and connect again — it only stays valid for 10 minutes.',
+        );
+      }
+      res.clearCookie(STATE_COOKIE, { path: '/' });
     }
-    if (!stateOk) throw createError(400, 'Invalid or expired OAuth state');
-    res.clearCookie(STATE_COOKIE, { path: '/' });
 
     console.log('[auth/callback] Received auth code:', String(code).slice(0, 8));
 
@@ -134,7 +193,11 @@ export async function handleCallback(req, res, next) {
         },
       });
 
-    setAuthCookie(res, { locationId, companyId, userId, name: userName, email: userEmail });
+    // Only an app-initiated (state-verified) callback mints a session — see the
+    // state_verify block above.
+    if (!marketplaceInstall) {
+      setAuthCookie(res, { locationId, companyId, userId, name: userName, email: userEmail });
+    }
 
     step = 'redirect';
     console.log('[auth/callback] Location saved, redirecting to GHL sub-account...');
