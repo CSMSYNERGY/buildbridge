@@ -60,6 +60,18 @@ function normalizeForFingerprint(text) {
     .toLowerCase()
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '<uuid>')
     .replace(/\b\d{4}-\d{2}-\d{2}t[\d:.]+z?\b/g, '<ts>')
+    // Named trace ids we embed in messages ourselves. These are per-REQUEST, so leaving
+    // them in defeats the whole point of the fingerprint: QuickBooks' refresh failure
+    // wrote a NEW error_events row every 15 minutes (8 rows in two hours, ~96/day)
+    // instead of incrementing one. Collapsed by name so this covers any trace id we add,
+    // and so it can't accidentally match ordinary prose.
+    .replace(/\b(intuit_tid|request_?id|trace_?id|correlation_?id|x-request-id)=[^\s,;)\]}]+/gi, '$1=<id>')
+    // Multi-segment hex ids (e.g. Intuit's 1-6a69037e-76009f15…). The <id> rule below
+    // needs a single 20+ char run, so a hyphenated id slips past it and then `\d+`
+    // mangles each segment into a DIFFERENT shape per occurrence — which is exactly how
+    // the QuickBooks rows escaped dedup. Requires 4+ hex chars per segment and 2+
+    // segments, so real words and dotted versions are untouched.
+    .replace(/\b[0-9a-f]{4,}(?:-[0-9a-f]{4,})+\b/g, '<id>')
     .replace(/\b[a-z0-9]{20,}\b/g, '<id>')
     .replace(/\d+/g, '<n>')
     .slice(0, 300);
