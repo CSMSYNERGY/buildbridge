@@ -30,10 +30,17 @@ function readToken() {
  */
 function requestGhlSsoPayload(timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const done = (fn, arg) => {
+      clearTimeout(timer);
+      clearInterval(poll);
       window.removeEventListener('message', onMessage);
-      reject(new Error('No SSO response from the GHL parent frame'));
-    }, timeoutMs);
+      fn(arg);
+    };
+
+    const timer = setTimeout(
+      () => done(reject, new Error('No SSO response from the GHL parent frame')),
+      timeoutMs,
+    );
 
     function onMessage(event) {
       // Only trust the parent frame we actually messaged — defeats a sibling/
@@ -41,14 +48,18 @@ function requestGhlSsoPayload(timeoutMs = 5000) {
       if (event.source !== window.parent) return;
       const data = event.data;
       if (data && data.message === 'REQUEST_USER_DATA_RESPONSE' && data.payload) {
-        clearTimeout(timer);
-        window.removeEventListener('message', onMessage);
-        resolve(data.payload);
+        done(resolve, data.payload);
       }
     }
 
     window.addEventListener('message', onMessage);
-    window.parent.postMessage({ message: 'REQUEST_USER_DATA' }, '*');
+    const ask = () => { try { window.parent.postMessage({ message: 'REQUEST_USER_DATA' }, '*'); } catch { /* parent gone */ } };
+    ask();
+    // Re-ask until answered. A single post is lost if the GHL shell's listener is not
+    // attached yet when this iframe boots — a plain race, and it matters more now that
+    // the embedded path depends on this handshake for EVERY load rather than only when
+    // no session was cached.
+    const poll = setInterval(ask, 400);
   });
 }
 
@@ -98,37 +109,62 @@ export function AuthProvider({ children }) {
       return data?.user ?? null;
     }
 
+    function clearStoredToken() {
+      if (!tokenRef.current) return;
+      tokenRef.current = null;
+      try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+    }
+
     async function establishSession() {
-      // 1. Existing session (cookie or stored token).
+      // ── Embedded in GHL: re-derive the session on EVERY load ──────────────────
+      // GHL's SSO payload is the only authority on which sub-account is currently
+      // open, and it is ENCRYPTED — the active locationId cannot be read client-side,
+      // so we cannot compare it against a cached session. The session must therefore
+      // be re-exchanged every time and the server decides which location it is for.
+      //
+      // This block used to come LAST, after an existing cookie/stored token was
+      // trusted. Switching sub-account reloads this iframe on the same origin, so
+      // that session survived and /api/me kept returning the PREVIOUS locationId —
+      // which is why opening BuildBridge inside Rockwood still showed CSM Synergy's
+      // QuickBooks connection (observed 2026-07-28). It was not only a display bug:
+      // the QBO connection and the field/item mappings are all keyed on locationId,
+      // so connecting or saving a mapping in that state wrote to the wrong tenant.
+      if (isEmbedded) {
+        // Drop the stored token up front — it belongs to whichever sub-account was
+        // open last, and must never shadow this load.
+        clearStoredToken();
+        const embeddedKey = new URLSearchParams(window.location.search).get('key');
+        try {
+          // A URL key (GHL custom-page flow) is already this load's payload; otherwise
+          // ask the parent frame for a fresh one.
+          const payload = embeddedKey || await requestGhlSsoPayload();
+          const me = await ssoExchange(payload);
+          if (me) return me;
+        } catch (err) {
+          console.warn('[auth] embedded SSO failed:', err?.message);
+        }
+        // Deliberately NOT falling back to a cached session: showing the sign-in card
+        // is safer than silently showing the previous sub-account's data.
+        return null;
+      }
+
+      // ── Standalone ───────────────────────────────────────────────────────────
+      // 1. Existing session (cookie or stored token). Safe here: outside the GHL
+      //    shell there is no sub-account to switch underneath us.
       let me = await fetchMe().catch(() => null);
       if (me) return me;
 
       // Stored token is stale — drop it so it can't shadow a fresh login.
-      if (tokenRef.current) {
-        tokenRef.current = null;
-        try { sessionStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
-      }
+      clearStoredToken();
 
-      // 2. SSO key delivered in the URL (GHL custom-page URL flow).
+      // 2. SSO key delivered in the URL.
       const urlKey = new URLSearchParams(window.location.search).get('key');
       if (urlKey) {
         me = await ssoExchange(urlKey).catch(() => null);
         if (me) return me;
       }
 
-      // 3. Embedded in GHL → postMessage SSO handshake with the parent frame.
-      if (isEmbedded) {
-        try {
-          const payload = await requestGhlSsoPayload();
-          me = await ssoExchange(payload);
-          if (me) return me;
-        } catch (err) {
-          console.warn('[auth] embedded SSO failed:', err?.message);
-        }
-        return null; // stay logged-out inside the iframe; layout shows the sign-in card
-      }
-
-      // 4. Standalone with no session → straight to the GHL OAuth login.
+      // 3. No session → straight to the GHL OAuth login.
       window.location.href = '/auth';
       return null;
     }
