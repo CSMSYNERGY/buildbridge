@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { env } from '../env.js';
 import { setAuthCookie } from './jwt.js';
 import { createError } from '../middleware/errorHandler.js';
+import { ensureLocation } from '../../services/locationService.js';
 
 /**
  * Decrypt a GHL SSO payload and issue an app session.
@@ -56,6 +57,15 @@ export async function ghlSsoController(req, res, next) {
 
     if (!locationId && !companyId) {
       throw createError(401, 'SSO payload contained no location or company');
+    }
+
+    // Guarantee the tenant row exists BEFORE handing out a session. Nearly every
+    // table is foreign-keyed to locations.id, and SSO (the normal path when the app
+    // is installed at agency level) previously minted sessions for locations that
+    // had no row — so the first feature write died on an FK violation and the user
+    // saw a bare "Internal server error". See services/locationService.js.
+    if (locationId) {
+      await ensureLocation(locationId, { companyId, name: null, email: null });
     }
 
     const token = setAuthCookie(res, { locationId, companyId, userId, email, name });
