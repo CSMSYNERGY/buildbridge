@@ -94,6 +94,36 @@ export async function refreshAccessToken(locationId) {
   return data.access_token;
 }
 
+// ─── Failure reason extraction ────────────────────────────────────────────────
+// Pull the WHY out of a GHL error body without carrying customer data with it.
+//
+// GHL returns validation failures as {message: "..."} or {message: ["...", "..."]}. Those
+// strings are about the request shape, which is what makes them worth keeping — but GHL
+// will sometimes echo the offending value ("email must be an email: bob@x.com"), so every
+// email address and long digit run is stripped before the text is allowed anywhere durable.
+const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
+// 7+ consecutive digits, optionally separated — phone numbers and account numbers. Short
+// runs are left alone so genuinely useful numbers (field limits, HTTP codes) survive.
+const PHONEISH_RE = /\+?[\d][\d\s().-]{6,}\d/g;
+const MAX_REASON = 300;
+
+function summarizeGhlError(rawBody) {
+  if (!rawBody) return null;
+  let text;
+  try {
+    const parsed = JSON.parse(rawBody);
+    const msg = parsed?.message ?? parsed?.error ?? parsed?.msg;
+    text = Array.isArray(msg) ? msg.join('; ') : (typeof msg === 'string' ? msg : null);
+    // Unrecognised JSON shape: keep the KEYS only. Enough to identify the shape next time,
+    // and structurally incapable of leaking a value.
+    if (!text && parsed && typeof parsed === 'object') text = `(keys: ${Object.keys(parsed).join(',')})`;
+  } catch {
+    text = null; // not JSON (an HTML error page, a gateway message) — do not store it
+  }
+  if (!text) return null;
+  return text.replace(EMAIL_RE, '<email>').replace(PHONEISH_RE, '<number>').slice(0, MAX_REASON);
+}
+
 /**
  * Make an authenticated GHL API request on behalf of a location.
  * Automatically refreshes the access token if it is expired.
@@ -156,13 +186,29 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
     } else {
       console.error(`[ghlService] GHL API error [${method} ${path}] HTTP ${res.status}:`, errBody);
     }
-    const err = createError(res.status, `GHL API request failed (${res.status})`);
-    // Metadata for the durable error log (see errorLogService.recordThrown). Note
-    // the upstream BODY is deliberately not attached — it can carry customer data.
+    // The REASON, scrubbed of customer data. Previously nothing about WHY a call failed
+    // survived the throw, so a 400 repeating every 15 minutes was undebuggable from the
+    // durable log — you got "GHL API request failed (400)" and a stack, with no path and no
+    // cause (Rockwood's sync, 2026-07-29). A validation message describes the REQUEST shape
+    // ("phone must be a valid phone number", "does not allow duplicated contacts"), which is
+    // exactly what is needed and is not itself customer data — but GHL does sometimes echo
+    // the offending value back, so it goes through the redactor first.
+    const reason = summarizeGhlError(errBody);
+    // Path and reason go in the MESSAGE, not just in metadata, for two reasons: they are
+    // visible in any triage query without joining anything, and they participate in the
+    // error_events fingerprint — so two genuinely different validation failures stop
+    // collapsing into one row with a climbing count. The per-contact id in a path like
+    // PUT /contacts/<24-char-id> is normalised to <id> by the fingerprinter's 20+ char rule,
+    // so dedup across contacts still holds.
+    const err = createError(
+      res.status,
+      `GHL API request failed (${res.status}) [${method} ${path}]${reason ? `: ${reason}` : ''}`,
+    );
     err.upstream = 'ghl';
     err.upstreamStatus = res.status;
     err.kind = 'ghl_api_error';
     err.ghlPath = `${method} ${path}`;
+    err.ghlReason = reason;
     throw err;
   }
 

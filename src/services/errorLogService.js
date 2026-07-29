@@ -1,5 +1,11 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../core/db/client.js';
+import {
+  issueClass,
+  isIssueCurrent,
+  summarizeIssue,
+  CLASS_RANK,
+} from './issueClassifier.js';
 
 // ─── Durable error log ────────────────────────────────────────────────────────
 // Records every failure (backend, cron, webhook, and browser-side) into the
@@ -180,6 +186,126 @@ export async function recordError(e) {
 }
 
 /**
+ * CURRENT problems for one location's app, summarized for the tenant UI.
+ *
+ * Returns `{ issues, totalDistinct }` — the second value lets the caller say "5 of 7 shown"
+ * instead of truncating in silence.
+ *
+ * Currency is decided by issueClassifier.isIssueCurrent, which is import-free and unit-tested
+ * because it is the thing standing between a tenant and never learning their invoices stopped.
+ *
+ * WHY READ error_events RATHER THAN ADD PER-FAILURE INSTRUMENTATION: this table already
+ * captures every failure kind durably, deduplicated, with counts and timestamps. Credential
+ * health answers "is the token good?" — this answers "is the integration actually working?",
+ * which is a strictly larger question. On 2026-07-29 Rockwood's QuickBooks token was
+ * refreshing perfectly while its sync was failing 28 times on a GoHighLevel 400; a status
+ * built only on token health would have shown a confident green check for it.
+ *
+ * Never throws — callers render a status page, and a failure to LIST problems must not
+ * become a problem of its own.
+ */
+export async function listOpenIssues(locationId, appSlug, limit = 5, opts = {}) {
+  if (!locationId) return { issues: [], totalDistinct: 0 };
+  const { lastOkAt = null, lastSyncAt = null } = opts;
+  try {
+    // Pull a generous window, then decide currency in JS — the "is this still happening?"
+    // rule has three parts and belongs in one readable, testable place rather than smeared
+    // across a WHERE clause. `message` is selected only to pick a truthful summary; it is
+    // never returned to the caller.
+    const rows = await db.execute(sql`
+      SELECT kind, upstream, upstream_status, occurrence_count, first_seen_at, last_seen_at, message
+      FROM error_events
+      WHERE location_id = ${locationId}
+        AND resolved_at IS NULL
+        AND (app_slug = ${appSlug} OR upstream = 'qbo')
+        AND last_seen_at > now() - interval '24 hours'
+      ORDER BY last_seen_at DESC
+      LIMIT 50
+    `);
+
+    // db.execute shape differs between drivers (rows vs array); tolerate both rather
+    // than couple this to one of them.
+    const list = Array.isArray(rows) ? rows : (rows?.rows ?? []);
+
+    // ── Is this problem CURRENT? ──────────────────────────────────────────────
+    // The card answers "is something wrong right now", so a problem that has stopped
+    // happening must drop off it. Before this, the only filter was `resolved_at IS NULL`,
+    // which meant a tenant who fixed their connection still saw yesterday's failures listed
+    // as live problems — reported 2026-07-29 after a reconnect, with five stale entries
+    // (0.4h to 24h old) still on the card.
+    //
+    // Each class needs its own proof of recovery. In particular, note what is NOT used as a
+    // blanket all-clear: `last_ok_at` only proves the credential works, and it is stamped by
+    // any successful call — including a read, and including the tenant pressing "Test
+    // connection", which is their natural reaction to seeing a problem. Letting it clear
+    // everything would mean the button that investigates a problem is the button that hides it.
+    const now = Date.now();
+    const current = list.filter((r) => isIssueCurrent(r, { now, lastOkAt, lastSyncAt }));
+
+    // Keyed on the summary CODE, not the rendered sentence. Keying on prose would make
+    // editing a sentence silently change which problems merge, and would fuse two genuinely
+    // different failures the moment their wording happened to match.
+    const byCode = new Map();
+    for (const r of current) {
+      const { code, text } = summarizeIssue(r);
+      const seen = new Date(r.last_seen_at).getTime();
+      const prev = byCode.get(code);
+      if (!prev) {
+        byCode.set(code, {
+          // Machine codes for support. A merged line carries ALL of them: reporting one
+          // arbitrary code would send support to investigate the wrong failure, and a
+          // plausible-but-wrong code is worse than none because it gets trusted.
+          kinds: r.kind ? [r.kind] : [],
+          summary: text,
+          count: Number(r.occurrence_count ?? 1),
+          mergedFrom: 1,
+          firstSeenAt: r.first_seen_at ?? null,
+          lastSeenAt: r.last_seen_at ?? null,
+          _seen: seen,
+          _class: issueClass(r),
+        });
+        continue;
+      }
+      prev.count += Number(r.occurrence_count ?? 1);
+      prev.mergedFrom += 1;
+      if (r.kind && !prev.kinds.includes(r.kind)) prev.kinds.push(r.kind);
+      if (seen > prev._seen) { prev._seen = seen; prev.lastSeenAt = r.last_seen_at; }
+      // Guarded: a null firstSeenAt must not win the comparison and erase a real one.
+      if (r.first_seen_at && (!prev.firstSeenAt || new Date(r.first_seen_at) < new Date(prev.firstSeenAt))) {
+        prev.firstSeenAt = r.first_seen_at;
+      }
+    }
+
+    // Rank by how much it matters, THEN by recency. Sorting on recency alone let a trivial
+    // one-off from ten minutes ago push an unbilled invoice off the end of the list.
+    const ordered = [...byCode.values()].sort((a, b) => (
+      (CLASS_RANK[a._class] ?? 9) - (CLASS_RANK[b._class] ?? 9) || b._seen - a._seen
+    ));
+
+    const issues = ordered.slice(0, limit).map(({ _seen, _class, ...issue }) => issue);
+    // So the caller can say "5 of 7 shown" instead of silently truncating.
+    return { issues, totalDistinct: ordered.length };
+  } catch (err) {
+    console.error('[errorLog] failed to list open issues:', err?.message);
+    return { issues: [], totalDistinct: 0 };
+  }
+}
+
+// ─── Why there is no auto-resolve here ────────────────────────────────────────
+// A version of this file briefly auto-set `resolved_at` on issues a later success appeared to
+// disprove, to keep the ops query tidy. That was removed before shipping, and deliberately so:
+//
+//   • For self-retrying failures it is redundant — the currency filter above already hides
+//     them, so the write bought nothing.
+//   • For TERMINAL failures it is destructive. A milestone invoice that failed is never
+//     retried, so there is no recurrence to re-create the row: resolving it permanently
+//     deletes the only durable record that a customer went unbilled, and removes it from the
+//     `resolved_at IS NULL` triage this repo's runbook depends on.
+//
+// `resolved_at` stays a human judgement. Display currency and resolution are different
+// questions, and conflating them is how a billing failure disappears quietly.
+
+/**
  * Convenience wrapper for a thrown Error/unknown value.
  * Pulls status/upstream metadata off the error when the throw site attached it
  * (see ghlService/quickbooksService, which set err.upstream/upstreamStatus/tid).
@@ -194,6 +320,12 @@ export function recordThrown(err, extra = {}) {
     upstreamStatus: extra.upstreamStatus ?? err?.upstreamStatus,
     upstreamRef: extra.upstreamRef ?? err?.intuitTid ?? err?.tid,
     httpStatus: extra.httpStatus ?? err?.status,
+    // The UPSTREAM route that failed, e.g. "POST /contacts/". ghlService has always
+    // computed this (err.ghlPath) and it was silently dropped here, which is why a GHL 400
+    // repeating every 15 minutes stored a null `path` and could not be diagnosed without a
+    // redeploy. `path` is otherwise our own inbound route, and a cron failure has none —
+    // so for cron-sourced upstream errors this column was simply unused.
+    path: extra.path ?? err?.ghlPath ?? err?.upstreamPath ?? undefined,
     ...extra,
   });
 }
