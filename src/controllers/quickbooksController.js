@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { db } from '../core/db/client.js';
-import { integrationCredentials } from '../core/db/schema.js';
+import { integrationCredentials, qbSyncState } from '../core/db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
@@ -9,11 +9,23 @@ import {
   exchangeCodeForTokens,
   saveCredentials,
   getCredentialsOrNull,
+  getCredentialRecord,
   revokeToken,
   makeQuickBooksRequest,
   getCustomFieldDefinitions,
+  enableLegacySalesCustomField,
   listItems,
+  getCompanyName,
+  setCredentialDisplayName,
 } from '../services/quickbooksService.js';
+import { listOpenIssues } from '../services/errorLogService.js';
+import {
+  listMilestoneDefinitions,
+  serializeDefinition,
+  createMilestoneDefinition,
+  updateMilestoneDefinition,
+  deleteMilestoneDefinition,
+} from '../services/milestoneDefinitionsService.js';
 import {
   getLocationSettings,
   upsertLocationSettings,
@@ -139,6 +151,21 @@ export async function handleQuickBooksCallback(req, res, next) {
       expiresAt,
     });
 
+    // Fetch and store the company name straight away, so the connection card can say
+    // "Rockwood Sheds LLC" instead of realm 9341453625832771 from the very first load.
+    // Showing only the realm id is why the same QuickBooks company sat connected to two
+    // sub-accounts unnoticed (2026-07-28).
+    //
+    // Doubles as the first real API call with this credential, so it also stamps
+    // `last_ok_at` via makeQuickBooksRequest — the connect flow becomes genuinely verified
+    // rather than merely "a row exists". Non-fatal: a failure here must not fail a
+    // connection that actually succeeded, so the redirect is unconditional.
+    try {
+      await setCredentialDisplayName(locationId, await getCompanyName(locationId));
+    } catch (err) {
+      console.warn('[quickbooks] could not read the company name after connect:', err?.message);
+    }
+
     res.redirect(`${DONE_PATH}?connected=1`);
   } catch (err) {
     next(err);
@@ -195,15 +222,24 @@ export async function getQuickBooksFields(req, res, next) {
     //                                   which is what the salesperson mapping needs)
     // Both are queried; a failure in either still returns the other (the GraphQL
     // reader returns [] rather than throwing when the API/scope is unavailable).
+    // `failed` is tracked per source so the caller can tell "this company has no custom
+    // fields" apart from "we could not ask". Without it the UI printed "No QuickBooks
+    // custom fields found yet — make sure custom fields are set up in the QuickBooks
+    // company", i.e. it blamed the client's QuickBooks setup for OUR dead token. That is
+    // the same lie as the green Connected badge, one card lower down.
+    let prefsFailed = false;
+    let definitionsFailed = false;
     const [prefs, definitions] = await Promise.all([
       makeQuickBooksRequest(locationId, 'GET', '/preferences?minorversion=75')
         .then((d) => parseQboCustomFields(d?.Preferences))
         .catch((err) => {
           console.error('[quickbooks] legacy preferences fields failed:', err?.message);
+          prefsFailed = true;
           return [];
         }),
       getCustomFieldDefinitions(locationId).catch((err) => {
         console.error('[quickbooks] custom field definitions failed:', err?.message);
+        definitionsFailed = true;
         return [];
       }),
     ]);
@@ -217,7 +253,61 @@ export async function getQuickBooksFields(req, res, next) {
       byName.set(d.name, { ...(byName.get(d.name) ?? {}), ...d, source: 'custom_fields' });
     }
 
-    res.json({ fields: [...byName.values()] });
+    // `unavailable` means NO source could answer — so an empty list must NOT be read as
+    // "this company has no custom fields".
+    //
+    // This was originally written as `prefsFailed && definitionsFailed`, which could never
+    // be true and so made the frontend's whole "we could not read them" branch dead code —
+    // the page went on blaming the client's QuickBooks setup for our own dead token, which
+    // is the exact bug the flag exists to fix. Reason: getCustomFieldDefinitions returns []
+    // on its FIRST line when QBO_ENABLE_CUSTOM_FIELDS_API is off (the default, because the
+    // App Foundations scope is not grantable on this Intuit app), and it also swallows
+    // 403/non-JSON into []. It therefore almost never throws, so `definitionsFailed` stayed
+    // false and ANDing against it pinned the result to false.
+    //
+    // Phrased as "did any source actually vouch for the connection" instead. A disabled
+    // GraphQL reader vouches for nothing, so with the flag off this correctly reduces to
+    // `prefsFailed` — Preferences is then the only real source.
+    const definitionsAnswered = env.QBO_ENABLE_CUSTOM_FIELDS_API && !definitionsFailed;
+    res.json({
+      fields: [...byName.values()],
+      unavailable: prefsFailed && !definitionsAnswered,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/quickbooks/salesperson-field   { name?: string }
+ * Creates/enables a LEGACY sales-form custom field (default name "Salesperson")
+ * by sparse-updating QBO Preferences — the one custom-field mechanism the REST
+ * API can both write AND read back on every plan without the tier-gated App
+ * Foundations scope. The QBO UI no longer exposes these fields, so the app
+ * provides the button instead. Returns the refreshed mapper field list so the
+ * caller can confirm visibility in one round-trip.
+ */
+export async function createSalespersonField(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const creds = await getCredentialsOrNull(locationId);
+    if (!creds) return res.status(400).json({ error: 'QuickBooks is not connected' });
+
+    const raw = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const name = (raw || 'Salesperson').slice(0, 31); // QBO's custom-field label cap
+
+    const result = await enableLegacySalesCustomField(locationId, name);
+
+    // Confirm through the same parser the mapper dropdown uses.
+    const data = await makeQuickBooksRequest(locationId, 'GET', '/preferences?minorversion=75');
+    const fields = parseQboCustomFields(data?.Preferences);
+
+    res.json({
+      success: true,
+      variant: result.variant,
+      visibleToApi: fields.some((f) => f.name === name),
+      fields,
+    });
   } catch (err) {
     next(err);
   }
@@ -235,30 +325,237 @@ export async function getQuickBooksItems(req, res, next) {
     const creds = await getCredentialsOrNull(locationId);
     if (!creds) return res.json({ items: [] }); // not connected yet
 
-    const items = await listItems(locationId);
-    res.json({ items });
+    // Caught rather than propagated: this used to 5xx on a dead token, and the frontend
+    // turned `!r.ok` into an empty array — which rendered as "No QuickBooks items found
+    // yet. Make sure Products & Services exist in the QuickBooks company". A 200 carrying
+    // an explicit `unavailable` flag is the only shape the UI can tell the truth from.
+    // The failure is still recorded: makeQuickBooksRequest tags it and marks the
+    // credential broken before throwing.
+    try {
+      const items = await listItems(locationId);
+      return res.json({ items });
+    } catch (err) {
+      console.error('[quickbooks] item list failed:', err?.message);
+      return res.json({ items: [], unavailable: true });
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Turn a stored credential failure into something a shed-business owner can act on.
+//
+// The raw text is NEVER sent to the browser. It can carry Intuit's response body, a
+// request path, or an intuit_tid — internal detail that means nothing to a client and
+// invites them to paste it into a support chat instead of just reconnecting. Each branch
+// says what happened AND what to do about it, because "QuickBooks error" with no next
+// step is barely better than the green check it replaces.
+function describeCredentialFailure(raw) {
+  const text = String(raw ?? '');
+  if (/invalid_grant|refresh token/i.test(text)) {
+    return 'QuickBooks no longer accepts the saved connection — this happens if access was removed in QuickBooks, or if the same QuickBooks company was connected somewhere else. Reconnect below to fix it.';
+  }
+  if (/HTTP 40[13]|rejected the stored credential/i.test(text)) {
+    return 'QuickBooks rejected the saved connection. Reconnect below to fix it.';
+  }
+  return 'The last attempt to reach QuickBooks failed. Reconnect below, or contact CSM Synergy support if it keeps happening.';
+}
+
+/**
+ * Derive the three-state connection health from the stored row.
+ *
+ * Three states, not two, and the third one is the point: `unverified` means a credential
+ * exists but we have not yet observed it working (a brand-new connection, or a row that
+ * predates the 0006 health columns). Collapsing that into either "ok" or "broken" is how
+ * you get back to a badge that asserts more than it knows.
+ */
+function credentialHealth(health) {
+  if (health?.lastError) {
+    return {
+      state: 'broken',
+      message: describeCredentialFailure(health.lastError),
+      lastOkAt: health.lastOkAt ?? null,
+      lastErrorAt: health.lastErrorAt ?? null,
+    };
+  }
+  if (health?.lastOkAt) {
+    return { state: 'ok', message: null, lastOkAt: health.lastOkAt, lastErrorAt: null };
+  }
+  return { state: 'unverified', message: null, lastOkAt: null, lastErrorAt: null };
+}
+
+/**
+ * GET /api/quickbooks/config
+ * Returns the connection status for the current location (no secrets).
+ *
+ * "Connected" used to mean nothing more than "a row exists", which is why both live
+ * locations showed a green check for 20+ hours while every sync failed (2026-07-28). The
+ * row now carries health, so this endpoint answers the question the UI actually asks —
+ * and it stays a SINGLE query, because the health lives on the row it already reads.
+ * That matters: the connect flow polls this endpoint every 3s.
+ */
+export async function getQuickBooksConfig(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const record = await getCredentialRecord(locationId);
+
+    if (!record) return res.json({ config: null });
+
+    res.json({
+      config: {
+        realmId: record.creds.realmId,
+        // The company name, persisted (0007) rather than held in frontend state after a
+        // Test click — so it survives a page reload, which is the whole point.
+        companyName: record.displayName,
+        environment: env.QBO_ENVIRONMENT,
+        connectedAt: record.health.connectedAt,
+      },
+      health: credentialHealth(record.health),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Milestone definitions (per-client milestone configuration, migration 0007) ──
+// Replaces the four hard-coded milestone types. A milestone is the client's own pair of
+// GHL opportunity fields (amount + optional date) plus the label that prints on the
+// QuickBooks invoice line. All four handlers are location-scoped by req.user.locationId —
+// an id from another tenant 404s rather than being silently ignored.
+
+/** GET /api/quickbooks/milestones */
+export async function getMilestoneDefinitions(req, res, next) {
+  try {
+    const rows = await listMilestoneDefinitions(req.user.locationId);
+    res.json({ definitions: rows.map(serializeDefinition) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/quickbooks/milestones */
+export async function addMilestoneDefinition(req, res, next) {
+  try {
+    const row = await createMilestoneDefinition(req.user.locationId, req.body ?? {});
+    res.status(201).json({ definition: serializeDefinition(row) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** PUT /api/quickbooks/milestones/:id */
+export async function editMilestoneDefinition(req, res, next) {
+  try {
+    const row = await updateMilestoneDefinition(req.user.locationId, req.params.id, req.body ?? {});
+    res.json({ definition: serializeDefinition(row) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** DELETE /api/quickbooks/milestones/:id */
+export async function removeMilestoneDefinition(req, res, next) {
+  try {
+    await deleteMilestoneDefinition(req.user.locationId, req.params.id);
+    res.json({ success: true });
   } catch (err) {
     next(err);
   }
 }
 
 /**
- * GET /api/quickbooks/config
- * Returns the connection status for the current location (no secrets).
+ * GET /api/quickbooks/health
+ * The expensive half of the status picture, deliberately kept OUT of /config so the
+ * 3-second connect poller stays a single query: last successful sync, plus any open
+ * problems for this location.
+ *
+ * Reading error_events rather than instrumenting each failure site is intentional — that
+ * table already durably records EVERY failure kind with dedupe and counts, including ones
+ * that have nothing to do with the QuickBooks token (Rockwood's real breakage on
+ * 2026-07-29 was a GoHighLevel 400). A card that only knew about credential health would
+ * have gone green for Rockwood while its sync was still completely broken: the same lie,
+ * one layer further out.
  */
-export async function getQuickBooksConfig(req, res, next) {
+export async function getQuickBooksHealth(req, res, next) {
   try {
     const { locationId } = req.user;
-    const creds = await getCredentialsOrNull(locationId);
+    // The credential's last proven-good moment. Needed so a problem that stopped happening
+    // BEFORE QuickBooks last worked drops off the card immediately — otherwise reconnecting
+    // leaves the tenant staring at the failures that made them reconnect.
+    const record = await getCredentialRecord(locationId).catch(() => null);
+    const lastOkAt = record?.health?.lastOkAt ?? null;
 
-    if (!creds) return res.json({ config: null });
+    // qb_sync_state read inline rather than via qbSyncService: setSyncState/getSyncSince
+    // are module-private there, and importing that module into a controller would pull the
+    // entire sync chain (GHL + QBO services) in behind one timestamp.
+    const state = await db.select().from(qbSyncState)
+      .where(eq(qbSyncState.locationId, locationId)).limit(1)
+      .then((r) => r[0] ?? null)
+      .catch(() => null);
+
+    // Sequential, not parallel, because the issue filter NEEDS the sync cursor: a failed
+    // scheduled pass is only disproved by a pass that completed, and that cursor is the only
+    // timestamp meaning exactly that. Costs no extra query — this row was already being read.
+    const { issues, totalDistinct } = await listOpenIssues(locationId, QUICKBOOKS_SLUG, 5, {
+      lastOkAt,
+      lastSyncAt: state?.lastSyncAt ?? null,
+    });
 
     res.json({
-      config: {
-        realmId: creds.realmId,
-        environment: env.QBO_ENVIRONMENT,
-      },
+      // NOTE: this is the sync CURSOR (qbSyncService writes it as the last statement of a
+      // pass, so a throw anywhere earlier leaves it untouched). That makes it a fair
+      // "last fully successful sync" for display, but it is null for a location that has
+      // never completed one — which is Rockwood's actual current state, and must render
+      // as "never", not as "just now".
+      lastSyncAt: state?.lastSyncAt ?? null,
+      issues,
+      // So the card can say "5 of 7 shown" rather than truncating in silence.
+      totalIssues: totalDistinct,
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/quickbooks/test
+ * On-demand "is this actually working?" probe, so nobody has to wait up to 15 minutes for
+ * the cron to reveal a dead connection.
+ *
+ * Uses CompanyInfo rather than forcing a token refresh: Intuit ROTATES refresh tokens, so
+ * a probe that always refreshed would invalidate the prior token on every press — the
+ * exact mechanic that killed these credentials when one company was connected to two
+ * locations. CompanyInfo exercises the stored token (refreshing only if genuinely near
+ * expiry), so health updates as a side effect via makeQuickBooksRequest/saveCredentials.
+ *
+ * Returns the company NAME, which is the other half of the 2026-07-28 confusion: the card
+ * showed only realm `9341457557313092`, so two locations pointing at the same QuickBooks
+ * company looked completely normal.
+ */
+export async function testQuickBooksConnection(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const record = await getCredentialRecord(locationId);
+    if (!record) return res.status(400).json({ error: 'QuickBooks is not connected' });
+    const creds = record.creds;
+
+    try {
+      const companyName = await getCompanyName(locationId);
+      // Refresh the stored name on every successful test, so it self-heals for connections
+      // made before 0007 and follows a company rename. Passing the current value keeps this
+      // a no-op in the common case where nothing changed.
+      await setCredentialDisplayName(locationId, companyName, record.displayName);
+      return res.json({ ok: true, companyName, realmId: creds.realmId, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      // A failed probe is a SUCCESSFUL test — it answered the question. Returning 200
+      // with ok:false keeps it distinguishable from "the test itself broke", which the
+      // frontend must not render as a dead QuickBooks connection.
+      return res.json({
+        ok: false,
+        message: describeCredentialFailure(err?.message),
+        checkedAt: new Date().toISOString(),
+      });
+    }
   } catch (err) {
     next(err);
   }

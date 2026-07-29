@@ -55,6 +55,14 @@ export const env = cleanEnv(process.env, {
   QBO_REDIRECT_URI: str({ default: '' }),
   QBO_ENVIRONMENT: str({ choices: ['sandbox', 'production'], default: 'sandbox' }),
   QBO_API_BASE_URL: str({ default: '' }), // override for tests/mocks; blank → per-environment default
+  // Opt-in for the App Foundations GraphQL custom-field-definitions API (modern
+  // QBO "Custom fields"). OFF by default because the required scope
+  // `app-foundations.custom-field-definitions.read` is NOT offered on the Intuit
+  // app's Permissions page (verified 2026-07-26: only com.intuit.quickbooks.accounting
+  // and .payment are selectable), so every call 403s and asking for the scope in the
+  // OAuth request buys nothing. Flip to true once Intuit grants App Foundations
+  // access — then reconnect each company so its token carries the new scope.
+  QBO_ENABLE_CUSTOM_FIELDS_API: bool({ default: false }),
 
   // Background jobs (milestone invoicing, two-way sync). Disable when running
   // multiple instances to avoid duplicate job execution.

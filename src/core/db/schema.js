@@ -123,10 +123,46 @@ export const integrationCredentials = pgTable('integration_credentials', {
   locationId: text('location_id').notNull().references(() => locations.id),
   appSlug: text('app_slug').notNull(),
   encryptedPayload: text('encrypted_payload').notNull(), // AES-256-GCM JSON blob
+  // ── Credential health (0006) ──
+  // A credential row EXISTING never meant it still worked; the UI used to conflate the
+  // two and showed a green "Connected" through hours of total sync failure. These three
+  // carry the answer to "does this actually work?" so a dead connection is visible in the
+  // app instead of only in error_events. All nullable: null last_ok_at = never verified.
+  lastOkAt: timestamp('last_ok_at', { withTimezone: true }),
+  lastError: text('last_error'),          // non-null ⇒ needs attention; cleared on success
+  lastErrorAt: timestamp('last_error_at', { withTimezone: true }),
+  // The connected account's human-readable name, e.g. "Rockwood Sheds LLC" (0007). A
+  // plain column, NOT part of encrypted_payload: that blob is rebuilt from a fixed set of
+  // keys on every token refresh, so a name stored there would silently vanish within the
+  // hour. It is not a secret, and keeping it here lets the config endpoint stay one query.
+  displayName: text('display_name'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   uniqueIndex('integration_credentials_location_app_uidx').on(t.locationId, t.appSlug),
+]);
+
+// ─── QuickBooks Milestone Definitions (migration 0007) ────────────────────────
+// Per-client milestone CONFIGURATION: what milestones this location bills, and which of
+// their own GHL opportunity fields hold each one's amount and date. Replaces the four
+// hard-coded types — clients name these differently and each is a PAIR of GHL fields.
+export const qbMilestoneDefinitions = pgTable('qb_milestone_definitions', {
+  id: text('id').primaryKey(),
+  locationId: text('location_id').notNull().references(() => locations.id),
+  // Prints on the QuickBooks invoice line. Derived from the chosen amount field's label
+  // in the UI so the normal path involves no typing, but stored and editable.
+  label: text('label').notNull(),
+  // GHL custom-field IDs (not fieldKeys — GHL returns customFields as [{id, value}] on
+  // the poller path, so a fieldKey would silently never match).
+  amountField: text('amount_field').notNull(),
+  // NULL = no date field = invoice as soon as the opportunity is Won (the old 'deposit'
+  // behaviour, now explicit configuration instead of an implicit frontend omission).
+  dateField: text('date_field'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('qb_milestone_definitions_location_idx').on(t.locationId, t.sortOrder),
 ]);
 
 // ─── QuickBooks Milestones ────────────────────────────────────────────────────
@@ -137,10 +173,19 @@ export const qbMilestones = pgTable('qb_milestones', {
   opportunityId: text('opportunity_id').notNull(),      // GHL opportunity id
   contactId: text('contact_id'),                        // GHL contact id
   qbCustomerId: text('qb_customer_id'),                 // QBO Customer.Id
-  milestoneType: text('milestone_type').notNull(),      // 'deposit' | 'materials_delivery' | 'roof_completion' | 'project_completion'
+  // The qb_milestone_definitions.id this milestone came from. Still the idempotency key
+  // via the unique index below, which is why definitions use stable ids and mutable
+  // labels — renaming a milestone must not create a duplicate for an in-flight deal.
+  milestoneType: text('milestone_type').notNull(),
   amountCents: integer('amount_cents').notNull(),
-  milestoneDate: timestamp('milestone_date', { withTimezone: true }), // null → invoice immediately (deposit)
+  milestoneDate: timestamp('milestone_date', { withTimezone: true }),
   invoiceLeadDays: integer('invoice_lead_days').notNull().default(3),
+  // ── Snapshots from the definition (0007) ──
+  // Taken at scheduling time. Definitions are editable and deletable; an invoice already
+  // sent must not change its description retroactively, and the due rule must stay
+  // stable per milestone even if the definition later gains or loses its date field.
+  label: text('label'),
+  awaitsDate: boolean('awaits_date').notNull().default(false),
   qbInvoiceId: text('qb_invoice_id'),                   // QBO Invoice.Id once created
   status: text('status').notNull().default('pending'),  // 'pending' | 'invoiced' | 'failed'
   error: text('error'),

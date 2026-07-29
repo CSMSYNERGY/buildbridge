@@ -1,29 +1,15 @@
 import { db } from '../core/db/client.js';
 import { qbMilestones, qbSyncState, integrationCredentials } from '../core/db/schema.js';
-import { eq, and, or, isNull, sql } from 'drizzle-orm';
+import { eq, and, or, isNotNull, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { getMappings, listMappers } from './mapperService.js';
-import { resolveItemRef } from './qbSyncLogic.js';
+import { listMappers } from './mapperService.js';
+import { resolveItemRef, milestoneIsDue } from './qbSyncLogic.js';
 import { findOrCreateCustomer, createInvoice } from './quickbooksService.js';
 import { makeGhlRequest } from './ghlService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
-
-// Milestone types in invoicing order. 'deposit' has no date — it is invoiced
-// immediately once the opportunity is won.
-export const MILESTONE_TYPES = [
-  'deposit',
-  'materials_delivery',
-  'roof_completion',
-  'project_completion',
-];
-
-const MILESTONE_LABELS = {
-  deposit: 'Deposit',
-  materials_delivery: 'Materials Delivery',
-  roof_completion: 'Roof Completion',
-  project_completion: 'Project Completion',
-};
+import { listMilestoneDefinitions } from './milestoneDefinitionsService.js';
+import { recordThrown } from './errorLogService.js';
 
 /**
  * Read a value out of a GHL webhook payload. Supports:
@@ -91,16 +77,22 @@ function extractContact(payload) {
 }
 
 /**
- * GHL "opportunity Won" handler (Yoder Barnes model).
+ * GHL "opportunity Won" handler — schedules this deal's milestone invoices.
+ *
  * 1. Creates/finds the QBO customer for the opportunity's contact.
- * 2. Reads milestone amounts + dates from the payload using this location's
- *    mappers (appSlug 'quickbooks', types 'milestone_amount'/'milestone_date').
- * 3. Persists qb_milestones rows; the scheduler invoices them when due.
+ * 2. Reads each configured milestone's amount + date from the payload, using this
+ *    location's own milestone definitions (qb_milestone_definitions, migration 0007).
+ * 3. Persists qb_milestones rows; the scheduler invoices each one when it comes due.
+ *
+ * Won is the GATE, not the whole trigger. A milestone with a date field is scheduled here
+ * but stays `pending` until that date field is filled and its lead time arrives — see
+ * milestoneIsDue. Re-running this for the same opportunity UPDATES pending milestones, so
+ * a date filled in after the deal was Won is picked up (see the upsert below).
  */
 export async function handleOpportunityWon({ eventType, locationId, payload }) {
   // Only act for locations subscribed to QuickBooks (or Suite).
   if (!(await hasAccess(locationId, 'quickbooks'))) {
-    console.log(`[yoder] location ${locationId} has no quickbooks access — skipping`);
+    console.log(`[milestone] location ${locationId} has no quickbooks access — skipping`);
     return;
   }
 
@@ -108,7 +100,7 @@ export async function handleOpportunityWon({ eventType, locationId, payload }) {
   // model). A Rockwood-only tenant should never get milestone invoices.
   const settings = await getLocationSettings(locationId);
   if (!settings.qboMilestoneInvoicing) {
-    console.log(`[yoder] location ${locationId} milestone invoicing disabled — skipping`);
+    console.log(`[milestone] location ${locationId} milestone invoicing disabled — skipping`);
     return;
   }
 
@@ -125,16 +117,23 @@ export async function handleOpportunityWon({ eventType, locationId, payload }) {
     payload.opportunityId ?? payload.opportunity_id ?? payload.opportunity?.id;
   if (!opportunityId) throw new Error('Missing opportunity id in Won payload');
 
+  // This location's own milestone configuration. No definitions = nothing to schedule;
+  // bail before touching QuickBooks so an unconfigured tenant never creates a customer.
+  const definitions = await listMilestoneDefinitions(locationId);
+  if (!definitions.length) {
+    console.log(`[milestone] location ${locationId} has no milestones configured — skipping`);
+    return;
+  }
+
   const contact = extractContact(payload);
   const customer = await findOrCreateCustomer(locationId, contact);
 
-  const amountFields = await getMappings(locationId, 'quickbooks', 'milestone_amount');
-  const dateFields = await getMappings(locationId, 'quickbooks', 'milestone_date');
-
   const rows = [];
-  for (const type of MILESTONE_TYPES) {
-    const amountCents = parseAmountCents(getPayloadField(payload, amountFields[type]));
-    if (amountCents == null) continue; // milestone not configured or empty for this deal
+  for (const def of definitions) {
+    const amountCents = parseAmountCents(getPayloadField(payload, def.amountField));
+    // No amount on THIS deal → this milestone doesn't apply to it. Normal and expected:
+    // a client bills a roof milestone only on jobs that have a roof.
+    if (amountCents == null) continue;
 
     rows.push({
       id: randomUUID(),
@@ -142,42 +141,86 @@ export async function handleOpportunityWon({ eventType, locationId, payload }) {
       opportunityId: String(opportunityId),
       contactId: payload.contactId ?? payload.contact?.id ?? null,
       qbCustomerId: String(customer.Id),
-      milestoneType: type,
+      // The definition id, not a slug: labels are editable, and the unique index below is
+      // the idempotency key, so renaming a milestone must not fork it into a new row.
+      milestoneType: String(def.id),
       amountCents,
-      milestoneDate: parseDate(getPayloadField(payload, dateFields[type])),
+      // Snapshots — the definition may be edited or deleted after this point, and neither
+      // the invoice description nor the due rule may change retroactively.
+      label: def.label,
+      awaitsDate: !!def.dateField,
+      milestoneDate: def.dateField ? parseDate(getPayloadField(payload, def.dateField)) : null,
       invoiceLeadDays: settings.qboInvoiceLeadDays,
     });
   }
 
   if (!rows.length) {
-    console.warn(`[yoder] opportunity ${opportunityId}: no milestone amounts found in payload`);
+    console.warn(`[milestone] opportunity ${opportunityId}: no milestone amounts found in payload`);
     return;
   }
 
-  // Idempotent per (location, opportunity, milestoneType) — re-delivered Won
-  // events don't duplicate milestones.
-  await db.insert(qbMilestones).values(rows).onConflictDoNothing();
-  console.log(`[yoder] opportunity ${opportunityId}: stored ${rows.length} milestone(s), QB customer ${customer.Id}`);
+  // Idempotent per (location, opportunity, milestone) — a re-delivered Won event does not
+  // duplicate milestones.
+  //
+  // But it is an UPDATE, not a no-op, and that is the mechanism behind "filling the date
+  // field is what creates the invoice". A date typed in after the deal was Won arrives
+  // here on the next webhook or poller pass, and this updates the still-pending row.
+  // Previously this was onConflictDoNothing, so a late-filled date was silently discarded
+  // and the milestone kept whatever (usually empty) date it had at Won time.
+  //
+  // `setWhere` confines that to PENDING rows: an already-invoiced or failed milestone is
+  // billing history and must never be rewritten by a later edit upstream.
+  await db
+    .insert(qbMilestones)
+    .values(rows)
+    .onConflictDoUpdate({
+      target: [qbMilestones.locationId, qbMilestones.opportunityId, qbMilestones.milestoneType],
+      set: {
+        amountCents: sql`excluded.amount_cents`,
+        milestoneDate: sql`excluded.milestone_date`,
+        label: sql`excluded.label`,
+        awaitsDate: sql`excluded.awaits_date`,
+        updatedAt: new Date(),
+      },
+      setWhere: eq(qbMilestones.status, 'pending'),
+    });
+  console.log(`[milestone] opportunity ${opportunityId}: scheduled ${rows.length} milestone(s), QB customer ${customer.Id}`);
 }
 
 /**
  * Scheduler job: invoice pending milestones that are due.
- * A milestone is due when it has no date (deposit — invoice immediately) or
- * when now >= milestoneDate - invoiceLeadDays.
+ *
+ * Due means (see milestoneIsDue in qbSyncLogic.js, which is the single authority):
+ *   - no date field configured  → due as soon as the deal is Won
+ *   - date field configured     → due `invoiceLeadDays` before that date, and NOT due at
+ *                                 all until the date has actually been filled in
+ *
+ * The SQL below narrows; `milestoneIsDue` decides. Note the difference from before: a
+ * milestone awaiting a date that has not been filled is no longer swept up by the
+ * `milestone_date IS NULL` branch and billed immediately.
  */
 export async function invoiceDueMilestones() {
-  const due = await db
+  // Deliberately a broad SUPERSET, not the exact rule: pending, and either it doesn't wait
+  // for a date or its date is now known. The precise lead-time arithmetic is applied by
+  // milestoneIsDue below. Keeping the rule in one tested JS function instead of duplicating
+  // it in SQL means the two can never drift into disagreeing about whether to bill someone.
+  const candidates = await db
     .select()
     .from(qbMilestones)
     .where(
       and(
         eq(qbMilestones.status, 'pending'),
         or(
-          isNull(qbMilestones.milestoneDate),
-          sql`${qbMilestones.milestoneDate} - make_interval(days => ${qbMilestones.invoiceLeadDays}) <= now()`,
+          eq(qbMilestones.awaitsDate, false),
+          isNotNull(qbMilestones.milestoneDate),
         ),
       ),
     );
+
+  // Re-check in JS so the rule lives in exactly one tested place, and so a SQL/JS
+  // disagreement can only ever be conservative (skip), never an unwanted invoice.
+  const now = new Date();
+  const due = candidates.filter((m) => milestoneIsDue(m, now));
 
   // Respect the per-tenant toggle: don't invoice milestones for a location that
   // has since disabled milestone invoicing (cached per location for this run).
@@ -221,7 +264,10 @@ export async function invoiceDueMilestones() {
       const invoice = await createInvoice(m.locationId, {
         qbCustomerId: m.qbCustomerId,
         amountCents: m.amountCents,
-        description: `${MILESTONE_LABELS[m.milestoneType] ?? m.milestoneType} — opportunity ${m.opportunityId}`,
+        // The label snapshotted when this milestone was scheduled, so the invoice reads the
+        // way the client named it. Falls back to the definition id only for rows written
+        // before 0007 added the column (none in production, but cheap insurance).
+        description: `${m.label || m.milestoneType} — opportunity ${m.opportunityId}`,
         dueDate: m.milestoneDate ? m.milestoneDate.toISOString().slice(0, 10) : undefined,
         itemRef: await itemRefFor(m.locationId),
       });
@@ -238,13 +284,30 @@ export async function invoiceDueMilestones() {
         .where(eq(qbMilestones.id, m.id));
 
       invoiced++;
-      console.log(`[yoder] invoiced milestone ${m.milestoneType} for opportunity ${m.opportunityId} (QB invoice ${invoice.Id})`);
+      console.log(`[milestone] invoiced "${m.label || m.milestoneType}" for opportunity ${m.opportunityId} (QB invoice ${invoice.Id})`);
     } catch (err) {
       await db
         .update(qbMilestones)
         .set({ status: 'failed', error: err.message, updatedAt: new Date() })
         .where(eq(qbMilestones.id, m.id));
-      console.error(`[yoder] failed to invoice milestone ${m.id}:`, err.message);
+      console.error(`[milestone] failed to invoice milestone ${m.id}:`, err.message);
+      // Also record durably. A failed milestone means a client did not get billed, and
+      // `status='failed'` is terminal — nothing retries it. Previously the only trace was
+      // this console line plus the row's `error` column, so once the tail closed the
+      // failure was invisible; now it surfaces in error_events and therefore in the
+      // QuickBooks page's open-problems list.
+      await recordThrown(err, {
+        source: 'cron',
+        kind: err.kind ?? 'milestone_invoice_failed',
+        appSlug: 'quickbooks',
+        locationId: m.locationId,
+        context: {
+          job: 'yoder-invoice-due-milestones',
+          milestoneId: m.id,
+          opportunityId: m.opportunityId,
+          milestone: m.label || m.milestoneType,
+        },
+      });
     }
   }
 
@@ -312,6 +375,20 @@ export async function pollWonOpportunities() {
       const settings = await getLocationSettings(locationId);
       if (!settings.qboMilestoneInvoicing) continue;
 
+      // Bail BEFORE touching GoHighLevel if this location has nothing configured to bill.
+      // handleOpportunityWon checks this too, but by then the damage is done: the poller has
+      // already fetched every won opportunity and then made ~3 more GHL calls PER opportunity
+      // (detail + contact) before the handler discovers there is nothing to do.
+      //
+      // Observed in production 2026-07-29: enabling the milestone toggle on a location with
+      // zero definitions made every tick fetch 7 opportunities and discard all of them, and
+      // partway through the run every database query in the whole cron invocation began
+      // failing — including error_events INSERTs, so the failures were not even recorded.
+      // A tick has a finite budget of outbound subrequests; spending it on work that is
+      // guaranteed to be thrown away starved the two jobs that had real work to do.
+      const definitions = await listMilestoneDefinitions(locationId);
+      if (!definitions.length) continue;
+
       const since = await getWonPollSince(locationId);
       const startedAt = new Date();
 
@@ -355,7 +432,7 @@ export async function pollWonOpportunities() {
 
       await setWonPollState(locationId, startedAt);
     } catch (err) {
-      console.error(`[yoder] won-poll failed for ${locationId}:`, err.message);
+      console.error(`[milestone] won-poll failed for ${locationId}:`, err.message);
     }
   }
 

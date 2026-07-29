@@ -129,8 +129,17 @@ Modeled on `ghlService.js`:
 - Requires a change-detection strategy and conflict handling (see Open Questions).
 
 ### 5.8 Mappers
-- Define QuickBooks `mapperType`s (e.g. `qb_item`, `milestone_field`, `customer_field`).
+- Define QuickBooks `mapperType`s (e.g. `qb_item`, `custom_field`).
 - Implement the currently-stubbed `actionsController.getMappers` so mappings are consumed at runtime.
+
+> **Superseded, 2026-07-29.** Two parts of this section no longer describe the product.
+> `milestone_field` was never built — per-client milestones live in their own table
+> (`qb_milestone_definitions`, migration 0007), not in `mappers`.
+> And **item mapping is leaving BuildBridge**: Carolyn's call on 2026-07-29 was that
+> Structure Studio talks to QuickBooks directly ("it's Structure Studio to QuickBooks"), so the
+> Item Mappings card is gone from `QuickBooks.jsx`. One `qb_item` row per location survives as
+> the item milestone invoices are billed against, chosen from the Milestone card.
+> `resolveItemRef` still reads the many-row shape for estimate pushes.
 
 ## 6. Data & Credentials
 - QuickBooks OAuth tokens (`access_token`, `refresh_token`, `realmId`, expiry) are stored as an
@@ -150,8 +159,11 @@ Add and wire into `src/core/env.js` (envalid schema) and the fail-fast checks in
    (`client/yoder-barnes`).
 3. ✅ **Milestone invoicing** — scheduler + the 4 auto-invoices (`client/yoder-barnes`).
 4. ✅ **Rockwood: two-way sync** — contacts + estimates reconciler (`client/rockwood`).
-5. ✅ **Mapper consumption** — `getMappers` runtime implemented (this branch); QB mapper types in
-   use: `milestone_amount`, `milestone_date` (Yoder), `opportunity_stage`, `pipeline` (Rockwood).
+5. ✅ **Mapper consumption** — `getMappers` runtime implemented (this branch). QB mapper types
+   actually in use as of 2026-07-29: **`custom_field`** and **`qb_item`** (one row = the item
+   milestone invoices bill). ⚠️ `milestone_amount` / `milestone_date` are **gone** — milestones
+   are now per-client rows in `qb_milestone_definitions` (migration 0007), not mappers; see the
+   superseded note in §5.8.
 
 Remaining before go-live: validate against an Intuit **sandbox** company and a real GHL sub-account
 (webhook payload shapes, GHL endpoint filters), configure the Intuit app (client id/secret,

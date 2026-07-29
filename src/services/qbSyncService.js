@@ -145,50 +145,131 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
   }
 
   for (const customer of customers) {
-    const qbUpdatedAt = customer.MetaData?.LastUpdatedTime;
-    const link = await getLink(locationId, 'contact', { qbId: customer.Id });
-
-    if (isEcho(qbUpdatedAt, link)) continue;
-
-    const cfEntries = contactCustomFields(customer);
-    const base = qbCustomerToGhlContact(customer);
-
-    if (link) {
-      // Fetch GHL side for the LWW comparison
-      const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
-        .catch(() => null);
-      const ghlUpdatedAt = existing?.contact?.dateUpdated ?? existing?.contact?.updatedAt;
-      if (targetIsNewer(qbUpdatedAt, ghlUpdatedAt)) continue; // GHL wins; other pass pushes it
-
-      // Merge our fields into the contact's existing custom fields so this PUT
-      // can't wipe fields set by the sales-doc-status pass (or vice versa).
-      const payload = cfEntries.length
-        ? {
-            ...base,
-            customFields: cfEntries.reduce(
-              (acc, f) => mergeCustomFields(acc, f),
-              existing?.contact?.customFields ?? [],
-            ),
-          }
-        : base;
-      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
-      await touchLink(link.id);
-      stats.qbToGhlContactsUpdated++;
-    } else {
-      const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
+    // ── Per-customer isolation ────────────────────────────────────────────────
+    // One unsyncable record must not take the whole pass down with it. Before this,
+    // a single customer GHL rejected aborted everything after it — the rest of the
+    // customers, the sales-doc status pass, the entire GHL→QuickBooks direction — AND
+    // skipped setSyncState, so the cursor never advanced and the SAME record was retried
+    // every 15 minutes forever. That is why Rockwood had never completed a single pass
+    // and its error count climbed all day (2026-07-29).
+    //
+    // Failures are recorded, not swallowed: each one lands in error_events (and therefore
+    // in the connection card's "open problems"), so a record we cannot sync stays visible
+    // instead of quietly disappearing. Same polarity as syncAllLocations, which already
+    // records-and-continues when one LOCATION fails rather than abandoning the rest.
+    try {
+      await syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields });
+    } catch (err) {
+      stats.qbToGhlContactsFailed++;
+      console.error(`[rockwood] contact sync failed for QB customer ${customer.Id}:`, err.message);
+      await recordThrown(err, {
+        source: 'cron',
+        kind: err.kind ?? 'qbo_contact_sync_failed',
+        appSlug: 'quickbooks',
         locationId,
-        ...base,
-        ...(cfEntries.length ? { customFields: cfEntries } : {}),
+        // The QuickBooks customer id is the handle a human needs to go and fix the record.
+        // It is an internal identifier, not customer data.
+        context: { job: 'rockwood-quickbooks-sync', qbCustomerId: String(customer.Id ?? '') },
       });
-      const ghlId = created?.contact?.id ?? created?.id;
-      if (!ghlId) {
-        console.warn(`[rockwood] GHL contact create returned no id for QB customer ${customer.Id}`);
-        continue;
-      }
-      await upsertLink(locationId, 'contact', ghlId, customer.Id);
-      stats.qbToGhlContactsCreated++;
     }
   }
+}
+
+/**
+ * Sync ONE QuickBooks customer into GHL. Extracted from the loop so a failure can be
+ * contained per record — see the try/catch at the call site.
+ */
+async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields }) {
+  const qbUpdatedAt = customer.MetaData?.LastUpdatedTime;
+  const link = await getLink(locationId, 'contact', { qbId: customer.Id });
+
+  if (isEcho(qbUpdatedAt, link)) return;
+
+  const cfEntries = contactCustomFields(customer);
+  const base = qbCustomerToGhlContact(customer);
+
+  if (link) {
+    // Fetch GHL side for the LWW comparison
+    const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
+      .catch(() => null);
+    const ghlUpdatedAt = existing?.contact?.dateUpdated ?? existing?.contact?.updatedAt;
+    if (targetIsNewer(qbUpdatedAt, ghlUpdatedAt)) return; // GHL wins; other pass pushes it
+
+    // Merge our fields into the contact's existing custom fields so this PUT
+    // can't wipe fields set by the sales-doc-status pass (or vice versa).
+    const payload = cfEntries.length
+      ? {
+          ...base,
+          customFields: cfEntries.reduce(
+            (acc, f) => mergeCustomFields(acc, f),
+            existing?.contact?.customFields ?? [],
+          ),
+        }
+      : base;
+    await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
+    await touchLink(link.id);
+    stats.qbToGhlContactsUpdated++;
+    return;
+  }
+
+  // ── No link yet: this customer has never been synced BY US ──────────────────
+  // That does NOT mean they are absent from GHL. qb_sync_links only ever gets rows from
+  // our own writes, so every contact the client already had in GHL looks new to us — and
+  // `POST /contacts/` rejects an existing email/phone outright:
+  //
+  //   400 "This location does not allow duplicated contacts."
+  //
+  // That is Rockwood's entire breakage (2026-07-29): 8-9 customers per run, every run,
+  // forever, because a rejected create never produces a link so the next run tries the
+  // exact same create again. The client's QuickBooks customers were of course already in
+  // their CRM.
+  //
+  // No email and no phone → GHL has nothing to match on and nothing to reach the person
+  // with. Skip rather than create an unreachable stub. Mirrors idearoomService's
+  // isActionable(), which is the same judgement for inbound leads.
+  if (!base.email && !base.phone) {
+    stats.qbToGhlContactsSkipped++;
+    return;
+  }
+
+  let ghlId;
+  if (base.email) {
+    // Email present → upsert. GHL matches on email FIRST, which is a precise identity, and
+    // it returns the existing contact when there is one — so this both fixes the 400 and
+    // ADOPTS the client's existing contact into qb_sync_links, turning every later run into
+    // a cheap update. Same endpoint and reasoning as idearoomService's lead push.
+    const upserted = await makeGhlRequest(locationId, 'POST', '/contacts/upsert', {
+      locationId,
+      ...base,
+      ...(cfEntries.length ? { customFields: cfEntries } : {}),
+    });
+    ghlId = upserted?.contact?.id ?? upserted?.id;
+  } else {
+    // Phone-only → deliberately still a CREATE, not an upsert.
+    //
+    // GHL's upsert matches on phone when there is no email, and it OVERWRITES the matched
+    // contact's fields. A phone is not an identity: shed businesses routinely have a shared
+    // household or business line, so a phone-only upsert can rewrite the name and details of
+    // a DIFFERENT person already in the client's CRM. Losing a sync is recoverable; silently
+    // corrupting a client's contact record is not.
+    //
+    // If this 400s as a duplicate, the per-customer catch above records and skips it, so it
+    // stays visible in the connection card's open problems rather than destroying data. See
+    // the work log — whether to upsert on phone is Carolyn's call, not ours.
+    const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
+      locationId,
+      ...base,
+      ...(cfEntries.length ? { customFields: cfEntries } : {}),
+    });
+    ghlId = created?.contact?.id ?? created?.id;
+  }
+
+  if (!ghlId) {
+    console.warn(`[rockwood] GHL contact write returned no id for QB customer ${customer.Id}`);
+    return;
+  }
+  await upsertLink(locationId, 'contact', ghlId, customer.Id);
+  stats.qbToGhlContactsCreated++;
 }
 
 // QuickBooks sales-doc status → a GHL contact custom field (read-only QB→GHL).
@@ -433,6 +514,13 @@ export async function syncLocation(locationId, settings) {
     direction,
     qbToGhlContactsCreated: 0,
     qbToGhlContactsUpdated: 0,
+    // Records GHL refused that we skipped rather than aborting the pass on. Non-zero here
+    // means "the sync ran, but this many customers did not make it" — a state that used to
+    // be indistinguishable from a total failure because the first one killed the run.
+    qbToGhlContactsFailed: 0,
+    // QuickBooks customers with neither an email nor a phone: nothing for GHL to match on
+    // and no way to reach the person, so deliberately not created.
+    qbToGhlContactsSkipped: 0,
     qbStatusUpdated: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,

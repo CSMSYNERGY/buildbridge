@@ -21,14 +21,22 @@ import {
   testSmartBuildConnection,
 } from '../controllers/webApiController.js';
 import { ingestClientError } from '../controllers/errorLogController.js';
+import { ensureLocation } from '../services/locationService.js';
 import {
   getQuickBooksConfig,
+  getQuickBooksHealth,
+  testQuickBooksConnection,
+  getMilestoneDefinitions,
+  addMilestoneDefinition,
+  editMilestoneDefinition,
+  removeMilestoneDefinition,
   getQuickBooksConnectUrl,
   disconnectQuickBooks,
   getQuickBooksSettings,
   saveQuickBooksSettings,
   getQuickBooksFields,
   getQuickBooksItems,
+  createSalespersonField,
 } from '../controllers/quickbooksController.js';
 import {
   getIdearoomSettings,
@@ -76,6 +84,17 @@ router.use((req, _res, next) => {
   next();
 });
 
+// Guarantee the tenant's `locations` row exists before any WRITE. The SSO handler
+// already does this when a session is minted, but a session issued before that fix
+// (or a long-lived cookie) never re-runs SSO — and nearly every table is FK'd to
+// locations.id, so the write would 500 on a foreign-key violation. Writes only:
+// reads cannot violate the FK, and this costs a DB round-trip.
+router.use(async (req, _res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  await ensureLocation(req.user.locationId, { companyId: req.user.companyId ?? null });
+  next();
+});
+
 router.get('/me', getMe);
 router.get('/subscription/mine', getMySubscriptions);
 router.post('/subscription/create', actionLimiter, createSubscriptionHandler);
@@ -111,13 +130,32 @@ router.get('/quickbooks/config', getQuickBooksConfig);
 // refuses framing)
 router.get('/quickbooks/connect-url', getQuickBooksConnectUrl);
 router.delete('/quickbooks/config', actionLimiter, disconnectQuickBooks);
+// Last successful sync + open problems. Split out from /config on purpose: /config is
+// polled every 3s during the connect flow and must stay a single query, while this one
+// reads qb_sync_state + error_events.
+router.get('/quickbooks/health', getQuickBooksHealth);
+// On-demand "does this connection actually work right now?" — a real QBO round-trip, so
+// it is rate-limited like the other write-ish actions (matches /smartbuild/test above).
+router.post('/quickbooks/test', actionLimiter, testQuickBooksConnection);
 
 // QuickBooks per-tenant feature settings (two-way sync / milestone invoicing)
 router.get('/quickbooks/settings', getQuickBooksSettings);
 router.put('/quickbooks/settings', actionLimiter, saveQuickBooksSettings);
 // QuickBooks company custom fields (for the field-mapper dropdown)
 router.get('/quickbooks/fields', getQuickBooksFields);
+// Create/enable the legacy "Salesperson" sales-form custom field (QBO's UI no
+// longer offers legacy fields; the REST write path is the only way to get an
+// API-readable custom field without the tier-gated App Foundations scope)
+router.post('/quickbooks/salesperson-field', actionLimiter, createSalespersonField);
 // QuickBooks company items / products & services (for the item-mapper dropdown)
 router.get('/quickbooks/items', getQuickBooksItems);
+
+// Per-client milestone configuration (migration 0007) — replaces the four hard-coded
+// milestone types. Each definition is the client's own (amount field, optional date field)
+// pair plus the label that prints on the invoice line.
+router.get('/quickbooks/milestones', getMilestoneDefinitions);
+router.post('/quickbooks/milestones', actionLimiter, addMilestoneDefinition);
+router.put('/quickbooks/milestones/:id', actionLimiter, editMilestoneDefinition);
+router.delete('/quickbooks/milestones/:id', actionLimiter, removeMilestoneDefinition);
 
 export default router;

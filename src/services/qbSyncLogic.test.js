@@ -9,6 +9,8 @@ import {
   mergeCustomFields,
   qbCustomFieldEntries,
   resolveItemRef,
+  milestoneIsDue,
+  normalizeMilestoneInput,
 } from './qbSyncLogic.js';
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
@@ -222,5 +224,101 @@ describe('resolveItemRef — QBO item selection from qb_item mappings', () => {
 
   it('ignores malformed rows (missing externalKey) and coerces the id to a string', () => {
     expect(resolveItemRef([{ ghlValue: 'x' }, { externalKey: 7, ghlValue: 'y' }], { y: 1 })).toBe('7');
+  });
+});
+
+describe('normalizeMilestoneInput — what the milestone editor is allowed to save', () => {
+  const ok = { label: 'Materials Delivered', amountField: 'fA', dateField: 'fB', sortOrder: 2 };
+
+  it('accepts a complete milestone and trims the label', () => {
+    const r = normalizeMilestoneInput({ ...ok, label: '  Materials Delivered  ' });
+    expect(r.ok).toBe(true);
+    expect(r.value).toEqual({ label: 'Materials Delivered', amountField: 'fA', dateField: 'fB', sortOrder: 2 });
+  });
+
+  it('accepts no date field and normalizes it to null (the invoice-on-Won case)', () => {
+    expect(normalizeMilestoneInput({ label: 'Deposit', amountField: 'fA' }).value.dateField).toBeNull();
+    expect(normalizeMilestoneInput({ label: 'Deposit', amountField: 'fA', dateField: '' }).value.dateField).toBeNull();
+    expect(normalizeMilestoneInput({ label: 'Deposit', amountField: 'fA', dateField: '   ' }).value.dateField).toBeNull();
+  });
+
+  it('rejects a blank or whitespace-only name — it would print an empty invoice line', () => {
+    expect(normalizeMilestoneInput({ label: '', amountField: 'fA' }).ok).toBe(false);
+    expect(normalizeMilestoneInput({ label: '   ', amountField: 'fA' }).ok).toBe(false);
+    expect(normalizeMilestoneInput({ amountField: 'fA' }).ok).toBe(false);
+  });
+
+  it('rejects a missing amount field — it could never produce an amount', () => {
+    const r = normalizeMilestoneInput({ label: 'Deposit' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/amount/i);
+  });
+
+  it('rejects the same field used for both amount and date', () => {
+    const r = normalizeMilestoneInput({ label: 'Oops', amountField: 'fA', dateField: 'fA' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/two different fields/i);
+  });
+
+  it('rejects an over-long name rather than silently truncating it', () => {
+    expect(normalizeMilestoneInput({ label: 'x'.repeat(121), amountField: 'fA' }).ok).toBe(false);
+    expect(normalizeMilestoneInput({ label: 'x'.repeat(120), amountField: 'fA' }).ok).toBe(true);
+  });
+
+  it('defaults a non-numeric sortOrder to 0 instead of storing NaN', () => {
+    expect(normalizeMilestoneInput({ ...ok, sortOrder: 'abc' }).value.sortOrder).toBe(0);
+    expect(normalizeMilestoneInput({ ...ok, sortOrder: undefined }).value.sortOrder).toBe(0);
+    expect(normalizeMilestoneInput({ ...ok, sortOrder: '3' }).value.sortOrder).toBe(3);
+    expect(normalizeMilestoneInput({ ...ok, sortOrder: 1.9 }).value.sortOrder).toBe(1);
+  });
+
+  it('survives a missing or non-object body', () => {
+    expect(normalizeMilestoneInput(undefined).ok).toBe(false);
+    expect(normalizeMilestoneInput(null).ok).toBe(false);
+  });
+});
+
+describe('milestoneIsDue — when a scheduled milestone gets invoiced', () => {
+  const NOW = new Date('2026-08-01T12:00:00Z');
+  const days = (n) => new Date(NOW.getTime() + n * 24 * 60 * 60 * 1000);
+
+  it('invoices a milestone with no date field as soon as it is scheduled (deposit-style)', () => {
+    expect(milestoneIsDue({ awaitsDate: false, milestoneDate: null, invoiceLeadDays: 3 }, NOW)).toBe(true);
+  });
+
+  it('does NOT invoice a milestone that wants a date until the date is filled in', () => {
+    // The behaviour change. Previously a null date meant "invoice immediately", so a
+    // milestone whose date had not been entered yet was billed the moment the deal was Won.
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: null, invoiceLeadDays: 3 }, NOW)).toBe(false);
+  });
+
+  it('invoices exactly `invoiceLeadDays` before the date, not on the date', () => {
+    const row = { awaitsDate: true, milestoneDate: days(3), invoiceLeadDays: 3 };
+    expect(milestoneIsDue(row, NOW)).toBe(true);                       // boundary: lead window opens now
+    expect(milestoneIsDue({ ...row, milestoneDate: days(4) }, NOW)).toBe(false); // one day early
+  });
+
+  it('invoices a date already in the past', () => {
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: days(-10), invoiceLeadDays: 3 }, NOW)).toBe(true);
+  });
+
+  it('with zero lead days, waits until the date itself', () => {
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: days(1), invoiceLeadDays: 0 }, NOW)).toBe(false);
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: NOW, invoiceLeadDays: 0 }, NOW)).toBe(true);
+  });
+
+  it('accepts a date string as well as a Date (drivers differ on what they hand back)', () => {
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: '2026-07-01T00:00:00Z', invoiceLeadDays: 3 }, NOW)).toBe(true);
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: '2026-12-25T00:00:00Z', invoiceLeadDays: 3 }, NOW)).toBe(false);
+  });
+
+  it('never bills on an unparseable date or a missing row', () => {
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: 'not a date', invoiceLeadDays: 3 }, NOW)).toBe(false);
+    expect(milestoneIsDue(null, NOW)).toBe(false);
+  });
+
+  it('treats a missing invoiceLeadDays as zero rather than NaN (which would never be due)', () => {
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: days(-1) }, NOW)).toBe(true);
+    expect(milestoneIsDue({ awaitsDate: true, milestoneDate: days(1) }, NOW)).toBe(false);
   });
 });

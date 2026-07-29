@@ -152,3 +152,80 @@ export function resolveItemRef(itemMappings, ghlFieldValues = {}) {
   if (maps.length === 1) return String(maps[0].externalKey);
   return null;
 }
+
+// How long a milestone name may be. It prints on a QuickBooks invoice line.
+const MAX_MILESTONE_LABEL = 120;
+
+/**
+ * Validate and normalize one milestone definition from the UI.
+ *
+ * Returns `{ ok: true, value }` or `{ ok: false, error }` rather than throwing, which keeps
+ * this file free of imports and therefore trivially unit-testable — the same reason
+ * resolveItemRef lives here. The service turns a failure into a 400.
+ *
+ * Rejects rather than coercing. A milestone with a blank name would print an empty invoice
+ * line, and one with no amount field can never produce an amount — that is dead
+ * configuration that nonetheless LOOKS configured, which is the worst of both worlds.
+ */
+export function normalizeMilestoneInput(input) {
+  const raw = input ?? {};
+
+  const label = typeof raw.label === 'string' ? raw.label.trim() : '';
+  if (!label) return { ok: false, error: 'A milestone needs a name.' };
+  if (label.length > MAX_MILESTONE_LABEL) {
+    return { ok: false, error: `A milestone name must be ${MAX_MILESTONE_LABEL} characters or fewer.` };
+  }
+
+  const amountField = typeof raw.amountField === 'string' ? raw.amountField.trim() : '';
+  if (!amountField) {
+    return { ok: false, error: 'Choose which opportunity field holds this milestone’s amount.' };
+  }
+
+  // An unset dropdown sends '' — normalize to null so "invoice on Won" is one check
+  // everywhere downstream instead of a mix of '' and null.
+  const dateField = typeof raw.dateField === 'string' && raw.dateField.trim() ? raw.dateField.trim() : null;
+  if (dateField && dateField === amountField) {
+    return { ok: false, error: 'The amount and date must be two different fields.' };
+  }
+
+  const n = Number(raw.sortOrder);
+  return {
+    ok: true,
+    value: { label, amountField, dateField, sortOrder: Number.isFinite(n) ? Math.trunc(n) : 0 },
+  };
+}
+
+/**
+ * Is this scheduled milestone due to be invoiced yet?
+ *
+ * The rule Carolyn described (2026-07-28): "this happens when this date field gets filled
+ * is when it creates an invoice" / "we're going to create an invoice when it reaches this
+ * date". So:
+ *
+ *   awaitsDate = false  → the client configured NO date field for this milestone.
+ *                         Invoice as soon as the opportunity is Won (deposit-style).
+ *   awaitsDate = true   → wait for the date field to be filled, then invoice
+ *                         `invoiceLeadDays` before it.
+ *
+ * The load-bearing difference from the previous behaviour: a milestone that WANTS a date
+ * but does not have one yet is **waiting, not due**. Before, a null date always meant
+ * "invoice immediately", so a milestone whose date had not been filled in yet was billed
+ * the moment the deal was Won — the opposite of what filling the date is supposed to do.
+ *
+ * Pure and exported for tests; `invoiceDueMilestones` narrows in SQL first, then calls
+ * this as the authority so the rule lives in exactly one place.
+ */
+export function milestoneIsDue(row, now = new Date()) {
+  if (!row) return false;
+  if (!row.awaitsDate) return true;
+
+  const raw = row.milestoneDate;
+  if (!raw) return false; // date field configured but not filled in yet → still waiting
+
+  const date = raw instanceof Date ? raw : new Date(raw);
+  if (Number.isNaN(date.getTime())) return false; // unparseable → never silently bill
+
+  const leadDays = Number.isFinite(row.invoiceLeadDays) ? row.invoiceLeadDays : 0;
+  const dueAt = date.getTime() - leadDays * 24 * 60 * 60 * 1000;
+  return now.getTime() >= dueAt;
+}

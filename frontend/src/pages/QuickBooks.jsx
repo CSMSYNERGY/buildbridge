@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
 import { useToast } from '../components/ui/toast.jsx';
@@ -7,7 +7,48 @@ import { Input } from '../components/ui/input.jsx';
 import { Label } from '../components/ui/label.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { CheckCircle2, XCircle, LogOut, Link2, RefreshCw, Receipt, X, ArrowRight, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
+import { Select } from '../components/ui/select.jsx';
+import { CheckCircle2, XCircle, AlertTriangle, HelpCircle, LogOut, Link2, RefreshCw, Receipt, X, Plus, Zap, ArrowRight, ArrowLeftRight, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
+
+// The "what actually makes this happen" line under a component's title.
+//
+// Exists because of the specific critique that produced this layout: the page described
+// three different behaviours as one undifferentiated "sync", so nothing on screen said that
+// filling a date field is what creates an invoice. Each component now states its own
+// trigger in the same visual slot, so the three are comparable at a glance.
+function TriggerNote({ children }) {
+  return (
+    <div
+      className="mt-2 flex items-start gap-2 rounded-md px-2.5 py-2"
+      style={{ backgroundColor: '#f0f9fb', border: '1px solid #cdeaf1' }}
+    >
+      <Zap className="h-3.5 w-3.5 shrink-0 mt-0.5" style={{ color: '#1b7895' }} />
+      <p className="text-xs leading-relaxed" style={{ color: '#1b5f75' }}>
+        <span className="font-medium">What triggers this: </span>
+        {children}
+      </p>
+    </div>
+  );
+}
+
+// "3 minutes ago" / "2 days ago". Relative rather than absolute on purpose: the point of
+// these timestamps is freshness ("was this checked recently?"), and a raw UTC string makes
+// the reader do timezone arithmetic to answer that. Falls back to a locale date past a
+// week, where the exact day matters more than the elapsed time.
+function timeAgo(value) {
+  if (!value) return null;
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) return null;
+  const secs = Math.floor((Date.now() - then) / 1000);
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  if (days <= 7) return `${days} day${days === 1 ? '' : 's'} ago`;
+  return new Date(value).toLocaleDateString();
+}
 
 // Small controlled on/off switch (no dedicated Switch component in the kit).
 function Toggle({ checked, onChange, disabled }) {
@@ -35,8 +76,26 @@ export default function QuickBooks() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [loading, setLoading] = useState(true);
-  const [config, setConfig] = useState(null); // { realmId, environment } | null
+  const [config, setConfig] = useState(null); // { realmId, environment, connectedAt } | null
   const [disconnecting, setDisconnecting] = useState(false);
+
+  // ── Connection health ──────────────────────────────────────────────────────
+  // Separate from `config` because "a credential row exists" and "the credential works"
+  // are different facts. Conflating them is the bug this state exists to fix: on
+  // 2026-07-28 this page showed a green "Connected" for 20+ hours on both live locations
+  // while every sync failed, because `!!config` was the only thing it ever consulted.
+  const [health, setHealth] = useState(null);       // { state:'ok'|'broken'|'unverified', message, lastOkAt, lastErrorAt }
+  const [syncHealth, setSyncHealth] = useState(null); // { lastSyncAt, issues[] }
+  // Distinguishes "we could not ask the server" from "not connected" — a backend outage
+  // or an expired session used to render identically to a tenant who never connected.
+  const [configFailed, setConfigFailed] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null); // { ok, companyName, message, checkedAt }
+  // True only when QuickBooks itself could not be reached for these lists. Without it an
+  // auth failure printed "no custom fields in this QuickBooks company", blaming the
+  // client's QuickBooks for our dead token.
+  const [qbFieldsUnavailable, setQbFieldsUnavailable] = useState(false);
+  const [qbItemsUnavailable, setQbItemsUnavailable] = useState(false);
 
   // Per-tenant feature settings
   const [settings, setSettings] = useState(null);
@@ -49,22 +108,71 @@ export default function QuickBooks() {
   const [mappings, setMappings] = useState([]);
   const [mapDraft, setMapDraft] = useState({ qb: '', ghl: '' });
   const [savingMap, setSavingMap] = useState(false);
-  const [milestoneMaps, setMilestoneMaps] = useState([]);
+  // Per-client milestone definitions (replaces the milestone_amount/milestone_date mappers).
+  const [milestones, setMilestones] = useState([]);
   const [guideOpen, setGuideOpen] = useState(false);
 
-  // Item mappings (QuickBooks item ↔ Synergy field)
+  // Which QuickBooks item milestone invoices bill (a single `qb_item` mapper row).
   const [qbItems, setQbItems] = useState([]);
   const [itemMaps, setItemMaps] = useState([]);
-  const [itemDraft, setItemDraft] = useState({ item: '', ghl: '' });
   const [savingItemMap, setSavingItemMap] = useState(false);
 
+  // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
+  // when a token dies, the tenant's saved mappings and sync config are still valid and
+  // must stay visible and editable. Hiding them would turn a token problem into apparent
+  // data loss, and would remove the page they need in order to reconnect.
   const isConnected = !!config;
+  // The credential WORKS. Only this drives the badge, the icon, and the alert.
+  const isHealthy = isConnected && health?.state === 'ok';
+  const isBroken = isConnected && health?.state === 'broken';
+  // Open problems that are NOT about the token — e.g. Rockwood on 2026-07-29, whose
+  // QuickBooks token was refreshing fine while its sync failed 28 times on a GoHighLevel
+  // 400. Without this the card would go green and still be wrong.
+  // Problems that are happening NOW (the server filters out anything a later success or a
+  // period of quiet has disproved). When the credential itself is dead the red block above
+  // already says "reconnect" and gives the button, so drop credential-class duplicates here
+  // rather than telling someone the same thing twice and counting it as two problems.
+  const openIssues = (syncHealth?.issues ?? []).filter((i) => !(
+    isBroken && /reconnect below/i.test(i.summary ?? '')
+  ));
+  const hiddenIssueCount = Math.max(0, (syncHealth?.totalIssues ?? openIssues.length) - openIssues.length);
+  // The persisted name wins; a just-completed Test fills it in before the next reload. Both
+  // exist because the stored one only arrives on a page load, while the test result is
+  // immediate — but the STORED one is what makes the name survive a refresh.
+  const companyName = config?.companyName ?? testResult?.companyName ?? null;
+
+  // Extracted so the freshness re-read below can reuse it verbatim.
+  const loadConfig = useCallback(() => (
+    fetchWithAuth('/api/quickbooks/config')
+      .then((r) => {
+        if (!r.ok) {
+          // 4xx/5xx is NOT "not connected" — say so rather than silently implying it.
+          setConfigFailed(true);
+          return null;
+        }
+        return r.json();
+      })
+      .then((d) => {
+        if (!d) return null;
+        setConfig(d.config ?? null);
+        setHealth(d.health ?? null);
+        return d;
+      })
+      .catch(() => { setConfigFailed(true); return null; })
+  ), [fetchWithAuth]);
 
   useEffect(() => {
+    let cancelled = false;
+    // Captured by closure rather than read out of the Promise.all result array by index:
+    // positional indices silently break the moment somebody reorders or inserts a request,
+    // and the failure mode would be a card that quietly stops going red.
+    let probeFailed = false;
+    let configHealthState = null;
     Promise.all([
-      fetchWithAuth('/api/quickbooks/config')
+      loadConfig().then((d) => { configHealthState = d?.health?.state ?? null; }),
+      fetchWithAuth('/api/quickbooks/health')
         .then((r) => (r.ok ? r.json() : null))
-        .then((d) => setConfig(d?.config ?? null))
+        .then((d) => { if (d) setSyncHealth(d); })
         .catch(() => {}),
       fetchWithAuth('/api/quickbooks/settings')
         .then((r) => (r.ok ? r.json() : null))
@@ -78,25 +186,48 @@ export default function QuickBooks() {
         .then((r) => (r.ok ? r.json() : { fields: [] }))
         .then((d) => setGhlFields(d.fields ?? []))
         .catch(() => {}),
+      // These two are the requests that DISCOVER a dead token: they hit QuickBooks, and a
+      // 401 there is what makes the server mark the credential broken. Their result is
+      // reported back so the settle handler below knows whether that just happened.
+      // /items survived the removal of the Item Mappings card for both reasons — it is half
+      // of that probe, and it fills the "Bill milestone invoices as" picker. Dropping it
+      // would quietly halve how reliably this page notices a dead credential.
       fetchWithAuth('/api/quickbooks/fields')
-        .then((r) => (r.ok ? r.json() : { fields: [] }))
-        .then((d) => setQbFields(d.fields ?? []))
-        .catch(() => {}),
+        .then((r) => (r.ok ? r.json() : { fields: [], unavailable: true }))
+        .then((d) => { setQbFields(d.fields ?? []); setQbFieldsUnavailable(!!d.unavailable); if (d.unavailable) probeFailed = true; })
+        .catch(() => { setQbFieldsUnavailable(true); probeFailed = true; }),
       fetchWithAuth('/api/quickbooks/items')
-        .then((r) => (r.ok ? r.json() : { items: [] }))
-        .then((d) => setQbItems(d.items ?? []))
-        .catch(() => {}),
+        .then((r) => (r.ok ? r.json() : { items: [], unavailable: true }))
+        .then((d) => { setQbItems(d.items ?? []); setQbItemsUnavailable(!!d.unavailable); if (d.unavailable) probeFailed = true; })
+        .catch(() => { setQbItemsUnavailable(true); probeFailed = true; }),
       fetchWithAuth('/api/mappers?appSlug=quickbooks')
         .then((r) => (r.ok ? r.json() : { mappers: [] }))
         .then((d) => {
           const all = d.mappers ?? [];
           setMappings(all.filter((m) => m.mapperType === 'custom_field'));
-          setMilestoneMaps(all.filter((m) => m.mapperType === 'milestone_amount' || m.mapperType === 'milestone_date'));
           setItemMaps(all.filter((m) => m.mapperType === 'qb_item'));
         })
         .catch(() => {}),
-    ]).finally(() => setLoading(false));
-  }, [fetchWithAuth]);
+      fetchWithAuth('/api/quickbooks/milestones')
+        .then((r) => (r.ok ? r.json() : { definitions: [] }))
+        .then((d) => setMilestones(d.definitions ?? []))
+        .catch(() => {}),
+    ])
+      .then(() => {
+        // ── Freshness re-read: fixes a race that would make this card lie on exactly the
+        // load that matters most. /config is fetched in PARALLEL with /fields and /items,
+        // so it reads the health row as it was BEFORE those two discovered the failure.
+        // Without this, the page load that detects a dead token still renders green and
+        // only a second, manual reload shows red — which is the original bug wearing a
+        // different hat. Costs one extra request, and only when something actually failed.
+        if (cancelled) return undefined;
+        if (probeFailed && configHealthState !== 'broken') return loadConfig();
+        return undefined;
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [fetchWithAuth, loadConfig]);
 
   // Surface the OAuth round-trip result (?connected=1 / ?error=...) then clean the URL.
   useEffect(() => {
@@ -123,6 +254,45 @@ export default function QuickBooks() {
 
   useEffect(() => () => clearInterval(pollRef.current), []); // cleanup on unmount
 
+  // Ask QuickBooks, right now, whether the stored connection still works.
+  //
+  // `silent` is used by the connect flow, where a toast would pile on top of the
+  // "QuickBooks connected" one. A failed probe is NOT an error state for this function —
+  // it is the answer — so it resolves normally and updates the card.
+  async function probeConnection({ silent = false } = {}) {
+    setTesting(true);
+    try {
+      const res = await fetchWithAuth('/api/quickbooks/test', { method: 'POST' });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(d?.error || `Could not run the test (${res.status})`);
+      setTestResult(d);
+      // Reflect the probe in the card immediately rather than waiting for a reload: the
+      // server has already recorded it against the credential row.
+      setHealth((h) => ({
+        ...(h ?? {}),
+        state: d.ok ? 'ok' : 'broken',
+        message: d.ok ? null : d.message,
+        lastOkAt: d.ok ? d.checkedAt : (h?.lastOkAt ?? null),
+        lastErrorAt: d.ok ? null : d.checkedAt,
+      }));
+      if (!silent) {
+        toast({
+          title: d.ok ? `Connected to ${d.companyName || 'QuickBooks'}` : 'QuickBooks is not reachable',
+          description: d.ok ? 'BuildBridge can read and write in this QuickBooks company.' : d.message,
+          ...(d.ok ? {} : { variant: 'destructive' }),
+        });
+      }
+    } catch (err) {
+      // The TEST failed, which says nothing about QuickBooks — do not touch `health`, or a
+      // network blip would paint a working connection red.
+      if (!silent) {
+        toast({ title: 'Could not run the test', description: err.message, variant: 'destructive' });
+      }
+    } finally {
+      setTesting(false);
+    }
+  }
+
   function startConnectPolling() {
     clearInterval(pollRef.current);
     setConnecting(true);
@@ -141,20 +311,27 @@ export default function QuickBooks() {
           setConnecting(false);
           setAuthUrl(null);
           setConfig(d.config);
-          toast({ title: 'QuickBooks connected' });
+          setHealth(d.health ?? null);
+          setConfigFailed(false);
+          // A fresh row is written by the OAuth callback BEFORE any QuickBooks API call is
+          // attempted, so at this instant health is 'unverified', not 'ok'. Probing now
+          // turns the connect flow into real proof and fills in the company name — which
+          // is what lets someone notice immediately that they just connected the wrong
+          // QuickBooks company.
+          probeConnection({ silent: true });
           // Populate the now-unlocked cards (settings, QB fields, QB items).
           fetchWithAuth('/api/quickbooks/settings')
             .then((res) => (res.ok ? res.json() : null))
             .then((s) => setSettings(s?.settings ?? null))
             .catch(() => {});
           fetchWithAuth('/api/quickbooks/fields')
-            .then((res) => (res.ok ? res.json() : { fields: [] }))
-            .then((s) => setQbFields(s.fields ?? []))
-            .catch(() => {});
+            .then((res) => (res.ok ? res.json() : { fields: [], unavailable: true }))
+            .then((s) => { setQbFields(s.fields ?? []); setQbFieldsUnavailable(!!s.unavailable); })
+            .catch(() => setQbFieldsUnavailable(true));
           fetchWithAuth('/api/quickbooks/items')
-            .then((res) => (res.ok ? res.json() : { items: [] }))
-            .then((s) => setQbItems(s.items ?? []))
-            .catch(() => {});
+            .then((res) => (res.ok ? res.json() : { items: [], unavailable: true }))
+            .then((s) => { setQbItems(s.items ?? []); setQbItemsUnavailable(!!s.unavailable); })
+            .catch(() => setQbItemsUnavailable(true));
         }
       } catch { /* transient poll failure — keep polling */ }
     }, 3000);
@@ -178,6 +355,36 @@ export default function QuickBooks() {
     }
   }
 
+  // Create/enable the legacy "Salesperson" sales-form custom field via the API
+  // (the QBO UI no longer offers legacy fields; see backend createSalespersonField).
+  const [creatingField, setCreatingField] = useState(false);
+  async function handleCreateSalespersonField() {
+    setCreatingField(true);
+    try {
+      const res = await fetchWithAuth('/api/quickbooks/salesperson-field', {
+        method: 'POST',
+        body: JSON.stringify({ name: 'Salesperson' }),
+      });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(d?.error || `QuickBooks rejected the request (${res.status})`);
+      setQbFields(d.fields ?? []);
+      if (!s.qboAssignedUserField) setField('qboAssignedUserField')('Salesperson');
+      toast({
+        title: d.visibleToApi
+          ? 'Salesperson field created in QuickBooks'
+          : 'QuickBooks accepted the field but it is not yet visible to the API',
+        description: d.visibleToApi
+          ? 'It now appears on estimates and invoices in QuickBooks.'
+          : 'This company may not support legacy custom fields — tell CSM Synergy support.',
+        ...(d.visibleToApi ? {} : { variant: 'destructive' }),
+      });
+    } catch (err) {
+      toast({ title: 'Could not create the field', description: err.message, variant: 'destructive' });
+    } finally {
+      setCreatingField(false);
+    }
+  }
+
   async function handleDisconnect() {
     setDisconnecting(true);
     try {
@@ -194,6 +401,41 @@ export default function QuickBooks() {
 
   const setField = (field) => (value) => setSettings((s) => ({ ...s, [field]: value }));
 
+  /**
+   * Save ONLY the milestone component's own two settings, immediately.
+   *
+   * The milestone card owns its persistence end to end — its milestone rows already save on
+   * change, so its enable switch and lead time must too. Without this they depended on the
+   * "Save settings" button that now lives in a DIFFERENT card, which meant you could turn
+   * milestone invoicing on, add milestones, reload, and find the switch back off with your
+   * milestones hidden behind it. They were saved, but they looked lost.
+   *
+   * A PARTIAL body, deliberately: upsertLocationSettings skips any key that is undefined, so
+   * this cannot commit the sync card's half-finished edits. That matters — sync direction
+   * decides whether we write to a client's QuickBooks at all, and flipping a milestone switch
+   * must never be what turns that on.
+   */
+  async function saveMilestoneSettings(patch) {
+    const next = { ...(settings ?? {}), ...patch };
+    setSettings(next);                       // optimistic: the switch responds instantly
+    try {
+      const res = await fetchWithAuth('/api/quickbooks/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          qboMilestoneInvoicing: next.qboMilestoneInvoicing ?? false,
+          qboInvoiceLeadDays: Number(next.qboInvoiceLeadDays) || 0,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? 'Could not save');
+      if (data?.settings) setSettings(data.settings);
+    } catch (err) {
+      // Put it back — a switch that looks saved but isn't is worse than one that snaps back.
+      setSettings(settings);
+      toast({ title: 'Could not save', description: err.message, variant: 'destructive' });
+    }
+  }
+
   async function handleSaveSettings() {
     setSaving(true);
     try {
@@ -201,14 +443,16 @@ export default function QuickBooks() {
       const cur = settings ?? {};
       const res = await fetchWithAuth('/api/quickbooks/settings', {
         method: 'PUT',
+        // Only the SYNC component's fields. The milestone switch and lead time are omitted on
+        // purpose — the milestone card saves those itself, and each component owning its own
+        // keys means neither can quietly overwrite the other's. Absent keys are skipped by
+        // upsertLocationSettings, so a partial body is safe.
         body: JSON.stringify({
           qboSyncDirection: cur.qboSyncDirection ?? 'off',
-          qboMilestoneInvoicing: cur.qboMilestoneInvoicing ?? false,
           qboContactSyncPipelineId: cur.qboContactSyncPipelineId || null,
           qboAssignedUserField: cur.qboAssignedUserField || null,
           qboAssignedUserGhlField: cur.qboAssignedUserGhlField || null,
           qboStatusGhlField: cur.qboStatusGhlField || null,
-          qboInvoiceLeadDays: Number(cur.qboInvoiceLeadDays) || 0,
         }),
       });
       const data = await res.json();
@@ -263,82 +507,165 @@ export default function QuickBooks() {
     }
   }
 
-  // ── Item mapping helpers (QuickBooks item ↔ Synergy field) ─────────────────
-  const usedItems = new Set(itemMaps.map((m) => m.externalKey));
-  const usedItemGhl = new Set(itemMaps.map((m) => m.ghlValue));
+  // ── Which QuickBooks item milestone invoices bill ───────────────────────────
+  // What remains of the old Item Mappings card. That card mapped many QuickBooks items to
+  // Synergy fields so an ESTIMATE could pick one per deal; Structure Studio → QuickBooks item
+  // mapping is moving into Structure Studio itself (Carolyn, 2026-07-29: "it's Structure Studio
+  // to QuickBooks… I just don't want you to spend more time building out items mapping in here").
+  //
+  // Milestone invoicing still needs to know which item to bill, and it cannot pick per deal —
+  // a milestone invoice has no GHL field context, so resolveItemRef falls back to "exactly one
+  // mapping = the location default". This select is therefore deliberately SINGLE-choice: it
+  // keeps that one row correct instead of leaving invisible configuration steering real invoices.
+  const milestoneItemMap = itemMaps.length === 1 ? itemMaps[0] : null;
+  const milestoneItemId = milestoneItemMap?.externalKey ?? '';
   const itemLabel = (id) => {
     const it = qbItems.find((i) => i.id === id);
     if (!it) return id;
     return it.unitPrice != null ? `${it.name} ($${it.unitPrice})` : it.name;
   };
 
-  async function addItemMapping() {
-    if (!itemDraft.item || !itemDraft.ghl) return;
+  /**
+   * Point milestone invoices at a QuickBooks item (or clear the choice).
+   *
+   * DELETE-THEN-INSERT, never PUT. createMapper's conflict target is
+   * (locationId, appSlug, mapperType, externalKey) — and externalKey IS the QuickBooks item id —
+   * so POSTing a different item ADDS a second row rather than replacing the first. Two rows with
+   * no per-deal field context make resolveItemRef return null, which silently bills QuickBooks'
+   * default item '1' instead. PUT is equally wrong: it only changes ghlValue, not externalKey.
+   */
+  async function setMilestoneItem(itemId) {
     setSavingItemMap(true);
     try {
+      // Clear every existing qb_item row first, so exactly one (or none) can remain.
+      for (const m of itemMaps) {
+        const del = await fetchWithAuth(`/api/mappers/${m.id}`, { method: 'DELETE' });
+        if (!del.ok) throw new Error('Could not clear the previous item');
+      }
+      if (!itemId) {
+        setItemMaps([]);
+        toast({ title: 'Milestone invoices will use QuickBooks’ default item' });
+        return;
+      }
       const res = await fetchWithAuth('/api/mappers', {
         method: 'POST',
         body: JSON.stringify({
           appSlug: 'quickbooks',
           mapperType: 'qb_item',
-          externalKey: itemDraft.item,
-          ghlValue: itemDraft.ghl,
+          externalKey: itemId,
+          // ghlValue is required by the endpoint and is what a per-deal estimate match would
+          // use. Milestones have no deal context, so it is unused here — store the item id
+          // itself rather than a field id, which would imply a mapping that does not exist.
+          ghlValue: itemId,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to add item mapping');
-      setItemMaps((prev) => [...prev.filter((m) => m.id !== data.mapper.id), data.mapper]);
-      setItemDraft({ item: '', ghl: '' });
-      toast({ title: 'Item mapping added' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? 'Could not save the item');
+      setItemMaps(data?.mapper ? [data.mapper] : []);
+      toast({ title: `Milestone invoices will bill “${itemLabel(itemId)}”` });
     } catch (err) {
-      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+      toast({ title: 'Could not save the item', description: err.message, variant: 'destructive' });
     } finally {
       setSavingItemMap(false);
     }
   }
 
-  async function deleteItemMapping(id) {
+  // ── Milestone definitions (per-client milestone configuration) ──────────────
+  // Replaces a hard-coded list of four milestones. A milestone is the client's own pair of
+  // opportunity fields — "materials delivered dollar amount" + "materials delivered date"
+  // — because every client names and structures these differently.
+
+  // Only OPPORTUNITY fields are offered: a milestone belongs to a deal, not a person, and
+  // Carolyn was explicit that this has to come from an opportunity field. The `model` flag
+  // has always been on the wire from /api/ghl/fields; nothing used it until now.
+  const opportunityFields = ghlFields.filter((f) => f.model === 'opportunity');
+  // Fall back to every field if this location reports none as opportunity-scoped, so a
+  // GHL response shape we haven't seen can't leave the dropdowns empty.
+  const milestoneFieldOptions = opportunityFields.length ? opportunityFields : ghlFields;
+
+  // Name the milestone after the field the user picked, so the normal path involves zero
+  // typing. "Materials Delivered $ Amount (opportunity)" → "Materials Delivered". The user
+  // can still override it, because this string prints on the QuickBooks invoice line.
+  function deriveMilestoneLabel(fieldId) {
+    const f = milestoneFieldOptions.find((x) => (x.id ?? x.key) === fieldId);
+    if (!f) return '';
+    return String(f.label ?? '')
+      .replace(/\s*\(opportunity\)\s*$/i, '')
+      .replace(/[\s$]*\b(dollar\s+)?amount\b\s*$/i, '')
+      .replace(/\s*\$\s*$/, '')
+      .trim() || String(f.label ?? '').replace(/\s*\(opportunity\)\s*$/i, '').trim();
+  }
+
+  async function saveMilestone(id, patch) {
+    const current = milestones.find((m) => m.id === id);
+    const body = { ...current, ...patch };
+    // Don't round-trip an incomplete row: a milestone with no amount field can never
+    // produce an amount, and the server rejects it. Keep the edit local until it's usable.
+    if (!body.label || !body.amountField) {
+      setMilestones((prev) => prev.map((m) => (m.id === id ? body : m)));
+      return;
+    }
     try {
-      const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to remove item mapping');
-      setItemMaps((prev) => prev.filter((m) => m.id !== id));
+      const res = await fetchWithAuth(`/api/quickbooks/milestones/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          label: body.label,
+          amountField: body.amountField,
+          dateField: body.dateField || null,
+          sortOrder: body.sortOrder ?? 0,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? 'Could not save this milestone');
+      setMilestones((prev) => prev.map((m) => (m.id === id ? data.definition : m)));
     } catch (err) {
-      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+      toast({ title: 'Could not save the milestone', description: err.message, variant: 'destructive' });
     }
   }
 
-  // ── Milestone field mapping (amount/date per milestone → Synergy field) ─────
-  const MILESTONES = [
-    { type: 'deposit', label: 'Deposit', hasDate: false },
-    { type: 'materials_delivery', label: 'Materials Delivery', hasDate: true },
-    { type: 'roof_completion', label: 'Roof Completion', hasDate: true },
-    { type: 'project_completion', label: 'Project Completion', hasDate: true },
-  ];
-  const msMap = (kind, type) => milestoneMaps.find((m) => m.mapperType === kind && m.externalKey === type);
+  // Local-only until it has both required parts; created server-side on first valid save.
+  function addMilestoneRow() {
+    setMilestones((prev) => [
+      ...prev,
+      { id: `new-${Date.now()}`, label: '', amountField: '', dateField: '', sortOrder: prev.length, isNew: true },
+    ]);
+  }
 
-  async function setMilestoneMap(kind, type, ghlValue) {
+  async function commitNewMilestone(tempId, patch) {
+    const current = milestones.find((m) => m.id === tempId);
+    const body = { ...current, ...patch };
+    setMilestones((prev) => prev.map((m) => (m.id === tempId ? body : m)));
+    if (!body.label || !body.amountField) return; // still incomplete — stay local
     try {
-      if (!ghlValue) {
-        const existing = msMap(kind, type);
-        if (existing) {
-          const res = await fetchWithAuth(`/api/mappers/${existing.id}`, { method: 'DELETE' });
-          if (!res.ok) throw new Error('Failed to clear mapping');
-          setMilestoneMaps((prev) => prev.filter((m) => m.id !== existing.id));
-        }
-        return;
-      }
-      const res = await fetchWithAuth('/api/mappers', {
+      const res = await fetchWithAuth('/api/quickbooks/milestones', {
         method: 'POST',
-        body: JSON.stringify({ appSlug: 'quickbooks', mapperType: kind, externalKey: type, ghlValue }),
+        body: JSON.stringify({
+          label: body.label,
+          amountField: body.amountField,
+          dateField: body.dateField || null,
+          sortOrder: body.sortOrder ?? 0,
+        }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to save mapping');
-      setMilestoneMaps((prev) => [
-        ...prev.filter((m) => !(m.mapperType === kind && m.externalKey === type)),
-        data.mapper,
-      ]);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? 'Could not add this milestone');
+      setMilestones((prev) => prev.map((m) => (m.id === tempId ? data.definition : m)));
     } catch (err) {
-      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+      toast({ title: 'Could not add the milestone', description: err.message, variant: 'destructive' });
+    }
+  }
+
+  async function removeMilestone(id) {
+    const row = milestones.find((m) => m.id === id);
+    if (row?.isNew) { // never persisted — just drop it
+      setMilestones((prev) => prev.filter((m) => m.id !== id));
+      return;
+    }
+    try {
+      const res = await fetchWithAuth(`/api/quickbooks/milestones/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Could not remove this milestone');
+      setMilestones((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Could not remove the milestone', description: err.message, variant: 'destructive' });
     }
   }
 
@@ -376,43 +703,169 @@ export default function QuickBooks() {
           <p className="text-muted-foreground mt-1">Connect your QuickBooks Online company via secure OAuth.</p>
         </div>
 
-        {/* Connection + connect/disconnect stay narrow — they are short, single-column content */}
-        <div className="max-w-lg space-y-6">
-        {/* Connection Status */}
+        {/* Connection + connect/disconnect stay narrow — they are short, single-column
+            content. 2xl rather than lg because the status row now carries TWO buttons
+            (Test + Disconnect); at lg the company/verified line truncated to "· pr…". */}
+        <div className="max-w-2xl space-y-6">
+        {/* ── Connection Status ──────────────────────────────────────────────────
+            THREE states, not two. The old card had exactly one input — does a
+            credential row exist — so it could only ever say "Connected" or "Not
+            connected", and it said "Connected" for 20+ hours on 2026-07-28 while both
+            live locations' syncs failed on every run. Row-existence is now only the
+            headline; whether the credential WORKS is a separate signal. */}
         <Card>
           <CardContent className="pt-4 pb-4">
             <div className="flex items-center gap-3">
-              {isConnected
-                ? <CheckCircle2 className="h-5 w-5 shrink-0" style={{ color: '#1b7895' }} />
-                : <XCircle className="h-5 w-5 shrink-0 text-muted-foreground" />
+              {!isConnected
+                ? <XCircle className="h-5 w-5 shrink-0 text-muted-foreground" />
+                : isBroken
+                  ? <AlertTriangle className="h-5 w-5 shrink-0" style={{ color: '#e53e3e' }} />
+                  : isHealthy
+                    ? <CheckCircle2 className="h-5 w-5 shrink-0" style={{ color: '#1b7895' }} />
+                    /* 'unverified': a credential exists but has not been observed working.
+                       A grey clock, NOT a green check — the whole point of this change is
+                       that the page must not assert what it has not seen. */
+                    : <HelpCircle className="h-5 w-5 shrink-0 text-muted-foreground" />
               }
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium" style={{ color: '#3d3672' }}>
-                  {isConnected ? 'Connected' : 'Not connected'}
+                <p className="text-sm font-medium" style={{ color: isBroken ? '#e53e3e' : '#3d3672' }}>
+                  {!isConnected
+                    ? (configFailed ? 'Status unavailable' : 'Not connected')
+                    : isBroken
+                      ? 'Action needed — reconnect QuickBooks'
+                      : isHealthy
+                        ? `Connected${companyName ? ` to ${companyName}` : ''}`
+                        : 'Connected — not verified yet'}
                 </p>
                 {isConnected && (
                   <p className="text-sm text-muted-foreground truncate">
-                    Company (realm) {config.realmId} · {config.environment}
+                    {/* The NAME leads, the realm id is the secondary detail. Showing only
+                        realm 9341457557313092 is why the same QuickBooks company sat
+                        connected to two sub-accounts without anyone noticing. Rendered for
+                        EVERY connected state, not just the healthy one — knowing which
+                        company you're looking at matters most when it's broken. */}
+                    {companyName ? `${companyName} · ` : ''}Company {config.realmId} · {config.environment}
+                    {isHealthy && health?.lastOkAt && ` · verified ${timeAgo(health.lastOkAt)}`}
+                    {isBroken && health?.lastErrorAt && ` · failing since ${timeAgo(health.lastErrorAt)}`}
+                  </p>
+                )}
+                {/* A backend/session failure is not evidence about QuickBooks either way. */}
+                {!isConnected && configFailed && (
+                  <p className="text-sm text-muted-foreground">
+                    BuildBridge could not load the connection status. Reload the page, or contact CSM Synergy support if it persists.
                   </p>
                 )}
               </div>
               {isConnected ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={disconnecting}
-                  onClick={handleDisconnect}
-                  className="shrink-0 gap-1.5"
-                  style={{ borderColor: '#e53e3e', color: '#e53e3e' }}
-                >
-                  <LogOut className="h-3.5 w-3.5" />
-                  {disconnecting ? 'Disconnecting…' : 'Disconnect'}
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={testing}
+                    onClick={() => probeConnection()}
+                    className="gap-1.5"
+                    title="Check right now whether BuildBridge can reach this QuickBooks company"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5${testing ? ' animate-spin' : ''}`} />
+                    {testing ? 'Testing…' : 'Test'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={disconnecting}
+                    onClick={handleDisconnect}
+                    className="gap-1.5"
+                    style={{ borderColor: '#e53e3e', color: '#e53e3e' }}
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    {disconnecting ? 'Disconnecting…' : 'Disconnect'}
+                  </Button>
+                </div>
               ) : (
-                <Badge variant="secondary">No connection</Badge>
+                <Badge variant="secondary">{configFailed ? 'Unknown' : 'No connection'}</Badge>
               )}
             </div>
+
+            {/* What to DO about it. Critical: the "Connect QuickBooks" card below is hidden
+                whenever a credential row exists, so before this block a tenant with a dead
+                token had no Reconnect affordance at all — their only route back was to
+                guess that Disconnect-then-Connect was safe. */}
+            {isBroken && (
+              <div
+                className="mt-3 rounded-md p-3"
+                style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca' }}
+              >
+                <p className="text-sm" style={{ color: '#991b1b' }}>{health.message}</p>
+                {health.lastOkAt && (
+                  <p className="mt-1 text-xs" style={{ color: '#b91c1c' }}>
+                    Last worked {timeAgo(health.lastOkAt)}. Nothing has synced since.
+                  </p>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleConnect}
+                  disabled={connecting}
+                  className="mt-2 gap-1.5 text-white"
+                  style={{ backgroundColor: '#3d3672' }}
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                  {connecting ? 'Waiting for Intuit…' : 'Reconnect QuickBooks'}
+                </Button>
+              </div>
+            )}
+
+            {/* Problems that are NOT the token. Rockwood's connection was refreshing
+                perfectly on 2026-07-29 while its sync failed 28 times on a GoHighLevel
+                400 — a card built only on token health would have shown it green. */}
+            {isConnected && openIssues.length > 0 && (
+              <div
+                className="mt-3 rounded-md p-3"
+                style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a' }}
+              >
+                <p className="text-sm font-medium" style={{ color: '#92400e' }}>
+                  {/* "currently" is load-bearing: the server only sends problems that are
+                      still happening, and saying so is what stops this reading as a history. */}
+                  {openIssues.length === 1
+                    ? 'There is currently a problem with this integration'
+                    : `There are currently ${openIssues.length} problems with this integration`}
+                  {hiddenIssueCount > 0 && ` (${hiddenIssueCount} more not shown)`}
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {openIssues.map((iss, i) => (
+                    <li key={`${(iss.kinds ?? []).join('-') || 'issue'}-${i}`} className="text-xs" style={{ color: '#b45309' }}>
+                      {iss.summary}
+                      {/* ALWAYS show when it last happened, not only when it repeated. Four of
+                          the five lines on the 2026-07-29 report carried no time at all, so a
+                          one-off from yesterday read exactly like something happening now. */}
+                      {iss.lastSeenAt && (
+                        <span className="opacity-80">
+                          {' ('}
+                          {iss.count > 1 ? `${iss.count} times, most recently ` : ''}
+                          {timeAgo(iss.lastSeenAt)}
+                          {')'}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs" style={{ color: '#b45309' }}>
+                  CSM Synergy support can see the technical detail — send them this page.
+                </p>
+              </div>
+            )}
+
+            {/* Freshness. Absent for a location that has never completed a full pass, which
+                must read as "never" — not be quietly omitted, and never as "just now". */}
+            {isConnected && syncHealth && (
+              <p className="mt-3 text-xs text-muted-foreground">
+                {syncHealth.lastSyncAt
+                  ? `Last completed sync ${timeAgo(syncHealth.lastSyncAt)}. BuildBridge checks about every 15 minutes.`
+                  : 'No sync has completed yet for this location.'}
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -456,36 +909,43 @@ export default function QuickBooks() {
         {isConnected && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
 
-        {/* LEFT column — Feature Settings: one app, opt into whichever aspects this client uses */}
-        <div className="space-y-6">
         {isConnected && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-base" style={{ color: '#3d3672' }}>Integration Settings</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2" style={{ color: '#3d3672' }}>
+                <ArrowLeftRight className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
+                Contact &amp; estimate sync
+              </CardTitle>
               <CardDescription>
-                Turn on only the parts this company needs. Both are off until you enable them.
+                Keeps contacts and estimates matching between QuickBooks and Synergy, and copies
+                mapped fields across.
               </CardDescription>
+              <TriggerNote>
+                {s.qboSyncDirection === 'off'
+                  ? <>Nothing yet — this component is off. Choose a direction below to switch it on.</>
+                  : <>Runs on a <strong>schedule, about every 15 minutes</strong>. It looks for anything
+                    changed since the last run and copies it across. No action is needed to set it off.</>}
+              </TriggerNote>
             </CardHeader>
             <CardContent className="space-y-6">
               {/* Contact & estimate sync direction (Rockwood model) */}
               <div>
                 <div className="flex items-center gap-2">
                   <RefreshCw className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
-                  <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Contact &amp; estimate sync</p>
+                  <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Direction</p>
                 </div>
                 <p className="text-xs text-muted-foreground mt-1 mb-2">
                   Choose how contacts and estimates move between QuickBooks and Synergy.
                 </p>
-                <select
+                <Select
                   value={s.qboSyncDirection ?? 'off'}
                   onChange={(e) => setField('qboSyncDirection')(e.target.value)}
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <option value="off">Off — no contact/estimate sync</option>
                   <option value="qb_to_ghl">QuickBooks → Synergy (read-only; never changes QuickBooks)</option>
                   <option value="ghl_to_qb">Synergy → QuickBooks</option>
                   <option value="two_way">Two-way (last edit wins)</option>
-                </select>
+                </Select>
                 {s.qboSyncDirection === 'qb_to_ghl' && (
                   <p className="text-xs text-muted-foreground mt-1.5">
                     QuickBooks stays the source of truth — anything updated there flows into Synergy, and BuildBridge never writes back to QuickBooks.
@@ -498,44 +958,85 @@ export default function QuickBooks() {
                 <div className="space-y-4 pl-6">
                   {/* Salesperson: QB custom field → Synergy custom field */}
                   <div className="space-y-1.5">
-                    <Label htmlFor="assignedField">Salesperson — QuickBooks field name</Label>
-                    <Input
+                    <Label htmlFor="assignedField">Salesperson — QuickBooks field</Label>
+                    {/* Dropdown fed by the live QuickBooks field list (same source as
+                        the Field mappings card) — typing field names invites typos and
+                        silent mismatches. A saved value missing from the fetched list
+                        stays selectable so a transient fetch failure can't wipe it. */}
+                    <Select
                       id="assignedField"
-                      placeholder="e.g. Salesperson"
                       value={s.qboAssignedUserField ?? ''}
-                      onChange={(e) => setField('qboAssignedUserField')(e.target.value)}
-                    />
+                      onChange={(e) => setField('qboAssignedUserField')(e.target.value || null)}
+                    >
+                      <option value="">— none —</option>
+                      {s.qboAssignedUserField &&
+                        !qbFields.some((f) => f.name === s.qboAssignedUserField) && (
+                          <option value={s.qboAssignedUserField}>
+                            {s.qboAssignedUserField} (saved)
+                          </option>
+                        )}
+                      {qbFields.map((f) => (
+                        <option key={f.id ?? f.name} value={f.name}>{f.name}</option>
+                      ))}
+                    </Select>
+                    {qbFields.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        {qbFieldsUnavailable
+                          /* Never claim the company has no fields when we could not ask. */
+                          ? 'BuildBridge could not read the custom fields from QuickBooks — fix the connection above, then reload.'
+                          : 'No custom fields in this QuickBooks company yet — create one with the button below and it will appear here.'}
+                      </p>
+                    )}
                     <Label htmlFor="assignedGhl" className="pt-1 block">Copy it into this Synergy field</Label>
-                    <select
+                    <Select
                       id="assignedGhl"
                       value={s.qboAssignedUserGhlField ?? ''}
                       onChange={(e) => setField('qboAssignedUserGhlField')(e.target.value || null)}
-                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       <option value="">— none —</option>
                       {ghlFields.map((f) => (
                         <option key={f.id ?? f.key} value={f.id ?? f.key}>{f.label}</option>
                       ))}
-                    </select>
+                    </Select>
                     <p className="text-xs text-muted-foreground">
                       The salesperson from that QuickBooks field is copied into this Synergy custom field. Set both to enable.
                     </p>
+                    {/* QBO's UI no longer offers legacy sales-form custom fields, and
+                        only legacy fields are visible to the API — so the app creates
+                        the field itself via the QuickBooks API. */}
+                    <div className="pt-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={creatingField}
+                        onClick={handleCreateSalespersonField}
+                        className="gap-1.5"
+                        style={{ borderColor: '#1b7895', color: '#1b7895' }}
+                      >
+                        <RefreshCw className={creatingField ? 'h-3.5 w-3.5 animate-spin' : 'h-3.5 w-3.5'} />
+                        {creatingField ? 'Creating in QuickBooks…' : 'Create "Salesperson" field in QuickBooks'}
+                      </Button>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Adds a "Salesperson" custom field to this company's sales forms
+                        (estimates/invoices) so it can be filled in QuickBooks and synced here.
+                      </p>
+                    </div>
                   </div>
 
                   {/* QB estimate/invoice status → Synergy custom field */}
                   <div className="space-y-1.5">
                     <Label htmlFor="statusGhl">QuickBooks estimate/invoice status → Synergy field</Label>
-                    <select
+                    <Select
                       id="statusGhl"
                       value={s.qboStatusGhlField ?? ''}
                       onChange={(e) => setField('qboStatusGhlField')(e.target.value || null)}
-                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       <option value="">— none —</option>
                       {ghlFields.map((f) => (
                         <option key={f.id ?? f.key} value={f.id ?? f.key}>{f.label}</option>
                       ))}
-                    </select>
+                    </Select>
                     <p className="text-xs text-muted-foreground">
                       When an estimate or invoice is created/sent in QuickBooks, this Synergy field is updated
                       (Estimate created → Estimate sent → Accepted → Invoiced). QuickBooks is never modified.
@@ -548,94 +1049,20 @@ export default function QuickBooks() {
               {(s.qboSyncDirection === 'ghl_to_qb' || s.qboSyncDirection === 'two_way') && (
                 <div className="space-y-1.5 pl-6">
                   <Label htmlFor="pipeline">Push contacts to QuickBooks from pipeline</Label>
-                  <select
+                  <Select
                     id="pipeline"
                     value={s.qboContactSyncPipelineId ?? ''}
                     onChange={(e) => setField('qboContactSyncPipelineId')(e.target.value || null)}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <option value="">All contacts (no pipeline filter)</option>
                     {pipelines.map((p) => (
                       <option key={p.id} value={p.id}>{p.name}</option>
                     ))}
-                  </select>
+                  </Select>
                   <p className="text-xs text-muted-foreground">
                     Only create QuickBooks customers for contacts that have an opportunity in this pipeline
                     (e.g. once a lead moves into "Buildings"). Edits to already-synced contacts always flow through.
                   </p>
-                </div>
-              )}
-
-              <div className="h-px bg-border" />
-
-              {/* Milestone invoicing (Yoder) */}
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <Receipt className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
-                    <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Milestone auto-invoicing</p>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    When an opportunity is Won, create the QuickBooks customer and schedule milestone invoices
-                    (deposit, materials, roof, completion).
-                  </p>
-                </div>
-                <Toggle checked={s.qboMilestoneInvoicing} onChange={setField('qboMilestoneInvoicing')} />
-              </div>
-
-              {s.qboMilestoneInvoicing && (
-                <div className="space-y-3 pl-6">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="leadDays">Invoice lead time (days before each milestone date)</Label>
-                    <Input
-                      id="leadDays"
-                      type="number"
-                      min="0"
-                      className="max-w-[120px]"
-                      value={s.qboInvoiceLeadDays ?? 3}
-                      onChange={(e) => setField('qboInvoiceLeadDays')(e.target.value)}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      The deposit is invoiced immediately on Won; the others this many days before their date.
-                    </p>
-                  </div>
-                  <div className="space-y-2 pt-1">
-                    <p className="text-xs font-medium" style={{ color: '#3d3672' }}>Milestone field mapping</p>
-                    <p className="text-xs text-muted-foreground">
-                      Pick the Synergy field that holds each milestone's amount (and date). The deposit has no date — it invoices on Won.
-                    </p>
-                    {MILESTONES.map((ms) => (
-                      <div key={ms.type} className="grid grid-cols-[120px_1fr] items-center gap-2">
-                        <span className="text-xs" style={{ color: '#3d3672' }}>{ms.label}</span>
-                        <div className="flex gap-2">
-                          <select
-                            aria-label={`${ms.label} amount field`}
-                            value={msMap('milestone_amount', ms.type)?.ghlValue ?? ''}
-                            onChange={(e) => setMilestoneMap('milestone_amount', ms.type, e.target.value)}
-                            className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          >
-                            <option value="">Amount field…</option>
-                            {ghlFields.map((f) => (
-                              <option key={`a-${ms.type}-${f.id ?? f.key}`} value={f.key ?? f.id}>{f.label}</option>
-                            ))}
-                          </select>
-                          {ms.hasDate && (
-                            <select
-                              aria-label={`${ms.label} date field`}
-                              value={msMap('milestone_date', ms.type)?.ghlValue ?? ''}
-                              onChange={(e) => setMilestoneMap('milestone_date', ms.type, e.target.value)}
-                              className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <option value="">Date field…</option>
-                              {ghlFields.map((f) => (
-                                <option key={`d-${ms.type}-${f.id ?? f.key}`} value={f.key ?? f.id}>{f.label}</option>
-                              ))}
-                            </select>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                 </div>
               )}
 
@@ -654,10 +1081,6 @@ export default function QuickBooks() {
           </Card>
         )}
 
-        </div>{/* /left column */}
-
-        {/* RIGHT column — the two mapping cards */}
-        <div className="space-y-6">
 
         {/* Field mappings — QuickBooks custom field ↔ Synergy field */}
         {isConnected && (
@@ -668,6 +1091,10 @@ export default function QuickBooks() {
                 Map a QuickBooks custom field to a Synergy field. A field that's already mapped is greyed
                 out so it can't be used twice.
               </CardDescription>
+              <TriggerNote>
+                Used by the sync beside this card — <strong>every 15 minutes</strong>, on the same run.
+                Adding a mapping here changes what that sync copies; it does not run anything on its own.
+              </TriggerNote>
             </CardHeader>
             <CardContent className="space-y-4">
               {mappings.length > 0 ? (
@@ -696,11 +1123,10 @@ export default function QuickBooks() {
               <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
                 <div className="space-y-1 min-w-0">
                   <Label htmlFor="mapQb" className="text-xs">QuickBooks field</Label>
-                  <select
+                  <Select
                     id="mapQb"
                     value={mapDraft.qb}
                     onChange={(e) => setMapDraft((d) => ({ ...d, qb: e.target.value }))}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <option value="">Select…</option>
                     {qbFields.map((f) => (
@@ -708,16 +1134,15 @@ export default function QuickBooks() {
                         {f.name}{usedQb.has(f.id) ? ' (mapped)' : ''}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
                 <ArrowRight className="mb-2.5 h-4 w-4 shrink-0 text-muted-foreground" />
                 <div className="space-y-1 min-w-0">
                   <Label htmlFor="mapGhl" className="text-xs">Synergy field</Label>
-                  <select
+                  <Select
                     id="mapGhl"
                     value={mapDraft.ghl}
                     onChange={(e) => setMapDraft((d) => ({ ...d, ghl: e.target.value }))}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <option value="">Select…</option>
                     {ghlFields.map((f) => {
@@ -728,7 +1153,7 @@ export default function QuickBooks() {
                         </option>
                       );
                     })}
-                  </select>
+                  </Select>
                 </div>
               </div>
 
@@ -744,111 +1169,227 @@ export default function QuickBooks() {
 
               {qbFields.length === 0 && (
                 <p className="text-xs text-muted-foreground">
-                  No QuickBooks custom fields found yet. Reconnect QuickBooks (and make sure custom fields are
-                  set up in the QuickBooks company), then reload to populate this list.
+                  {qbFieldsUnavailable
+                    ? 'BuildBridge could not read the custom fields from QuickBooks, so this list is empty for that reason — not because the company has none. Fix the connection at the top of this page, then reload.'
+                    : 'No QuickBooks custom fields found yet. Make sure custom fields are set up in the QuickBooks company, then reload to populate this list.'}
                 </p>
               )}
             </CardContent>
           </Card>
         )}
 
-        {/* Item mappings — QuickBooks item ↔ Synergy field */}
+        </div>
+        )}{/* /config grid */}
+
+        {/* ══ COMPONENT 2 — Milestone invoicing (SmartBuild / post-frame model) ══════
+            Its own component, not a sub-section of the sync above, because a client can
+            run either one or both: Yoder Barnes sells sheds through one model and post-frame
+            through this one. Enabling this must not require enabling the other. */}
         {isConnected && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-base" style={{ color: '#3d3672' }}>Item mappings</CardTitle>
-              <CardDescription>
-                Map a QuickBooks item (product/service — e.g. a building, ramp, or window) to the Synergy
-                field that selects it. When a deal is invoiced, the mapped item is billed instead of the
-                generic default item. An item that's already mapped is greyed out.
-              </CardDescription>
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <CardTitle className="text-base flex items-center gap-2" style={{ color: '#3d3672' }}>
+                    <Receipt className="h-4 w-4 shrink-0" style={{ color: '#1b7895' }} />
+                    Milestone invoicing
+                  </CardTitle>
+                  <CardDescription>
+                    For jobs billed in stages — a deposit, then payments as the build progresses.
+                  </CardDescription>
+                </div>
+                {/* Saves on the spot — see saveMilestoneSettings. This card has no Save button
+                    because everything in it persists as you change it. */}
+                <Toggle
+                  checked={s.qboMilestoneInvoicing}
+                  onChange={(v) => saveMilestoneSettings({ qboMilestoneInvoicing: v })}
+                />
+              </div>
+              <TriggerNote>
+                Marking an opportunity <strong>Won</strong> builds its invoice schedule. Each milestone's
+                invoice is then created <strong>{s.qboInvoiceLeadDays ?? 3} day{(s.qboInvoiceLeadDays ?? 3) === 1 ? '' : 's'} before
+                the date in its date field</strong> — so filling that date in is what creates the invoice.
+                A milestone with no date field is invoiced as soon as the deal is Won.
+              </TriggerNote>
             </CardHeader>
-            <CardContent className="space-y-4">
-              {itemMaps.length > 0 ? (
-                <ul className="space-y-2">
-                  {itemMaps.map((m) => (
-                    <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
-                      <span className="font-medium truncate" style={{ color: '#3d3672' }}>{itemLabel(m.externalKey)}</span>
-                      <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <span className="truncate" style={{ color: '#1b7895' }}>{ghlLabel(m.ghlValue)}</span>
-                      <button
-                        type="button"
-                        onClick={() => deleteItemMapping(m.id)}
-                        className="ml-auto shrink-0 text-muted-foreground hover:text-destructive"
-                        aria-label="Remove item mapping"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-muted-foreground">No item mappings yet.</p>
-              )}
 
-              {/* Add a mapping: QuickBooks item → Synergy field */}
-              <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
-                <div className="space-y-1 min-w-0">
-                  <Label htmlFor="mapItem" className="text-xs">QuickBooks item</Label>
-                  <select
-                    id="mapItem"
-                    value={itemDraft.item}
-                    onChange={(e) => setItemDraft((d) => ({ ...d, item: e.target.value }))}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            {s.qboMilestoneInvoicing && (
+              <CardContent className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="leadDays">Create each invoice this far ahead of its date</Label>
+                  <Select
+                    id="leadDays"
+                    className="max-w-[220px]"
+                    value={String(s.qboInvoiceLeadDays ?? 3)}
+                    onChange={(e) => saveMilestoneSettings({ qboInvoiceLeadDays: e.target.value })}
                   >
-                    <option value="">Select…</option>
-                    {qbItems.map((i) => (
-                      <option key={i.id} value={i.id} disabled={usedItems.has(i.id)}>
-                        {i.name}{i.unitPrice != null ? ` ($${i.unitPrice})` : ''}{usedItems.has(i.id) ? ' (mapped)' : ''}
+                    {/* A dropdown rather than a number box: nothing on this page should need
+                        typing, and these are the only values anyone actually picks. */}
+                    {[0, 1, 2, 3, 5, 7, 10, 14, 21, 30].map((n) => (
+                      <option key={n} value={String(n)}>
+                        {n === 0 ? 'On the milestone date' : `${n} day${n === 1 ? '' : 's'} before`}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
-                <ArrowRight className="mb-2.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                <div className="space-y-1 min-w-0">
-                  <Label htmlFor="mapItemGhl" className="text-xs">Synergy field</Label>
-                  <select
-                    id="mapItemGhl"
-                    value={itemDraft.ghl}
-                    onChange={(e) => setItemDraft((d) => ({ ...d, ghl: e.target.value }))}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+
+                {/* Replaces the old Item Mappings card. A milestone invoice has no product
+                    selection to read — it bills a stage of a job — so there is one choice per
+                    client, not one per field. */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="milestoneItem">Bill milestone invoices as</Label>
+                  <Select
+                    id="milestoneItem"
+                    className="max-w-[320px]"
+                    value={milestoneItemId}
+                    disabled={savingItemMap}
+                    onChange={(e) => setMilestoneItem(e.target.value)}
                   >
-                    <option value="">Select…</option>
-                    {ghlFields.map((f) => {
-                      const id = f.id ?? f.key;
-                      return (
-                        <option key={id} value={id} disabled={usedItemGhl.has(id)}>
-                          {f.label}{usedItemGhl.has(id) ? ' (mapped)' : ''}
-                        </option>
-                      );
-                    })}
-                  </select>
+                    <option value="">QuickBooks' default item</option>
+                    {qbItems.map((i) => (
+                      <option key={i.id} value={i.id}>
+                        {i.name}{i.unitPrice != null ? ` ($${i.unitPrice})` : ''}
+                      </option>
+                    ))}
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {itemMaps.length > 1 ? (
+                      <>
+                        This company has <strong>{itemMaps.length} items</strong> saved from the older
+                        setup, so BuildBridge can't tell which one to bill and falls back to QuickBooks'
+                        default. Pick one above to replace them.
+                      </>
+                    ) : qbItems.length === 0 ? (
+                      qbItemsUnavailable
+                        ? "BuildBridge could not read Products & Services from QuickBooks, so this list is empty for that reason — not because the company has none. Fix the connection at the top of this page, then reload."
+                        : 'No QuickBooks items found yet. Add a product or service in QuickBooks, then reload. Until then invoices use QuickBooks’ default item.'
+                    ) : (
+                      <>
+                        The product or service every milestone invoice is billed against.
+                        {milestoneItemMap
+                          ? <> Currently <strong>{itemLabel(milestoneItemId)}</strong>.</>
+                          : ' Leave this alone to let QuickBooks choose.'}
+                      </>
+                    )}
+                  </p>
                 </div>
-              </div>
 
-              <Button
-                type="button"
-                onClick={addItemMapping}
-                disabled={savingItemMap || !itemDraft.item || !itemDraft.ghl}
-                className="text-white"
-                style={{ backgroundColor: '#3d3672' }}
-              >
-                {savingItemMap ? 'Adding…' : 'Add item mapping'}
-              </Button>
+                <div className="space-y-2 pt-1">
+                  <p className="text-xs font-medium" style={{ color: '#3d3672' }}>Your milestones</p>
+                  <p className="text-xs text-muted-foreground">
+                    Pick the opportunity field holding each milestone's amount, and the field holding its
+                    date. The name is taken from the field you pick — edit it if you want something
+                    different on the invoice.
+                  </p>
 
-              {qbItems.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  No QuickBooks items found yet. Make sure Products &amp; Services exist in the QuickBooks
-                  company, then reconnect / reload to populate this list.
-                </p>
-              )}
-            </CardContent>
+                  {milestones.length === 0 && (
+                    <p className="text-xs text-muted-foreground pt-1">
+                      No milestones yet. Add one below — for example an amount field called
+                      “Deposit” with no date (invoiced on Won), then “Materials Delivered” with its
+                      matching date field.
+                    </p>
+                  )}
+
+                  {milestones.map((ms) => {
+                    const commit = ms.isNew
+                      ? (patch) => commitNewMilestone(ms.id, patch)
+                      : (patch) => saveMilestone(ms.id, patch);
+                    return (
+                      <div key={ms.id} className="rounded-md border border-input p-2.5 space-y-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <Label className="text-xs">Amount field</Label>
+                            <Select
+                              size="compact"
+                              aria-label="Milestone amount field"
+                              value={ms.amountField ?? ''}
+                              onChange={(e) => {
+                                const amountField = e.target.value;
+                                // Auto-name from the chosen field, but never clobber a name
+                                // the user has already edited.
+                                //
+                                // `autoLabel` is CLIENT-ONLY and deliberately so: the server
+                                // neither stores nor returns it, so saveMilestone's
+                                // `setMilestones(... data.definition)` drops it on every save.
+                                // That is what makes this safe rather than a bug — read it as
+                                // "autoLabel is only ever true for a row still being built
+                                // locally". Persisted row → undefined → the `ms.label` branch
+                                // wins and a hand-typed name survives. Row still local and
+                                // auto-named → true → the name re-derives as you try different
+                                // amount fields, which is the point.
+                                //
+                                // So do NOT "fix" this by persisting autoLabel: that would make
+                                // a saved auto-name re-derive on the next amount-field change,
+                                // silently rewriting a line that prints on a real invoice.
+                                const label = ms.label && !ms.autoLabel ? ms.label : deriveMilestoneLabel(amountField);
+                                commit({ amountField, label, autoLabel: true });
+                              }}
+                            >
+                              <option value="">Choose a field…</option>
+                              {milestoneFieldOptions.map((f) => (
+                                <option key={`a-${ms.id}-${f.id ?? f.key}`} value={f.id ?? f.key}>{f.label}</option>
+                              ))}
+                            </Select>
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Date field</Label>
+                            <Select
+                              size="compact"
+                              aria-label="Milestone date field"
+                              value={ms.dateField ?? ''}
+                              onChange={(e) => commit({ dateField: e.target.value })}
+                            >
+                              {/* The explicit "no date" choice. This is what used to be the
+                                  hard-coded deposit special case. */}
+                              <option value="">None — invoice as soon as it's Won</option>
+                              {milestoneFieldOptions.map((f) => (
+                                <option key={`d-${ms.id}-${f.id ?? f.key}`} value={f.id ?? f.key}>{f.label}</option>
+                              ))}
+                            </Select>
+                          </div>
+                        </div>
+                        <div className="flex items-end gap-2">
+                          <div className="space-y-1 flex-1 min-w-0">
+                            <Label className="text-xs">Name on the invoice</Label>
+                            <Input
+                              className="h-9 text-xs"
+                              placeholder="Taken from the amount field"
+                              value={ms.label ?? ''}
+                              onChange={(e) => setMilestones((prev) => prev.map((m) => (
+                                m.id === ms.id ? { ...m, label: e.target.value, autoLabel: false } : m
+                              )))}
+                              onBlur={() => commit({ label: ms.label, autoLabel: false })}
+                            />
+                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Remove milestone"
+                            className="shrink-0"
+                            onClick={() => removeMilestone(ms.id)}
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {ms.dateField
+                            ? `Invoices ${s.qboInvoiceLeadDays ?? 3} day${(s.qboInvoiceLeadDays ?? 3) === 1 ? '' : 's'} before ${ghlLabel(ms.dateField)} is reached.`
+                            : 'Invoices as soon as the opportunity is marked Won.'}
+                        </p>
+                      </div>
+                    );
+                  })}
+
+                  <Button type="button" variant="outline" size="sm" onClick={addMilestoneRow} className="gap-1.5">
+                    <Plus className="h-3.5 w-3.5" />
+                    Add milestone
+                  </Button>
+                </div>
+              </CardContent>
+            )}
           </Card>
         )}
-
-        </div>{/* /right column */}
-        </div>
-        )}{/* /config grid */}
 
         {/* Embedded setup guide — the config is the top of the page; this reference sits below it */}
         <Card>
@@ -867,26 +1408,38 @@ export default function QuickBooks() {
           {guideOpen && (
             <CardContent className="space-y-4 text-sm text-muted-foreground">
               <div>
-                <p className="font-medium" style={{ color: '#3d3672' }}>What it does</p>
-                <p className="mt-1">BuildBridge links QuickBooks and Synergy so information flows automatically — no double entry. Use either or both:</p>
+                <p className="font-medium" style={{ color: '#3d3672' }}>Two parts, switched on separately</p>
+                <p className="mt-1">
+                  BuildBridge links QuickBooks and Synergy so information flows automatically — no double
+                  entry. There are two parts, and they work independently: use one, or run both
+                  together. Each is triggered by something different, which is the important bit:
+                </p>
                 <ul className="mt-1 list-disc space-y-1 pl-5">
-                  <li><strong>Keep Synergy up to date from QuickBooks</strong> — contact details, salesperson, and estimate/invoice status appear in Synergy. QuickBooks is never changed.</li>
-                  <li><strong>Automatic milestone invoicing</strong> — when a deal is Won, create the QuickBooks customer and schedule staged invoices.</li>
+                  <li>
+                    <strong>Contact &amp; estimate sync</strong> — keeps contacts, salesperson and
+                    estimate/invoice status matching, and copies your mapped fields across.
+                    <em> Triggered on a schedule, roughly every 15 minutes.</em>
+                  </li>
+                  <li>
+                    <strong>Milestone invoicing</strong> — for jobs billed in stages.
+                    <em> Triggered by your own opportunity fields: marking the deal Won builds the
+                    schedule, and filling in a milestone's date field is what creates that invoice.</em>
+                  </li>
                 </ul>
               </div>
               <div>
                 <p className="font-medium" style={{ color: '#3d3672' }}>Setup</p>
                 <ol className="mt-1 list-decimal space-y-1 pl-5">
-                  <li>Click <strong>Connect to QuickBooks</strong> and approve access at Intuit (no passwords are stored).</li>
-                  <li>Choose a <strong>Contact &amp; estimate sync</strong> direction — QuickBooks → Synergy is read-only and safe.</li>
-                  <li>Map the fields you want under <strong>Field mappings</strong> (QuickBooks field → Synergy field).</li>
-                  <li>Optionally map QuickBooks <strong>items</strong> (buildings, ramps, windows…) under <strong>Item mappings</strong> so invoices/estimates bill the right line item.</li>
-                  <li>Optionally turn on <strong>milestone auto-invoicing</strong> and map each milestone's amount/date field.</li>
-                  <li>Save. BuildBridge checks for updates automatically about every 15 minutes.</li>
+                  <li>Click <strong>Connect to QuickBooks</strong> and approve access at Intuit (no passwords are stored). Check the company name shown afterwards is the right business.</li>
+                  <li>If you want the sync: choose a <strong>direction</strong> — QuickBooks → Synergy is read-only and safe — then add any <strong>Field mappings</strong>.</li>
+                  <li>If you bill in stages: turn on <strong>Milestone invoicing</strong> and add a milestone for each stage, choosing the opportunity field that holds its amount and the one that holds its date. Leave the date blank for anything billed straight away, like a deposit. Optionally pick which QuickBooks product or service those invoices are billed as.</li>
+                  <li>Save. Nothing needs to be run by hand.</li>
                 </ol>
               </div>
               <div>
                 <p className="font-medium" style={{ color: '#3d3672' }}>Common questions</p>
+                <p className="mt-1"><strong>Can I use more than one part at once?</strong> Yes — that's the point of them being separate. Selling sheds through one process and post-frame buildings through another is a normal setup.</p>
+                <p className="mt-1"><strong>Why hasn't a milestone been invoiced?</strong> Most often its date field hasn't been filled in on the opportunity yet, or the deal isn't marked Won. Each milestone above shows exactly what it's waiting for.</p>
                 <p className="mt-1"><strong>Will this change my QuickBooks?</strong> Not in QuickBooks → Synergy mode — it only reads. It writes to QuickBooks only if you pick "Synergy → QuickBooks", "Two-way", or milestone invoicing.</p>
                 <p className="mt-1"><strong>Is it secure?</strong> You approve access on Intuit's own sign-in; your password is never stored. You can disconnect any time above.</p>
               </div>
