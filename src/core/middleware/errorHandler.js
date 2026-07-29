@@ -40,14 +40,26 @@ export async function errorHandler(err, req, res, _next) {
   // Persist anything that is a real failure. 4xx caused by the caller (400/401/403/
   // 404/409/422) is normal traffic and would only add noise; upstream-attributed
   // 4xx (a GHL/QBO 401 etc.) IS recorded because it means the integration is broken.
+  //
+  // EXCEPTION — install/sign-in paths: a 4xx on /auth/* or /api/sso/* is never
+  // "normal caller traffic", it is a tenant who could not get in. On 2026-07-27 a
+  // 400 "Invalid or expired OAuth state" blocked EVERY marketplace install for days
+  // and error_events stayed empty the whole time, because of the >=500 gate above.
+  // Recorded as 'warn' and deduped by fingerprint, so a scanner poking /auth/callback
+  // costs one row with a rising occurrence_count, not a flood.
   const isUpstream = Boolean(err.upstream);
-  if (status >= 500 || isUpstream) {
+  const isEntryPath = req.path?.startsWith('/auth') || req.path?.startsWith('/api/sso');
+  const isEntryFailure = status >= 400 && status < 500 && isEntryPath;
+  if (status >= 500 || isUpstream || isEntryFailure) {
     // Awaited so the write happens before the Workers runtime tears down the
     // request's I/O context (and before the res.end DB-pool cleanup runs).
     // recordThrown never throws — see errorLogService HARD RULES.
     await recordThrown(err, {
       source: 'backend',
       severity: status >= 500 ? 'error' : 'warn',
+      // Tag entry-path failures so they're greppable in triage — these are the ones
+      // that mean "a tenant is locked out", not "an integration is misbehaving".
+      kind: err.kind ?? (isEntryFailure ? 'entry_blocked' : undefined),
       httpStatus: status,
       httpMethod: req.method,
       path: req.path,
