@@ -3,13 +3,11 @@ import { Link } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card.jsx';
 import { Badge } from '../components/ui/badge.jsx';
-import { Button } from '../components/ui/button.jsx';
-import { CreditCard, Sliders, Hammer, ArrowRight } from 'lucide-react';
+import { Check, Sliders, Hammer, ArrowRight } from 'lucide-react';
 
 const QUICK_LINKS = [
-  { to: '/buildbridge/subscription', label: 'Manage Subscription', icon: CreditCard, description: 'View and change your plan' },
-  { to: '/buildbridge/quickbooks',   label: 'QuickBooks',          icon: Sliders,     description: 'Connect QuickBooks and map fields' },
-  { to: '/buildbridge/smartbuild',   label: 'SmartBuild Config',   icon: Hammer,      description: 'Set up your SmartBuild credentials' },
+  { to: '/buildbridge/quickbooks', label: 'QuickBooks',        icon: Sliders, description: 'Connect QuickBooks and map fields' },
+  { to: '/buildbridge/smartbuild', label: 'SmartBuild Config', icon: Hammer,  description: 'Set up your SmartBuild credentials' },
 ];
 
 function statusVariant(status) {
@@ -60,19 +58,22 @@ export default function Home() {
           </p>
         </div>
 
-        {/* Subscription status */}
+        {/* What's included. Every integration ships with the install, so a fresh
+            location sees "included" here — not an upsell. Legacy paid tenants still
+            see their plan badges. */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base" style={{ color: '#3d3672' }}>Subscription Status</CardTitle>
-            <CardDescription>Your currently active plans</CardDescription>
+            <CardTitle className="text-base" style={{ color: '#3d3672' }}>What's included</CardTitle>
+            <CardDescription>Active for this Synergy sub-account</CardDescription>
           </CardHeader>
           <CardContent>
             {activeSubs.length === 0 ? (
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">No active subscriptions</p>
-                <Button asChild size="sm" variant="outline" style={{ borderColor: '#1b7895', color: '#1b7895' }}>
-                  <Link to="/buildbridge/subscription">View Plans</Link>
-                </Button>
+              <div className="flex items-start gap-2">
+                <Check className="h-4 w-4 shrink-0 mt-0.5" style={{ color: '#1b7895' }} />
+                <p className="text-sm text-muted-foreground">
+                  All BuildBridge integrations are included with your install — nothing to buy.
+                  Pick one below to set it up.
+                </p>
               </div>
             ) : (
               <div className="flex flex-wrap gap-2">
@@ -87,7 +88,7 @@ export default function Home() {
         </Card>
 
         {/* Quick links */}
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2">
           {QUICK_LINKS.map(({ to, label, icon: Icon, description }) => (
             <Link key={to} to={to}>
               <Card className="h-full transition-shadow hover:shadow-md cursor-pointer" style={{ borderColor: '#1b7895' }}>

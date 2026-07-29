@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router';
 import { useAuth } from '../context/AuthProvider.jsx';
 import { Hammer, LogOut } from 'lucide-react';
@@ -6,14 +7,34 @@ import { Button } from '../components/ui/button.jsx';
 import useParentClipCompensation from '../hooks/useParentClipCompensation.js';
 
 const NAV_ITEMS = [
-  { to: '/buildbridge',              label: 'Home',              end: true },
-  { to: '/buildbridge/subscription', label: 'Subscription'                },
-  { to: '/buildbridge/smartbuild',   label: 'SmartBuild Config'           },
-  { to: '/buildbridge/quickbooks',   label: 'QuickBooks'                  },
+  { to: '/buildbridge',            label: 'Home', end: true },
+  { to: '/buildbridge/smartbuild', label: 'SmartBuild Config' },
+  { to: '/buildbridge/quickbooks', label: 'QuickBooks'        },
 ];
 
+const SUBSCRIPTION_ITEM = { to: '/buildbridge/subscription', label: 'Subscription' };
+
 export default function AppLayout() {
-  const { user, logout, loading, embedded } = useAuth();
+  const { user, logout, loading, embedded, fetchWithAuth } = useAuth();
+
+  // BuildBridge is included with the install, so a fresh tenant is never shown a
+  // billing tab. Legacy tenants with a live paid subscription keep it, so they can
+  // still see and cancel what they're being charged for. (The /subscription route
+  // itself stays registered either way.)
+  const [hasPaidPlan, setHasPaidPlan] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    fetchWithAuth('/api/subscription/mine')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled) setHasPaidPlan((d?.subscriptions ?? []).length > 0); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [user, fetchWithAuth]);
+
+  const navItems = hasPaidPlan
+    ? [NAV_ITEMS[0], SUBSCRIPTION_ITEM, ...NAV_ITEMS.slice(1)]
+    : NAV_ITEMS;
 
   // Embedded in GHL: measure how much of the iframe the parent clips below the
   // viewport and publish --bb-clip-bottom so bottom spacing compensates.
@@ -71,7 +92,7 @@ export default function AppLayout() {
 
         {/* Nav links */}
         <nav className="flex flex-1 items-center gap-1 overflow-x-auto min-w-0 scrollbar-none">
-          {NAV_ITEMS.map(({ to, label, end }) => (
+          {navItems.map(({ to, label, end }) => (
             <NavLink
               key={to}
               to={to}

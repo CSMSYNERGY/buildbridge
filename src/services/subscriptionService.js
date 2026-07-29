@@ -1,10 +1,7 @@
 import { db } from '../core/db/client.js';
 import { subscriptions, plans } from '../core/db/schema.js';
-import { eq, and, or, gt, isNull, inArray } from 'drizzle-orm';
+import { eq, and, or, gt, isNull } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-
-// Apps covered by the Suite plan
-const SUITE_APPS = ['smartbuild', 'idearoom', 'quickbooks', 'monday'];
 
 /**
  * Create a new subscription record.
@@ -100,15 +97,17 @@ export async function getActiveSubscriptions(locationId) {
 }
 
 /**
- * Check whether a location has access to a given appSlug.
- * Suite subscribers have access to all SUITE_APPS.
+ * Whether a location may use a given appSlug.
+ *
+ * Always true — every integration is included with the GHL install (decision
+ * 2026-07-27: BuildBridge is plug-and-play, no paywall). The background jobs call
+ * this per location, and they stay gated on the per-tenant settings that actually
+ * express intent: `qboSyncDirection` (defaults 'off') and `qboMilestoneInvoicing`
+ * (defaults false), so installing still never starts syncing on its own.
+ *
+ * Kept at its call sites rather than removed so paid gating can be restored by
+ * reinstating the lookup below (see git history for the original implementation).
  */
-export async function hasAccess(locationId, appSlug) {
-  const activeSubs = await getActiveSubscriptions(locationId);
-  const slugs = activeSubs.map((s) => s.appSlug);
-
-  return (
-    slugs.includes(appSlug) ||
-    (slugs.includes('suite') && SUITE_APPS.includes(appSlug))
-  );
+export async function hasAccess(_locationId, _appSlug) {
+  return true;
 }
