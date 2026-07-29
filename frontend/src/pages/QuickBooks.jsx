@@ -739,11 +739,11 @@ export default function QuickBooks() {
                 </p>
                 {isConnected && (
                   <p className="text-sm text-muted-foreground truncate">
-                    {/* The NAME leads, the realm id is the secondary detail. Showing only
-                        realm 9341457557313092 is why the same QuickBooks company sat
-                        connected to two sub-accounts without anyone noticing. Rendered for
-                        EVERY connected state, not just the healthy one — knowing which
-                        company you're looking at matters most when it's broken. */}
+                    {/* The NAME leads, the realm id is the secondary detail. Showing only a
+                        bare realm id is why the same QuickBooks company sat connected to two
+                        sub-accounts without anyone noticing. Rendered for EVERY connected
+                        state, not just the healthy one — knowing which company you're looking
+                        at matters most when it's broken. */}
                     {companyName ? `${companyName} · ` : ''}Company {config.realmId} · {config.environment}
                     {isHealthy && health?.lastOkAt && ` · verified ${timeAgo(health.lastOkAt)}`}
                     {isBroken && health?.lastErrorAt && ` · failing since ${timeAgo(health.lastErrorAt)}`}

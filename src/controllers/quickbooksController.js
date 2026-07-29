@@ -151,10 +151,10 @@ export async function handleQuickBooksCallback(req, res, next) {
       expiresAt,
     });
 
-    // Fetch and store the company name straight away, so the connection card can say
-    // "Rockwood Sheds LLC" instead of realm 9341453625832771 from the very first load.
-    // Showing only the realm id is why the same QuickBooks company sat connected to two
-    // sub-accounts unnoticed (2026-07-28).
+    // Fetch and store the company name straight away, so the connection card can name the
+    // business instead of showing a bare realm id from the very first load. Showing only the
+    // realm id is why the same QuickBooks company sat connected to two sub-accounts
+    // unnoticed (2026-07-28).
     //
     // Doubles as the first real API call with this credential, so it also stamps
     // `last_ok_at` via makeQuickBooksRequest — the connect flow becomes genuinely verified
@@ -529,8 +529,8 @@ export async function getQuickBooksHealth(req, res, next) {
  * expiry), so health updates as a side effect via makeQuickBooksRequest/saveCredentials.
  *
  * Returns the company NAME, which is the other half of the 2026-07-28 confusion: the card
- * showed only realm `9341457557313092`, so two locations pointing at the same QuickBooks
- * company looked completely normal.
+ * showed only a bare realm id, so two locations pointing at the same QuickBooks company
+ * looked completely normal.
  */
 export async function testQuickBooksConnection(req, res, next) {
   try {
