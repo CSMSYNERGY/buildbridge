@@ -42,6 +42,9 @@ const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // the same handful of records fail every 15 minutes. Observed in production 2026-07-30.
 const QB_TO_GHL_BUDGET_MS = 60_000;
 
+// Same cap for the GHL→QB half, which runs after it in the same invocation.
+const GHL_TO_QB_BUDGET_MS = 60_000;
+
 async function getSyncSince(locationId) {
   const [state] = await db
     .select()
@@ -58,6 +61,12 @@ async function getSyncSince(locationId) {
 // or unparseable — callers must never advance the cursor to a 0.
 function qbUpdatedMs(entity) {
   const t = Date.parse(entity?.MetaData?.LastUpdatedTime ?? '');
+  return Number.isFinite(t) ? t : 0;
+}
+
+// Same, for a GHL contact. 0 when absent or unparseable.
+function ghlUpdatedMs(contact) {
+  const t = Date.parse(contact?.dateUpdated ?? contact?.updatedAt ?? '');
   return Number.isFinite(t) ? t : 0;
 }
 
@@ -437,67 +446,111 @@ async function contactIdsInPipeline(locationId, pipelineId) {
   return set;
 }
 
-async function syncGhlContactsToQb(locationId, since, stats, settings) {
+async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineAt) {
   const data = await makeGhlRequest(
     locationId,
     'GET',
     `/contacts/?locationId=${encodeURIComponent(locationId)}&limit=100`,
   );
-  const contacts = data?.contacts ?? [];
+  // Oldest change first, for the same reason as the QB→GHL half: the sync cursor is a
+  // single timestamp, so a pass that can't finish may only advance it to the last
+  // record it handled. (Ordering is imposed here rather than requested from GHL — the
+  // page is already in memory and its API order is not contractual.)
+  const contacts = [...(data?.contacts ?? [])].sort(
+    (a, b) => ghlUpdatedMs(a) - ghlUpdatedMs(b),
+  );
 
   // Contact-push gating: when a pipeline is configured, only CREATE contacts
   // that have an opportunity in it. Existing linked contacts still update.
   const pipelineGate = await contactIdsInPipeline(locationId, settings?.qboContactSyncPipelineId);
 
+  let processedThrough = 0;
+  let handled = 0;
+
   for (const contact of contacts) {
     const ghlUpdatedAt = contact.dateUpdated ?? contact.updatedAt;
-    if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) continue; // unchanged
+    if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) {
+      handled++; // already covered by the cursor — not deferred work
+      continue;
+    }
 
-    const link = await getLink(locationId, 'contact', { ghlId: contact.id });
-    if (isEcho(ghlUpdatedAt, link)) continue;
+    // Budget guard — see syncQbCustomersToGhl. This half is the expensive one on a
+    // first sync: with a 30-day window every contact on the page clears the date
+    // filter, and each one costs a link lookup plus two QuickBooks round-trips.
+    if (
+      deadlineAt &&
+      Date.now() >= deadlineAt &&
+      processedThrough &&
+      ghlUpdatedMs(contact) !== processedThrough
+    ) {
+      break;
+    }
+    handled++;
+    const contactTs = ghlUpdatedMs(contact);
+    if (contactTs) processedThrough = contactTs;
 
-    const firstName = contact.firstName ?? undefined;
-    const lastName = contact.lastName ?? undefined;
-    const name = deriveContactName(contact);
+    // Per-record isolation, same polarity as the QB→GHL half. One contact QuickBooks
+    // rejects must not abort the pass: aborting means the cursor is never written, so
+    // every contact on this page gets re-pushed on the next tick, forever.
+    try {
+      const link = await getLink(locationId, 'contact', { ghlId: contact.id });
+      if (isEcho(ghlUpdatedAt, link)) continue;
 
-    if (link) {
-      // Read the QB side for SyncToken + LWW comparison
-      const current = await makeQuickBooksRequest(
-        locationId, 'GET', `/customer/${link.qbId}?minorversion=75`,
-      ).catch(() => null);
-      const customer = current?.Customer;
-      if (!customer) continue;
-      if (targetIsNewer(ghlUpdatedAt, customer.MetaData?.LastUpdatedTime)) continue; // QB wins
+      const firstName = contact.firstName ?? undefined;
+      const lastName = contact.lastName ?? undefined;
+      const name = deriveContactName(contact);
 
-      await makeQuickBooksRequest(locationId, 'POST', '/customer?minorversion=75', {
-        Id: customer.Id,
-        SyncToken: customer.SyncToken,
-        sparse: true,
-        ...(name ? { DisplayName: name } : {}),
-        ...(firstName ? { GivenName: firstName } : {}),
-        ...(lastName ? { FamilyName: lastName } : {}),
-        ...(contact.email ? { PrimaryEmailAddr: { Address: contact.email } } : {}),
-        ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: contact.phone } } : {}),
-      });
-      await touchLink(link.id);
-      stats.ghlToQbContactsUpdated++;
-    } else {
-      // Not yet in QuickBooks → only push if it clears the pipeline gate.
-      if (pipelineGate && !pipelineGate.has(String(contact.id))) {
-        stats.skipped++;
-        continue;
+      if (link) {
+        // Read the QB side for SyncToken + LWW comparison
+        const current = await makeQuickBooksRequest(
+          locationId, 'GET', `/customer/${link.qbId}?minorversion=75`,
+        ).catch(() => null);
+        const customer = current?.Customer;
+        if (!customer) continue;
+        if (targetIsNewer(ghlUpdatedAt, customer.MetaData?.LastUpdatedTime)) continue; // QB wins
+
+        await makeQuickBooksRequest(locationId, 'POST', '/customer?minorversion=75', {
+          Id: customer.Id,
+          SyncToken: customer.SyncToken,
+          sparse: true,
+          ...(name ? { DisplayName: name } : {}),
+          ...(firstName ? { GivenName: firstName } : {}),
+          ...(lastName ? { FamilyName: lastName } : {}),
+          ...(contact.email ? { PrimaryEmailAddr: { Address: contact.email } } : {}),
+          ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: contact.phone } } : {}),
+        });
+        await touchLink(link.id);
+        stats.ghlToQbContactsUpdated++;
+      } else {
+        // Not yet in QuickBooks → only push if it clears the pipeline gate.
+        if (pipelineGate && !pipelineGate.has(String(contact.id))) {
+          stats.skipped++;
+          continue;
+        }
+        const customer = await findOrCreateCustomer(locationId, {
+          name,
+          firstName,
+          lastName,
+          email: contact.email,
+          phone: contact.phone,
+        });
+        await upsertLink(locationId, 'contact', contact.id, customer.Id);
+        stats.ghlToQbContactsCreated++;
       }
-      const customer = await findOrCreateCustomer(locationId, {
-        name,
-        firstName,
-        lastName,
-        email: contact.email,
-        phone: contact.phone,
+    } catch (err) {
+      stats.ghlToQbContactsFailed++;
+      console.error(`[rockwood] contact push failed for GHL contact ${contact.id}:`, err.message);
+      await recordThrown(err, {
+        source: 'cron',
+        kind: err.kind ?? 'ghl_contact_push_failed',
+        appSlug: 'quickbooks',
+        locationId,
+        context: { job: 'rockwood-quickbooks-sync', ghlContactId: String(contact.id ?? '') },
       });
-      await upsertLink(locationId, 'contact', contact.id, customer.Id);
-      stats.ghlToQbContactsCreated++;
     }
   }
+
+  return { processedThrough, deferred: contacts.length - handled };
 }
 
 // Flatten a GHL opportunity's custom fields into { <fieldId>: value } so the
@@ -620,6 +673,8 @@ export async function syncLocation(locationId, settings) {
     qbStatusFailed: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,
+    ghlToQbContactsFailed: 0,
+    ghlToQbContactsDeferred: 0,
     ghlToQbEstimatesCreated: 0,
     ghlToQbEstimatesUpdated: 0,
     skipped: 0,
@@ -666,8 +721,27 @@ export async function syncLocation(locationId, settings) {
   // the cursor is being rewound to the pull high-water mark, and this half reads from
   // the same cursor, so running it now would re-push on the next tick anyway.
   if (pushToQb && stats.qbToGhlContactsDeferred === 0) {
-    await syncGhlContactsToQb(locationId, since, stats, cfg);
-    await syncGhlOpportunitiesToQb(locationId, since, stats);
+    const push = await syncGhlContactsToQb(
+      locationId,
+      since,
+      stats,
+      cfg,
+      Date.now() + GHL_TO_QB_BUDGET_MS,
+    );
+    stats.ghlToQbContactsDeferred = push.deferred;
+
+    if (push.deferred > 0) {
+      // Both directions read from this one cursor, so it may only move as far as the
+      // EARLIER of the two high-water marks — past that and the slower half's deferred
+      // records are skipped for good. The faster half redoes a little work next tick,
+      // which is safe: every operation here is an upsert or a link touch.
+      const pushMark = push.processedThrough
+        ? new Date(Math.max(push.processedThrough, since.getTime()))
+        : since;
+      if (pushMark < cursorAt) cursorAt = pushMark;
+    } else {
+      await syncGhlOpportunitiesToQb(locationId, since, stats);
+    }
   }
 
   await setSyncState(locationId, cursorAt);
