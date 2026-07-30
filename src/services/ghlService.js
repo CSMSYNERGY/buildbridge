@@ -124,6 +124,23 @@ function summarizeGhlError(rawBody) {
   return text.replace(EMAIL_RE, '<email>').replace(PHONEISH_RE, '<number>').slice(0, MAX_REASON);
 }
 
+// GHL answers a rejected duplicate CREATE with the id of the contact it matched:
+// {"message":"This location does not allow duplicated contacts.",
+//  "meta":{"contactId":"…","matchingField":"phone"}}
+// That id is the one thing that makes the rejection recoverable — it tells us the
+// person is already in the CRM, so we can link to them instead of retrying a create
+// that can never succeed. An id is an opaque handle, not customer data.
+function duplicateContactIdFrom(rawBody) {
+  if (!rawBody) return null;
+  try {
+    const meta = JSON.parse(rawBody)?.meta;
+    const id = meta?.contactId ?? meta?.contactID ?? null;
+    return typeof id === 'string' && id ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Make an authenticated GHL API request on behalf of a location.
  * Automatically refreshes the access token if it is expired.
@@ -209,6 +226,7 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
     err.kind = 'ghl_api_error';
     err.ghlPath = `${method} ${path}`;
     err.ghlReason = reason;
+    err.ghlDuplicateContactId = duplicateContactIdFrom(errBody);
     throw err;
   }
 

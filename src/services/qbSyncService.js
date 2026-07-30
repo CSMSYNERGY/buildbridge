@@ -30,13 +30,35 @@ const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // ─── Sync state / links ───────────────────────────────────────────────────────
 
+// How long the QB→GHL half of one pass may run before it stops and hands the rest to
+// the next tick. A scheduled Worker invocation has a finite budget and every DB
+// round-trip here goes through DB_WORKER (~2.5s), so a large changeset cannot finish
+// inside one tick.
+//
+// Without this cap a first sync deadlocks permanently: the pass never reaches
+// setSyncState, so `since` stays at the 30-day FIRST_SYNC_WINDOW_MS default, so the
+// next tick re-fetches the SAME full changeset, runs out of budget in the same place,
+// and never gets smaller. The tenant shows "no sync has completed yet" forever while
+// the same handful of records fail every 15 minutes. Observed in production 2026-07-30.
+const QB_TO_GHL_BUDGET_MS = 60_000;
+
 async function getSyncSince(locationId) {
   const [state] = await db
     .select()
     .from(qbSyncState)
     .where(eq(qbSyncState.locationId, locationId))
     .limit(1);
-  return state?.lastSyncAt ?? new Date(Date.now() - FIRST_SYNC_WINDOW_MS);
+  // Normalize: the row travels through sql-exec, so lastSyncAt can arrive as a string.
+  return state?.lastSyncAt
+    ? new Date(state.lastSyncAt)
+    : new Date(Date.now() - FIRST_SYNC_WINDOW_MS);
+}
+
+// QuickBooks' own last-modified stamp for a CDC record, as epoch ms. 0 when absent
+// or unparseable — callers must never advance the cursor to a 0.
+function qbUpdatedMs(entity) {
+  const t = Date.parse(entity?.MetaData?.LastUpdatedTime ?? '');
+  return Number.isFinite(t) ? t : 0;
 }
 
 async function setSyncState(locationId, lastSyncAt) {
@@ -118,7 +140,7 @@ function qbCustomerToGhlContact(customer) {
   };
 }
 
-async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
+async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineAt) {
   // Salesperson copy, QB → GHL. Rockwood stores the salesperson in a QuickBooks
   // Customer custom field (its NAME is set in Settings as qboAssignedUserField);
   // its value is copied verbatim into a GHL contact custom field
@@ -144,7 +166,31 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
     return entries;
   }
 
-  for (const customer of customers) {
+  // Oldest change first. The sync cursor is a single timestamp, so the only way a
+  // partial pass can advance it without skipping anyone is to drain the backlog in
+  // LastUpdatedTime order and stop at a clean boundary.
+  const queue = [...customers].sort((a, b) => qbUpdatedMs(a) - qbUpdatedMs(b));
+  let processedThrough = 0; // epoch ms of the last customer this tick handled
+  let handled = 0;
+
+  for (const customer of queue) {
+    // ── Budget guard ──────────────────────────────────────────────────────────
+    // Stop once this invocation's slice is spent so the pass still reaches
+    // setSyncState and the next tick starts from a smaller window. Never stop
+    // mid-timestamp, though: leaving a customer behind that shares the last
+    // handled LastUpdatedTime would either strand it forever (the cursor can't
+    // advance past its own value) or skip it (the cursor moves past unhandled
+    // work). Drain the tie, then break.
+    if (
+      deadlineAt &&
+      Date.now() >= deadlineAt &&
+      processedThrough &&
+      qbUpdatedMs(customer) !== processedThrough
+    ) {
+      break;
+    }
+    handled++;
+
     // ── Per-customer isolation ────────────────────────────────────────────────
     // One unsyncable record must not take the whole pass down with it. Before this,
     // a single customer GHL rejected aborted everything after it — the rest of the
@@ -172,7 +218,17 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg) {
         context: { job: 'rockwood-quickbooks-sync', qbCustomerId: String(customer.Id ?? '') },
       });
     }
+
+    // Advance past this record whether it synced or failed. A record GHL will never
+    // accept must not pin the cursor, or one bad record generates an identical error
+    // every 15 minutes indefinitely. The failure is still in error_events, so it stays
+    // visible on the connection card; it just stops being retried until the record
+    // actually changes in QuickBooks.
+    const ts = qbUpdatedMs(customer);
+    if (ts) processedThrough = ts;
   }
+
+  return { processedThrough, deferred: queue.length - handled };
 }
 
 /**
@@ -233,6 +289,7 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
   }
 
   let ghlId;
+  let adopted = false;
   if (base.email) {
     // Email present → upsert. GHL matches on email FIRST, which is a precise identity, and
     // it returns the existing contact when there is one — so this both fixes the 400 and
@@ -253,15 +310,30 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
     // a DIFFERENT person already in the client's CRM. Losing a sync is recoverable; silently
     // corrupting a client's contact record is not.
     //
-    // If this 400s as a duplicate, the per-customer catch above records and skips it, so it
-    // stays visible in the connection card's open problems rather than destroying data. See
-    // the work log — whether to upsert on phone is Carolyn's call, not ours.
-    const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
-      locationId,
-      ...base,
-      ...(cfEntries.length ? { customFields: cfEntries } : {}),
-    });
-    ghlId = created?.contact?.id ?? created?.id;
+    // If this 400s as a duplicate the person is ALREADY in the CRM, so we adopt that
+    // contact — record the link and write nothing to them. Adoption is not the upsert
+    // question: it makes no change to the matched contact, so it cannot overwrite a
+    // shared household or business line. Whether to go further and push our field values
+    // onto a phone-matched contact is still Carolyn's call, not ours.
+    //
+    // Without this the create is retried every 15 minutes forever against a contact that
+    // can never be created. Adoption also fixes the real consequence of leaving it
+    // unlinked: sales-doc status reflection is keyed on the link, so an unlinked customer
+    // silently gets no status updates at all.
+    try {
+      const created = await makeGhlRequest(locationId, 'POST', '/contacts/', {
+        locationId,
+        ...base,
+        ...(cfEntries.length ? { customFields: cfEntries } : {}),
+      });
+      ghlId = created?.contact?.id ?? created?.id;
+    } catch (err) {
+      if (!err.ghlDuplicateContactId) throw err;
+      ghlId = err.ghlDuplicateContactId;
+      adopted = true;
+      stats.qbToGhlContactsAdopted++;
+      console.log(`[rockwood] adopted existing GHL contact for QB customer ${customer.Id}`);
+    }
   }
 
   if (!ghlId) {
@@ -269,7 +341,8 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
     return;
   }
   await upsertLink(locationId, 'contact', ghlId, customer.Id);
-  stats.qbToGhlContactsCreated++;
+  // An adopted contact was already counted; it was linked, not created.
+  if (!adopted) stats.qbToGhlContactsCreated++;
 }
 
 // QuickBooks sales-doc status → a GHL contact custom field (read-only QB→GHL).
@@ -292,33 +365,49 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   for (const inv of invoices) consider(inv.CustomerRef?.value, 'Invoiced');
 
   for (const [customerId, status] of byCustomer) {
-    const link = await getLink(locationId, 'contact', { qbId: customerId });
-    if (!link) {
-      // No GHL contact linked yet (contacts sync in the same pass may create it
-      // next run); nothing to update this round.
-      stats.skipped++;
-      continue;
+    // Same per-record isolation as the contact loop above. The GET below was already
+    // guarded but the PUT was not, so one contact GHL rejected here aborted the whole
+    // pass — after the contacts had synced and before setSyncState, which is the worst
+    // possible place to die: work done, cursor not advanced, so it all runs again.
+    try {
+      const link = await getLink(locationId, 'contact', { qbId: customerId });
+      if (!link) {
+        // No GHL contact linked yet (contacts sync in the same pass may create it
+        // next run); nothing to update this round.
+        stats.skipped++;
+        continue;
+      }
+
+      // Don't downgrade: read the contact's current status value first.
+      const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
+        .catch(() => null);
+      const current = (existing?.contact?.customFields ?? []).find(
+        (f) => f.id === targetField || f.fieldKey === targetField,
+      );
+      const currentVal = current?.value ?? current?.fieldValue;
+      if (!shouldUpgradeStatus(currentVal, status)) continue;
+
+      // Merge into existing custom fields so we never wipe the salesperson field.
+      const customFields = mergeCustomFields(existing?.contact?.customFields, {
+        id: targetField,
+        value: status,
+      });
+      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
+      // Advance the link cursor so this GHL write isn't re-detected as a
+      // GHL-origin change and pushed back to QBO next cycle (echo suppression).
+      await touchLink(link.id);
+      stats.qbStatusUpdated++;
+    } catch (err) {
+      stats.qbStatusFailed++;
+      console.error(`[rockwood] status reflect failed for QB customer ${customerId}:`, err.message);
+      await recordThrown(err, {
+        source: 'cron',
+        kind: err.kind ?? 'qbo_status_reflect_failed',
+        appSlug: 'quickbooks',
+        locationId,
+        context: { job: 'rockwood-quickbooks-sync', qbCustomerId: String(customerId ?? '') },
+      });
     }
-
-    // Don't downgrade: read the contact's current status value first.
-    const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
-      .catch(() => null);
-    const current = (existing?.contact?.customFields ?? []).find(
-      (f) => f.id === targetField || f.fieldKey === targetField,
-    );
-    const currentVal = current?.value ?? current?.fieldValue;
-    if (!shouldUpgradeStatus(currentVal, status)) continue;
-
-    // Merge into existing custom fields so we never wipe the salesperson field.
-    const customFields = mergeCustomFields(existing?.contact?.customFields, {
-      id: targetField,
-      value: status,
-    });
-    await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
-    // Advance the link cursor so this GHL write isn't re-detected as a
-    // GHL-origin change and pushed back to QBO next cycle (echo suppression).
-    await touchLink(link.id);
-    stats.qbStatusUpdated++;
   }
 }
 
@@ -521,13 +610,24 @@ export async function syncLocation(locationId, settings) {
     // QuickBooks customers with neither an email nor a phone: nothing for GHL to match on
     // and no way to reach the person, so deliberately not created.
     qbToGhlContactsSkipped: 0,
+    // Phone-only customers GHL refused as duplicates, linked to the contact it matched
+    // instead of being retried forever. No write is made to the matched contact.
+    qbToGhlContactsAdopted: 0,
+    // Customers this tick ran out of budget before reaching. Non-zero is normal while
+    // a backlog drains — the next tick picks up exactly where this one stopped.
+    qbToGhlContactsDeferred: 0,
     qbStatusUpdated: 0,
+    qbStatusFailed: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,
     ghlToQbEstimatesCreated: 0,
     ghlToQbEstimatesUpdated: 0,
     skipped: 0,
   };
+
+  // Where the cursor lands when this pass finishes everything. A pass that runs out
+  // of budget replaces this with the last record it actually handled.
+  let cursorAt = runStartedAt;
 
   // QB → GHL (Change Data Capture). Skipped entirely for a push-only tenant so
   // we don't even read QuickBooks needlessly. Reads only — never writes QBO.
@@ -538,18 +638,39 @@ export async function syncLocation(locationId, settings) {
     const estimates = responses.flatMap((q) => q.Estimate ?? []);
     const invoices = responses.flatMap((q) => q.Invoice ?? []);
 
-    await syncQbCustomersToGhl(locationId, customers, stats, cfg);
-    await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg);
+    const pull = await syncQbCustomersToGhl(
+      locationId,
+      customers,
+      stats,
+      cfg,
+      Date.now() + QB_TO_GHL_BUDGET_MS,
+    );
+    stats.qbToGhlContactsDeferred = pull.deferred;
+
+    if (pull.deferred > 0) {
+      // Partial pass. Move the cursor only as far as the last customer we handled,
+      // so the deferred ones are re-fetched next tick instead of being skipped —
+      // and never backwards, so a record with no usable LastUpdatedTime can't undo
+      // progress. The remaining stages are left for the next tick; this invocation
+      // is already out of budget and adding to it risks losing the cursor write.
+      cursorAt = pull.processedThrough
+        ? new Date(Math.max(pull.processedThrough, since.getTime()))
+        : since;
+    } else {
+      await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg);
+    }
   }
 
-  // GHL → QB. Never runs for a read-only ('qb_to_ghl') tenant like Rockwood, so
-  // BuildBridge makes no writes to their QuickBooks.
-  if (pushToQb) {
+  // GHL → QB. Skipped for a read-only ('qb_to_ghl') tenant, so BuildBridge makes no
+  // writes to that tenant's QuickBooks. Also skipped when the pull half deferred work:
+  // the cursor is being rewound to the pull high-water mark, and this half reads from
+  // the same cursor, so running it now would re-push on the next tick anyway.
+  if (pushToQb && stats.qbToGhlContactsDeferred === 0) {
     await syncGhlContactsToQb(locationId, since, stats, cfg);
     await syncGhlOpportunitiesToQb(locationId, since, stats);
   }
 
-  await setSyncState(locationId, runStartedAt);
+  await setSyncState(locationId, cursorAt);
   console.log(`[rockwood] sync ${locationId} (${direction}):`, JSON.stringify(stats));
   return stats;
 }
