@@ -30,20 +30,20 @@ const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // ─── Sync state / links ───────────────────────────────────────────────────────
 
-// How long the QB→GHL half of one pass may run before it stops and hands the rest to
-// the next tick. A scheduled Worker invocation has a finite budget and every DB
-// round-trip here goes through DB_WORKER (~2.5s), so a large changeset cannot finish
-// inside one tick.
+// How long one pass may spend on records before it stops and hands the rest to the
+// next tick. A scheduled Worker invocation has a finite budget and every DB round-trip
+// here goes through DB_WORKER (~2.5s), so a large changeset cannot finish inside one.
+//
+// ONE deadline for the whole pass, shared by both directions rather than one each:
+// both halves run in the SAME invocation, so per-half budgets would add up and it is
+// the total that has to fit. Whatever the first half leaves unspent, the second gets.
 //
 // Without this cap a first sync deadlocks permanently: the pass never reaches
 // setSyncState, so `since` stays at the 30-day FIRST_SYNC_WINDOW_MS default, so the
-// next tick re-fetches the SAME full changeset, runs out of budget in the same place,
+// next tick re-fetches the SAME full changeset, runs out of road in the same place,
 // and never gets smaller. The tenant shows "no sync has completed yet" forever while
 // the same handful of records fail every 15 minutes. Observed in production 2026-07-30.
-const QB_TO_GHL_BUDGET_MS = 60_000;
-
-// Same cap for the GHL→QB half, which runs after it in the same invocation.
-const GHL_TO_QB_BUDGET_MS = 60_000;
+const SYNC_PASS_BUDGET_MS = 60_000;
 
 async function getSyncSince(locationId) {
   const [state] = await db
@@ -651,6 +651,7 @@ export async function syncLocation(locationId, settings) {
 
   const since = await getSyncSince(locationId);
   const runStartedAt = new Date();
+  const passDeadline = Date.now() + SYNC_PASS_BUDGET_MS;
 
   const stats = {
     direction,
@@ -698,7 +699,7 @@ export async function syncLocation(locationId, settings) {
       customers,
       stats,
       cfg,
-      Date.now() + QB_TO_GHL_BUDGET_MS,
+      passDeadline,
     );
     stats.qbToGhlContactsDeferred = pull.deferred;
 
@@ -726,7 +727,7 @@ export async function syncLocation(locationId, settings) {
       since,
       stats,
       cfg,
-      Date.now() + GHL_TO_QB_BUDGET_MS,
+      passDeadline,
     );
     stats.ghlToQbContactsDeferred = push.deferred;
 
