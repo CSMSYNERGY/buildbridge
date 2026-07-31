@@ -20,6 +20,7 @@ import {
   readQbCustomerField,
   deriveContactName,
   qbAddressToGhl,
+  ghlAddressToQb,
   mergeCustomFields,
   qbCustomFieldEntries,
   resolveItemRef,
@@ -499,6 +500,7 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
       const firstName = contact.firstName ?? undefined;
       const lastName = contact.lastName ?? undefined;
       const name = deriveContactName(contact);
+      const billAddr = ghlAddressToQb(contact);
 
       if (link) {
         // Read the QB side for SyncToken + LWW comparison
@@ -518,6 +520,9 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
           ...(lastName ? { FamilyName: lastName } : {}),
           ...(contact.email ? { PrimaryEmailAddr: { Address: contact.email } } : {}),
           ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: contact.phone } } : {}),
+          // BillAddr is whole-object even under sparse:true — only sent when GHL
+          // has an address, so a GHL contact without one can't wipe QB's.
+          ...(billAddr ? { BillAddr: billAddr } : {}),
         });
         await touchLink(link.id);
         stats.ghlToQbContactsUpdated++;
@@ -533,6 +538,7 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
           lastName,
           email: contact.email,
           phone: contact.phone,
+          billAddr,
         });
         await upsertLink(locationId, 'contact', contact.id, customer.Id);
         stats.ghlToQbContactsCreated++;

@@ -795,7 +795,7 @@ function qboEscape(value) {
  * Find a QBO Customer by email (then by display name), creating one if absent.
  * Returns the Customer object.
  */
-export async function findOrCreateCustomer(locationId, { name, firstName, lastName, email, phone }) {
+export async function findOrCreateCustomer(locationId, { name, firstName, lastName, email, phone, billAddr }) {
   if (!name && !email) throw createError(400, 'Customer name or email is required');
 
   if (email) {
@@ -820,6 +820,7 @@ export async function findOrCreateCustomer(locationId, { name, firstName, lastNa
     ...(lastName ? { FamilyName: lastName } : {}),
     ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
     ...(phone ? { PrimaryPhone: { FreeFormNumber: phone } } : {}),
+    ...(billAddr ? { BillAddr: billAddr } : {}),
   });
   return created.Customer;
 }

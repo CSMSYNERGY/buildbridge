@@ -6,6 +6,7 @@ import {
   readQbCustomerField,
   deriveContactName,
   qbAddressToGhl,
+  ghlAddressToQb,
   mergeCustomFields,
   qbCustomFieldEntries,
   resolveItemRef,
@@ -119,6 +120,34 @@ describe('qbAddressToGhl — QuickBooks address → GHL fields', () => {
   it('returns {} for empty/missing address', () => {
     expect(qbAddressToGhl(null)).toEqual({});
     expect(qbAddressToGhl({})).toEqual({});
+  });
+});
+
+describe('ghlAddressToQb — GHL contact address → QBO BillAddr', () => {
+  it('maps a full GHL address', () => {
+    const contact = { address1: '835 Hamilton Heights', city: 'Corvallis', state: 'MT', postalCode: '59828', country: 'US' };
+    expect(ghlAddressToQb(contact)).toEqual({
+      Line1: '835 Hamilton Heights',
+      City: 'Corvallis',
+      CountrySubDivisionCode: 'MT',
+      PostalCode: '59828',
+      Country: 'US',
+    });
+  });
+  it('omits fields the contact does not have', () => {
+    expect(ghlAddressToQb({ address1: 'PO Box 2005', postalCode: '59840' })).toEqual({
+      Line1: 'PO Box 2005',
+      PostalCode: '59840',
+    });
+  });
+  it('returns null when the contact has no address at all — BillAddr must not be sent', () => {
+    expect(ghlAddressToQb({})).toBeNull();
+    expect(ghlAddressToQb()).toBeNull();
+    expect(ghlAddressToQb({ firstName: 'Tomie', email: 't@example.com' })).toBeNull();
+  });
+  it('round-trips what qbAddressToGhl produced from a structured QB address', () => {
+    const qbAddr = { Line1: 'PO Box 2005', City: 'Hamilton', CountrySubDivisionCode: 'MT', PostalCode: '59840' };
+    expect(ghlAddressToQb(qbAddressToGhl(qbAddr, 'Steve Reitz'))).toEqual(qbAddr);
   });
 });
 

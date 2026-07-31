@@ -101,6 +101,24 @@ export function qbAddressToGhl(addr, displayName) {
 }
 
 /**
+ * Map a GHL contact's address fields to a QBO BillAddr object — the reverse of
+ * qbAddressToGhl. Returns null when the contact has no address fields at all,
+ * so callers can omit BillAddr entirely (QBO treats BillAddr as a whole object
+ * even on a sparse update: sending one replaces the customer's existing
+ * address, so it must only be sent when GHL actually has an address to say).
+ */
+export function ghlAddressToQb({ address1, city, state, postalCode, country } = {}) {
+  if (!address1 && !city && !state && !postalCode && !country) return null;
+  return {
+    ...(address1 ? { Line1: address1 } : {}),
+    ...(city ? { City: city } : {}),
+    ...(state ? { CountrySubDivisionCode: state } : {}),
+    ...(postalCode ? { PostalCode: postalCode } : {}),
+    ...(country ? { Country: country } : {}),
+  };
+}
+
+/**
  * Build GHL contact customFields entries [{id, value}] from configured
  * QuickBooks→GHL custom-field mappings (mappings = { '<QBO field label>':
  * '<GHL field id>' }). Reads each QBO field off the customer by name; skips
