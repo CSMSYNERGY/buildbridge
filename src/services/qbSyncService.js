@@ -594,48 +594,68 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
     const ghlUpdatedAt = opp.updatedAt ?? opp.dateUpdated;
     if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) continue;
 
-    const link = await getLink(locationId, 'estimate', { ghlId: opp.id });
-    if (isEcho(ghlUpdatedAt, link)) continue;
+    // Per-record isolation, same polarity as both contact loops. Without it, one
+    // estimate QuickBooks rejects throws out of syncLocation before setSyncState,
+    // so the cursor never advances and the whole tenant re-runs forever — the
+    // exact deadlock the contact loops were cured of on 07-29/30.
+    try {
+      const link = await getLink(locationId, 'estimate', { ghlId: opp.id });
+      if (isEcho(ghlUpdatedAt, link)) continue;
 
-    const amountCents = Math.round((opp.monetaryValue ?? 0) * 100);
-    if (amountCents <= 0) continue;
+      const amountCents = Math.round((opp.monetaryValue ?? 0) * 100);
+      if (amountCents <= 0) continue;
 
-    if (link) {
-      const current = await makeQuickBooksRequest(
-        locationId, 'GET', `/estimate/${link.qbId}?minorversion=75`,
-      ).catch(() => null);
-      const estimate = current?.Estimate;
-      if (!estimate) continue;
-      if (targetIsNewer(ghlUpdatedAt, estimate.MetaData?.LastUpdatedTime)) continue;
+      if (link) {
+        const current = await makeQuickBooksRequest(
+          locationId, 'GET', `/estimate/${link.qbId}?minorversion=75`,
+        ).catch(() => null);
+        const estimate = current?.Estimate;
+        if (!estimate) continue;
+        if (targetIsNewer(ghlUpdatedAt, estimate.MetaData?.LastUpdatedTime)) continue;
 
-      await upsertEstimate(locationId, {
-        qbEstimateId: estimate.Id,
-        syncToken: estimate.SyncToken,
-        qbCustomerId: estimate.CustomerRef?.value,
-        amountCents,
-        description: opp.name,
-        itemRef,
-      });
-      await touchLink(link.id);
-      stats.ghlToQbEstimatesUpdated++;
-    } else {
-      const contactLink = opp.contactId
-        ? await getLink(locationId, 'contact', { ghlId: opp.contactId })
-        : null;
-      if (!contactLink) {
-        console.warn(`[rockwood] skipping GHL opportunity ${opp.id}: no QB customer link for contact ${opp.contactId ?? '(none)'}`);
-        stats.skipped++;
-        continue;
+        await upsertEstimate(locationId, {
+          qbEstimateId: estimate.Id,
+          syncToken: estimate.SyncToken,
+          qbCustomerId: estimate.CustomerRef?.value,
+          amountCents,
+          description: opp.name,
+          itemRef,
+        });
+        await touchLink(link.id);
+        stats.ghlToQbEstimatesUpdated++;
+      } else {
+        const contactLink = opp.contactId
+          ? await getLink(locationId, 'contact', { ghlId: opp.contactId })
+          : null;
+        if (!contactLink) {
+          console.warn(`[rockwood] skipping GHL opportunity ${opp.id}: no QB customer link for contact ${opp.contactId ?? '(none)'}`);
+          stats.skipped++;
+          continue;
+        }
+
+        const estimate = await upsertEstimate(locationId, {
+          qbCustomerId: contactLink.qbId,
+          amountCents,
+          description: opp.name,
+          itemRef,
+        });
+        await upsertLink(locationId, 'estimate', opp.id, estimate.Id);
+        stats.ghlToQbEstimatesCreated++;
       }
-
-      const estimate = await upsertEstimate(locationId, {
-        qbCustomerId: contactLink.qbId,
-        amountCents,
-        description: opp.name,
-        itemRef,
+    } catch (err) {
+      stats.ghlToQbEstimatesFailed++;
+      console.error(`[rockwood] estimate push failed for GHL opportunity ${opp.id}:`, err.message);
+      await recordThrown(err, {
+        source: 'cron',
+        kind: err.kind ?? 'ghl_estimate_push_failed',
+        appSlug: 'quickbooks',
+        locationId,
+        context: {
+          job: 'rockwood-quickbooks-sync',
+          ghlOpportunityId: String(opp.id ?? ''),
+          ghlContactId: String(opp.contactId ?? ''),
+        },
       });
-      await upsertLink(locationId, 'estimate', opp.id, estimate.Id);
-      stats.ghlToQbEstimatesCreated++;
     }
   }
 }
@@ -684,6 +704,9 @@ export async function syncLocation(locationId, settings) {
     ghlToQbContactsDeferred: 0,
     ghlToQbEstimatesCreated: 0,
     ghlToQbEstimatesUpdated: 0,
+    // Estimates QuickBooks rejected, recorded per record and skipped so the pass
+    // still reaches setSyncState (see the isolation note in the loop).
+    ghlToQbEstimatesFailed: 0,
     skipped: 0,
   };
 
