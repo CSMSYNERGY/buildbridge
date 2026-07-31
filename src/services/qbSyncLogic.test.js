@@ -12,7 +12,97 @@ import {
   resolveItemRef,
   milestoneIsDue,
   normalizeMilestoneInput,
+  summarizeQboFault,
 } from './qbSyncLogic.js';
+
+describe('summarizeQboFault — scrubbed QBO Fault summary for the durable error log', () => {
+  it('extracts type, code, Message and Detail from a v3 ValidationFault', () => {
+    const body = JSON.stringify({
+      Fault: {
+        Error: [{
+          Message: 'Invalid Reference Id',
+          Detail: 'Invalid Reference Id : Line.SalesItemLineDetail.ItemRef',
+          code: '2500',
+          element: '',
+        }],
+        type: 'ValidationFault',
+      },
+      time: '2026-07-31T11:45:26.000-07:00',
+    });
+    expect(summarizeQboFault(body)).toBe(
+      'ValidationFault — [2500] Invalid Reference Id: Invalid Reference Id : Line.SalesItemLineDetail.ItemRef',
+    );
+  });
+
+  it('handles the lowercase gateway fault variant', () => {
+    const body = JSON.stringify({
+      fault: {
+        error: [{ message: 'AppNotConfigured', detail: 'App not configured for company', code: '100' }],
+        type: 'SYSTEMFAULT',
+      },
+    });
+    expect(summarizeQboFault(body)).toBe(
+      'SYSTEMFAULT — [100] AppNotConfigured: App not configured for company',
+    );
+  });
+
+  it('scrubs an echoed email and phone out of Detail', () => {
+    const body = JSON.stringify({
+      Fault: {
+        Error: [{
+          Message: 'Duplicate Name Exists Error',
+          Detail: 'Contact jane.doe@example.com at +1 (555) 123-4567 already exists',
+          code: '6240',
+        }],
+        type: 'ValidationFault',
+      },
+    });
+    const out = summarizeQboFault(body);
+    expect(out).toContain('<email>');
+    expect(out).toContain('<number>');
+    expect(out).not.toContain('example.com');
+    expect(out).not.toContain('555');
+  });
+
+  it('drops the Detail echo when it just repeats Message', () => {
+    const body = JSON.stringify({
+      Fault: { Error: [{ Message: 'Stale Object Error', Detail: 'Stale Object Error', code: '5010' }], type: 'ValidationFault' },
+    });
+    expect(summarizeQboFault(body)).toBe('ValidationFault — [5010] Stale Object Error');
+  });
+
+  it('joins multiple errors and caps at three', () => {
+    const errs = Array.from({ length: 5 }, (_, i) => ({ Message: `Err ${i + 1}`, code: String(i + 1) }));
+    const out = summarizeQboFault(JSON.stringify({ Fault: { Error: errs, type: 'ValidationFault' } }));
+    expect(out).toContain('[1] Err 1; [2] Err 2; [3] Err 3');
+    expect(out).not.toContain('Err 4');
+  });
+
+  it('returns null for non-JSON (an HTML gateway page) — never stores it raw', () => {
+    expect(summarizeQboFault('<html><body>502 Bad Gateway</body></html>')).toBeNull();
+  });
+
+  it('returns null for empty input and unrecognised JSON shapes', () => {
+    expect(summarizeQboFault('')).toBeNull();
+    expect(summarizeQboFault(undefined)).toBeNull();
+    expect(summarizeQboFault(JSON.stringify({ ok: true }))).toBeNull();
+    expect(summarizeQboFault(JSON.stringify({ Fault: { Error: [{}] } }))).toBeNull();
+  });
+
+  it('falls back to the fault type when the Error array is missing or empty', () => {
+    expect(summarizeQboFault(JSON.stringify({ Fault: { type: 'AuthenticationFault' } })))
+      .toBe('fault type AuthenticationFault');
+    expect(summarizeQboFault(JSON.stringify({ Fault: { Error: [], type: 'ValidationFault' } })))
+      .toBe('fault type ValidationFault');
+  });
+
+  it('truncates to 300 chars', () => {
+    const body = JSON.stringify({
+      Fault: { Error: [{ Message: 'M', Detail: 'x'.repeat(500), code: '1' }], type: 'ValidationFault' },
+    });
+    expect(summarizeQboFault(body).length).toBe(300);
+  });
+});
 
 describe('syncFlags — per-tenant direction gating (read-only-QuickBooks guarantee)', () => {
   it('qb_to_ghl reads QuickBooks but NEVER pushes to it', () => {

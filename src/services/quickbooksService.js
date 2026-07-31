@@ -6,6 +6,7 @@ import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { ensureLocation } from './locationService.js';
+import { summarizeQboFault } from './qbSyncLogic.js';
 
 const QUICKBOOKS_SLUG = 'quickbooks';
 
@@ -694,13 +695,15 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
   const tid = captureTid(`QBO ${method} ${path}`, res);
 
   if (!res.ok) {
-    // The response BODY can contain QuickBooks company data → logged only in dev. The
-    // intuit_tid + status are already logged above (prod-safe) and are attached to the
-    // thrown error so downstream handlers keep the troubleshooting id.
+    // The RAW response body can contain QuickBooks company data → logged only in dev.
+    // What survives into the durable log is summarizeQboFault's scrubbed code+Message+
+    // Detail — without it a 400 was undiagnosable in production (only status +
+    // intuit_tid reached error_events, and Intuit's Fault names the offending field).
+    const errBody = await res.text().catch(() => '');
     if (env.NODE_ENV !== 'production') {
-      const errBody = await res.text();
       console.error(`[quickbooksService] QBO error body [${method} ${path}]:`, errBody);
     }
+    const reason = summarizeQboFault(errBody);
     // Auth-shaped failures mean the credential itself is no longer accepted, so they
     // belong on the connection card. Everything else (a 400 validation error, a 429, a
     // 5xx at Intuit) is a per-request problem and must NOT mark a working connection
@@ -708,13 +711,19 @@ export async function makeQuickBooksRequest(locationId, method, path, body = und
     if (res.status === 401 || res.status === 403) {
       await markCredentialBroken(locationId, ERR_API, `QuickBooks rejected the stored credential (HTTP ${res.status}) on ${method} ${path.split('?')[0]}`);
     }
-    const err = createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}] intuit_tid=${tid || 'none'}`);
+    // The fault reason goes in the MESSAGE, not just metadata — same reasoning as
+    // ghlService: visible in any triage query, and it participates in the
+    // error_events fingerprint so two different validation failures stop
+    // collapsing into one row. Numeric fault codes normalise to <n>, so dedup
+    // across occurrences of the SAME fault still holds.
+    const err = createError(res.status, `QuickBooks API error (${res.status}) [${method} ${path}]${reason ? `: ${reason}` : ''} intuit_tid=${tid || 'none'}`);
     // Metadata for the durable error log (errorLogService.recordThrown). The
     // intuit_tid is what Intuit support asks for, so it rides along explicitly.
     err.upstream = 'qbo';
     err.upstreamStatus = res.status;
     err.kind = 'qbo_api_error';
     err.intuitTid = tid || null;
+    err.qboFault = reason;
     throw err;
   }
 

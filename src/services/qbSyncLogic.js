@@ -171,6 +171,56 @@ export function resolveItemRef(itemMappings, ghlFieldValues = {}) {
   return null;
 }
 
+// Same scrub rules as ghlService's summarizeGhlError — the two summaries feed the
+// same error_events table under the same "no customer data" constraint.
+const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
+const PHONEISH_RE = /\+?[\d][\d\s().-]{6,}\d/g;
+const MAX_FAULT = 300;
+
+/**
+ * Extract a scrubbed one-line summary from a QBO error body, or null.
+ *
+ * QBO error bodies carry a stable Fault envelope:
+ *   {"Fault":{"Error":[{"Message":"…","Detail":"…","code":"2500","element":"…"}],
+ *     "type":"ValidationFault"}}
+ * (Intuit's API gateway variant uses lowercase fault/error.) `code` + `Message`
+ * are Intuit's generic catalogue strings; `Detail` is what actually names the
+ * offending field (e.g. "Invalid Reference Id : Line.SalesItemLineDetail.ItemRef")
+ * but CAN echo company data (a duplicate DisplayName, an address), so it gets the
+ * same email/number scrub as GHL reasons. Non-JSON (an HTML gateway page) and
+ * unrecognised JSON are dropped entirely — never stored raw.
+ */
+export function summarizeQboFault(rawBody) {
+  if (!rawBody) return null;
+  let fault;
+  try {
+    const parsed = JSON.parse(rawBody);
+    fault = parsed?.Fault ?? parsed?.fault ?? null;
+  } catch {
+    return null;
+  }
+  const errors = fault?.Error ?? fault?.error;
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return typeof fault?.type === 'string' && fault.type ? `fault type ${fault.type}` : null;
+  }
+  const parts = errors.slice(0, 3).map((e) => {
+    const code = e?.code ?? e?.Code;
+    const message = [e?.Message, e?.message].find((v) => typeof v === 'string' && v) ?? '';
+    const detail = [e?.Detail, e?.detail].find((v) => typeof v === 'string' && v) ?? '';
+    // Detail usually restates Message before the colon — keep it only when it adds.
+    const tail = detail && detail !== message ? `${message ? ': ' : ''}${detail}` : '';
+    const text = `${message}${tail}`;
+    if (!text) return null;
+    return `${code != null && code !== '' ? `[${code}] ` : ''}${text}`;
+  }).filter(Boolean);
+  if (parts.length === 0) return null;
+  const type = typeof fault?.type === 'string' && fault.type ? `${fault.type} — ` : '';
+  return `${type}${parts.join('; ')}`
+    .replace(EMAIL_RE, '<email>')
+    .replace(PHONEISH_RE, '<number>')
+    .slice(0, MAX_FAULT);
+}
+
 // How long a milestone name may be. It prints on a QuickBooks invoice line.
 const MAX_MILESTONE_LABEL = 120;
 
