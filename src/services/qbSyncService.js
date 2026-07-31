@@ -81,19 +81,47 @@ async function setSyncState(locationId, lastSyncAt) {
     });
 }
 
-async function getLink(locationId, entityType, { ghlId, qbId }) {
-  const conditions = [
-    eq(qbSyncLinks.locationId, locationId),
-    eq(qbSyncLinks.entityType, entityType),
-  ];
-  if (ghlId) conditions.push(eq(qbSyncLinks.ghlId, String(ghlId)));
-  if (qbId) conditions.push(eq(qbSyncLinks.qbId, String(qbId)));
+// ── Link index ────────────────────────────────────────────────────────────────
+// ALL of a location's links, loaded in ONE query per pass and looked up in
+// memory. This is not (only) the latency fix the 07-29 entry asked for — it is
+// a correctness fix: every db.* call is a subrequest (service binding → DB
+// worker), and the per-record getLink pattern pushed a backlogged tick past the
+// invocation's subrequest limit, after which EVERY fetch fails instantly —
+// including the error-log INSERTs (so nothing was recorded) and the final
+// qb_sync_state write (so the cursor pinned). Observed via dual wrangler tail
+// on 2026-07-31: the DB worker's request stream just stops mid-pass while the
+// main worker keeps erroring. A pass is bounded (100-item GHL pages + CDC), so
+// the index stays small; writes still go to the DB per record, and the index is
+// updated alongside them so same-pass reads (echo suppression across halves)
+// see what was just written.
 
-  const [link] = await db.select().from(qbSyncLinks).where(and(...conditions)).limit(1);
-  return link ?? null;
+function indexLink(index, row) {
+  if (!row) return;
+  index.set(`${row.entityType}:ghl:${row.ghlId}`, row);
+  index.set(`${row.entityType}:qb:${row.qbId}`, row);
 }
 
-async function upsertLink(locationId, entityType, ghlId, qbId) {
+async function loadLinkIndex(locationId) {
+  const rows = await db
+    .select()
+    .from(qbSyncLinks)
+    .where(eq(qbSyncLinks.locationId, locationId));
+  const index = new Map();
+  for (const row of rows) indexLink(index, row);
+  return index;
+}
+
+function lookupLink(index, entityType, { ghlId, qbId }) {
+  const key = ghlId != null
+    ? `${entityType}:ghl:${String(ghlId)}`
+    : `${entityType}:qb:${String(qbId)}`;
+  return index.get(key) ?? null;
+}
+
+// Writes one link row AND records it in the pass's link index, so records later
+// in the same pass (e.g. the opportunities loop looking up a contact link the
+// contacts loop just created) see it without a re-query.
+async function upsertLink(linkIndex, locationId, entityType, ghlId, qbId) {
   const [row] = await db
     .insert(qbSyncLinks)
     .values({
@@ -109,14 +137,20 @@ async function upsertLink(locationId, entityType, ghlId, qbId) {
       set: { qbId: String(qbId), lastSyncedAt: new Date(), updatedAt: new Date() },
     })
     .returning();
+  indexLink(linkIndex, row);
   return row;
 }
 
-async function touchLink(linkId) {
+// Advances the link's echo-suppression cursor. Mutating the row object also
+// updates the pass's link index (it holds the same reference), so a write in
+// one half is not re-detected as a fresh change by the other half.
+async function touchLink(link) {
+  const now = new Date();
   await db
     .update(qbSyncLinks)
-    .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
-    .where(eq(qbSyncLinks.id, linkId));
+    .set({ lastSyncedAt: now, updatedAt: now })
+    .where(eq(qbSyncLinks.id, link.id));
+  link.lastSyncedAt = now;
 }
 
 // Skip changes we made ourselves during the previous pass (echo suppression):
@@ -150,7 +184,7 @@ function qbCustomerToGhlContact(customer) {
   };
 }
 
-async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineAt) {
+async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineAt, linkIndex) {
   // Salesperson copy, QB → GHL. Rockwood stores the salesperson in a QuickBooks
   // Customer custom field (its NAME is set in Settings as qboAssignedUserField);
   // its value is copied verbatim into a GHL contact custom field
@@ -214,7 +248,7 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineA
     // instead of quietly disappearing. Same polarity as syncAllLocations, which already
     // records-and-continues when one LOCATION fails rather than abandoning the rest.
     try {
-      await syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields });
+      await syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields, linkIndex });
     } catch (err) {
       stats.qbToGhlContactsFailed++;
       console.error(`[rockwood] contact sync failed for QB customer ${customer.Id}:`, err.message);
@@ -245,9 +279,9 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineA
  * Sync ONE QuickBooks customer into GHL. Extracted from the loop so a failure can be
  * contained per record — see the try/catch at the call site.
  */
-async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields }) {
+async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields, linkIndex }) {
   const qbUpdatedAt = customer.MetaData?.LastUpdatedTime;
-  const link = await getLink(locationId, 'contact', { qbId: customer.Id });
+  const link = lookupLink(linkIndex, 'contact', { qbId: customer.Id });
 
   if (isEcho(qbUpdatedAt, link)) return;
 
@@ -273,7 +307,7 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
         }
       : base;
     await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
-    await touchLink(link.id);
+    await touchLink(link);
     stats.qbToGhlContactsUpdated++;
     return;
   }
@@ -350,7 +384,7 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
     console.warn(`[rockwood] GHL contact write returned no id for QB customer ${customer.Id}`);
     return;
   }
-  await upsertLink(locationId, 'contact', ghlId, customer.Id);
+  await upsertLink(linkIndex, locationId, 'contact', ghlId, customer.Id);
   // An adopted contact was already counted; it was linked, not created.
   if (!adopted) stats.qbToGhlContactsCreated++;
 }
@@ -359,7 +393,7 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
 // Highest status reached wins so we never downgrade (e.g. a re-sent estimate
 // after invoicing won't overwrite "Invoiced"). Status/rank logic lives in
 // qbSyncLogic.js (pure + unit-tested).
-async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg) {
+async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex) {
   const targetField = cfg?.qboStatusGhlField ?? null;
   if (!targetField) return; // status reflection not configured
 
@@ -380,7 +414,7 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     // pass — after the contacts had synced and before setSyncState, which is the worst
     // possible place to die: work done, cursor not advanced, so it all runs again.
     try {
-      const link = await getLink(locationId, 'contact', { qbId: customerId });
+      const link = lookupLink(linkIndex, 'contact', { qbId: customerId });
       if (!link) {
         // No GHL contact linked yet (contacts sync in the same pass may create it
         // next run); nothing to update this round.
@@ -405,7 +439,7 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
       // Advance the link cursor so this GHL write isn't re-detected as a
       // GHL-origin change and pushed back to QBO next cycle (echo suppression).
-      await touchLink(link.id);
+      await touchLink(link);
       stats.qbStatusUpdated++;
     } catch (err) {
       stats.qbStatusFailed++;
@@ -447,7 +481,7 @@ async function contactIdsInPipeline(locationId, pipelineId) {
   return set;
 }
 
-async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineAt) {
+async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineAt, linkIndex) {
   const data = await makeGhlRequest(
     locationId,
     'GET',
@@ -494,7 +528,7 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
     // rejects must not abort the pass: aborting means the cursor is never written, so
     // every contact on this page gets re-pushed on the next tick, forever.
     try {
-      const link = await getLink(locationId, 'contact', { ghlId: contact.id });
+      const link = lookupLink(linkIndex, 'contact', { ghlId: contact.id });
       if (isEcho(ghlUpdatedAt, link)) continue;
 
       const firstName = contact.firstName ?? undefined;
@@ -524,7 +558,7 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
           // has an address, so a GHL contact without one can't wipe QB's.
           ...(billAddr ? { BillAddr: billAddr } : {}),
         });
-        await touchLink(link.id);
+        await touchLink(link);
         stats.ghlToQbContactsUpdated++;
       } else {
         // Not yet in QuickBooks → only push if it clears the pipeline gate.
@@ -540,7 +574,7 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
           phone: contact.phone,
           billAddr,
         });
-        await upsertLink(locationId, 'contact', contact.id, customer.Id);
+        await upsertLink(linkIndex, locationId, 'contact', contact.id, customer.Id);
         stats.ghlToQbContactsCreated++;
       }
     } catch (err) {
@@ -574,17 +608,25 @@ function oppGhlFieldValues(opp) {
   return out;
 }
 
-async function syncGhlOpportunitiesToQb(locationId, since, stats) {
+async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, linkIndex) {
   const data = await makeGhlRequest(
     locationId,
     'GET',
     `/opportunities/search?location_id=${encodeURIComponent(locationId)}&limit=100`,
   );
-  const opportunities = data?.opportunities ?? [];
+  // Oldest change first, same reason as both contact halves: this loop shares the
+  // single timestamp cursor, so a pass that can't finish may only advance it to
+  // the last record it actually handled.
+  const opportunities = [...(data?.opportunities ?? [])].sort(
+    (a, b) => ghlUpdatedMs(a) - ghlUpdatedMs(b),
+  );
 
   // The location's QBO item mapping (mapperType 'qb_item') → the line item to
   // bill; null falls back to QBO's default item. Resolved once per pass.
   const itemMaps = await listMappers(locationId, 'quickbooks', 'qb_item');
+
+  let processedThrough = 0;
+  let handled = 0;
 
   for (const opp of opportunities) {
     // The QBO item to bill for THIS deal, resolved from the deal's own GHL
@@ -592,14 +634,34 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
     // selecting field points at; null → QBO's default item).
     const itemRef = resolveItemRef(itemMaps, oppGhlFieldValues(opp));
     const ghlUpdatedAt = opp.updatedAt ?? opp.dateUpdated;
-    if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) continue;
+    if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) {
+      handled++; // already covered by the cursor — not deferred work
+      continue;
+    }
+
+    // Budget guard — see syncQbCustomersToGhl. This loop was the one half with no
+    // deadline: each opportunity costs a link lookup (~2.5s through DB_WORKER), so
+    // a backlog of them outran the whole scheduled invocation and died silently
+    // AFTER the contact halves — cursor never written, nothing recorded (the
+    // 07-31 stuck-cursor incident, same mechanism as 07-30's).
+    if (
+      deadlineAt &&
+      Date.now() >= deadlineAt &&
+      processedThrough &&
+      ghlUpdatedMs(opp) !== processedThrough
+    ) {
+      break;
+    }
+    handled++;
+    const oppTs = ghlUpdatedMs(opp);
+    if (oppTs) processedThrough = oppTs;
 
     // Per-record isolation, same polarity as both contact loops. Without it, one
     // estimate QuickBooks rejects throws out of syncLocation before setSyncState,
     // so the cursor never advances and the whole tenant re-runs forever — the
     // exact deadlock the contact loops were cured of on 07-29/30.
     try {
-      const link = await getLink(locationId, 'estimate', { ghlId: opp.id });
+      const link = lookupLink(linkIndex, 'estimate', { ghlId: opp.id });
       if (isEcho(ghlUpdatedAt, link)) continue;
 
       const amountCents = Math.round((opp.monetaryValue ?? 0) * 100);
@@ -621,11 +683,11 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
           description: opp.name,
           itemRef,
         });
-        await touchLink(link.id);
+        await touchLink(link);
         stats.ghlToQbEstimatesUpdated++;
       } else {
         const contactLink = opp.contactId
-          ? await getLink(locationId, 'contact', { ghlId: opp.contactId })
+          ? lookupLink(linkIndex, 'contact', { ghlId: opp.contactId })
           : null;
         if (!contactLink) {
           console.warn(`[rockwood] skipping GHL opportunity ${opp.id}: no QB customer link for contact ${opp.contactId ?? '(none)'}`);
@@ -639,7 +701,7 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
           description: opp.name,
           itemRef,
         });
-        await upsertLink(locationId, 'estimate', opp.id, estimate.Id);
+        await upsertLink(linkIndex, locationId, 'estimate', opp.id, estimate.Id);
         stats.ghlToQbEstimatesCreated++;
       }
     } catch (err) {
@@ -658,6 +720,8 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats) {
       });
     }
   }
+
+  return { processedThrough, deferred: opportunities.length - handled };
 }
 
 // ─── Entry points ─────────────────────────────────────────────────────────────
@@ -707,12 +771,19 @@ export async function syncLocation(locationId, settings) {
     // Estimates QuickBooks rejected, recorded per record and skipped so the pass
     // still reaches setSyncState (see the isolation note in the loop).
     ghlToQbEstimatesFailed: 0,
+    // Opportunities this tick ran out of budget before reaching — normal while a
+    // backlog drains; the cursor holds at the loop's high-water mark.
+    ghlToQbEstimatesDeferred: 0,
     skipped: 0,
   };
 
   // Where the cursor lands when this pass finishes everything. A pass that runs out
   // of budget replaces this with the last record it actually handled.
   let cursorAt = runStartedAt;
+
+  // All of this location's links, once. Every loop below reads from this index
+  // instead of paying one DB round-trip (= one subrequest) per record.
+  const linkIndex = await loadLinkIndex(locationId);
 
   // QB → GHL (Change Data Capture). Skipped entirely for a push-only tenant so
   // we don't even read QuickBooks needlessly. Reads only — never writes QBO.
@@ -729,6 +800,7 @@ export async function syncLocation(locationId, settings) {
       stats,
       cfg,
       passDeadline,
+      linkIndex,
     );
     stats.qbToGhlContactsDeferred = pull.deferred;
 
@@ -742,7 +814,7 @@ export async function syncLocation(locationId, settings) {
         ? new Date(Math.max(pull.processedThrough, since.getTime()))
         : since;
     } else {
-      await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg);
+      await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex);
     }
   }
 
@@ -757,6 +829,7 @@ export async function syncLocation(locationId, settings) {
       stats,
       cfg,
       passDeadline,
+      linkIndex,
     );
     stats.ghlToQbContactsDeferred = push.deferred;
 
@@ -770,7 +843,19 @@ export async function syncLocation(locationId, settings) {
         : since;
       if (pushMark < cursorAt) cursorAt = pushMark;
     } else {
-      await syncGhlOpportunitiesToQb(locationId, since, stats);
+      const est = await syncGhlOpportunitiesToQb(locationId, since, stats, passDeadline, linkIndex);
+      stats.ghlToQbEstimatesDeferred = est.deferred;
+
+      if (est.deferred > 0) {
+        // Same single-cursor rule as the halves above: move it no further than
+        // this loop's high-water mark, or its deferred opportunities are skipped
+        // for good. The other halves redo a little work next tick — safe, every
+        // operation is an upsert or a link touch.
+        const estMark = est.processedThrough
+          ? new Date(Math.max(est.processedThrough, since.getTime()))
+          : since;
+        if (estMark < cursorAt) cursorAt = estMark;
+      }
     }
   }
 
