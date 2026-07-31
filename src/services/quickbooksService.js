@@ -853,9 +853,12 @@ export async function createInvoice(locationId, { qbCustomerId, amountCents, des
         DetailType: 'SalesItemLineDetail',
         Amount: amount,
         Description: description ?? undefined,
-        // ItemRef "1" is QBO's default Services item; the caller can override it
-        // with the tenant's real item via a mapper (appSlug 'quickbooks', type
-        // 'qb_item') — resolved to `itemRef` before the call.
+        // ⚠️ ItemRef "1" is NOT guaranteed to exist — QBO item ids are per-company
+        // (Rockwood has none, and this exact fallback 400'd its estimate sync,
+        // 2026-07-31). Kept here only because the milestone-invoice flow's tenants
+        // haven't hit it; prefer the tenant's mapper (appSlug 'quickbooks', type
+        // 'qb_item') resolved to `itemRef` before the call, like upsertEstimate
+        // now requires.
         SalesItemLineDetail: { ItemRef: { value: String(itemRef || '1') } },
       },
     ],
@@ -872,6 +875,13 @@ export async function createInvoice(locationId, { qbCustomerId, amountCents, des
 export async function upsertEstimate(locationId, {
   qbEstimateId, syncToken, qbCustomerId, amountCents, description, itemRef,
 }) {
+  // No fallback item: the old `itemRef || '1'` guessed at the client's chart of
+  // items, and any company without an item Id 1 rejects the write with
+  // [2500] Invalid Reference Id (Rockwood, 2026-07-31). The caller resolves the
+  // item from the tenant's mapping (or the estimate's existing line) and skips
+  // the record when it can't — nothing arbitrary may be billed into a client's
+  // books from here.
+  if (!itemRef) throw createError(400, 'itemRef is required — no QuickBooks item to bill');
   const amount = Math.round(amountCents) / 100;
   const body = {
     ...(qbEstimateId ? { Id: String(qbEstimateId), SyncToken: String(syncToken), sparse: true } : {}),
@@ -881,7 +891,7 @@ export async function upsertEstimate(locationId, {
         DetailType: 'SalesItemLineDetail',
         Amount: amount,
         Description: description ?? undefined,
-        SalesItemLineDetail: { ItemRef: { value: String(itemRef || '1') } },
+        SalesItemLineDetail: { ItemRef: { value: String(itemRef) } },
       },
     ],
   };

@@ -12,7 +12,7 @@ import {
 import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
-import { recordThrown } from './errorLogService.js';
+import { recordThrown, recordError } from './errorLogService.js';
 import {
   syncFlags,
   estimateStatus,
@@ -622,16 +622,23 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
   );
 
   // The location's QBO item mapping (mapperType 'qb_item') → the line item to
-  // bill; null falls back to QBO's default item. Resolved once per pass.
+  // bill. Resolved once per pass. There is deliberately NO fallback item: the
+  // old hardcoded ItemRef '1' was a guess about the client's chart of items,
+  // and QBO rejects it with [2500] Invalid Reference Id in any company that
+  // has no item with that Id (Rockwood, 2026-07-31 — the estimate 400 that
+  // blocked this tenant since 07-30).
   const itemMaps = await listMappers(locationId, 'quickbooks', 'qb_item');
 
   let processedThrough = 0;
   let handled = 0;
+  // Opportunities skipped because no QBO item could be determined for them.
+  // Reported once per pass, not once per record — it is one config problem.
+  let unmapped = 0;
 
   for (const opp of opportunities) {
     // The QBO item to bill for THIS deal, resolved from the deal's own GHL
     // custom-field values (so a 2+ item mapping picks the item the deal's
-    // selecting field points at; null → QBO's default item).
+    // selecting field points at; null → no usable mapping, handled below).
     const itemRef = resolveItemRef(itemMaps, oppGhlFieldValues(opp));
     const ghlUpdatedAt = opp.updatedAt ?? opp.dateUpdated;
     if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) {
@@ -675,13 +682,25 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
         if (!estimate) continue;
         if (targetIsNewer(ghlUpdatedAt, estimate.MetaData?.LastUpdatedTime)) continue;
 
+        // No mapping? Reuse the item already on the estimate — an amount update
+        // must not require config it didn't need to create the line, and writing
+        // back the estimate's own item can't corrupt the client's books.
+        const currentItemRef = (estimate.Line ?? []).find(
+          (l) => l?.DetailType === 'SalesItemLineDetail',
+        )?.SalesItemLineDetail?.ItemRef?.value;
+        const effectiveItemRef = itemRef ?? currentItemRef;
+        if (!effectiveItemRef) {
+          unmapped++;
+          continue;
+        }
+
         await upsertEstimate(locationId, {
           qbEstimateId: estimate.Id,
           syncToken: estimate.SyncToken,
           qbCustomerId: estimate.CustomerRef?.value,
           amountCents,
           description: opp.name,
-          itemRef,
+          itemRef: effectiveItemRef,
         });
         await touchLink(link);
         stats.ghlToQbEstimatesUpdated++;
@@ -692,6 +711,14 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
         if (!contactLink) {
           console.warn(`[rockwood] skipping GHL opportunity ${opp.id}: no QB customer link for contact ${opp.contactId ?? '(none)'}`);
           stats.skipped++;
+          continue;
+        }
+
+        // Creating a line requires knowing which item to bill; without a mapping
+        // there is nothing safe to send (fail closed — this writes into a
+        // client's accounting system). Reported once per pass below.
+        if (!itemRef) {
+          unmapped++;
           continue;
         }
 
@@ -719,6 +746,25 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
         },
       });
     }
+  }
+
+  if (unmapped > 0) {
+    stats.ghlToQbEstimatesUnmapped = unmapped;
+    // One durable, actionable row per pass — this is a single configuration
+    // problem, not `unmapped` separate failures. Fingerprint stays stable
+    // across passes (digits normalise to <n>), so occurrences accumulate on
+    // one row until someone configures the mapping.
+    await recordError({
+      source: 'cron',
+      kind: 'qbo_item_mapping_missing',
+      appSlug: 'quickbooks',
+      locationId,
+      upstream: 'qbo',
+      message: itemMaps.length === 0
+        ? `Cannot push estimates to QuickBooks: no item mapping is configured for this location, so there is no QuickBooks item to bill. ${unmapped} opportunity(ies) skipped this pass. Add an Item mapping in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL.`
+        : `Cannot push ${unmapped} opportunity(ies) to QuickBooks: ${itemMaps.length} item mappings exist but none matched these deals' fields, so there is no QuickBooks item to bill. Check the Item mappings in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL.`,
+      context: { job: 'rockwood-quickbooks-sync', skippedOpportunities: unmapped },
+    });
   }
 
   return { processedThrough, deferred: opportunities.length - handled };
@@ -771,6 +817,9 @@ export async function syncLocation(locationId, settings) {
     // Estimates QuickBooks rejected, recorded per record and skipped so the pass
     // still reaches setSyncState (see the isolation note in the loop).
     ghlToQbEstimatesFailed: 0,
+    // Opportunities with no resolvable QBO item to bill (no/unmatched item
+    // mapping) — deliberately not pushed; one config error recorded per pass.
+    ghlToQbEstimatesUnmapped: 0,
     // Opportunities this tick ran out of budget before reaching — normal while a
     // backlog drains; the cursor holds at the loop's high-water mark.
     ghlToQbEstimatesDeferred: 0,
