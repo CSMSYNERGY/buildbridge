@@ -146,12 +146,67 @@ export function qbCustomFieldEntries(customer, mappings) {
  * new callers should say which entity they mean.
  */
 export function readQbCustomField(entity, fieldName) {
+  const cf = findQbCustomField(entity, fieldName);
+  return cf ? qbCustomFieldValue(cf) : null;
+}
+
+/** The raw CustomField entry matching `fieldName`, or null. */
+export function findQbCustomField(entity, fieldName) {
   if (!fieldName) return null;
-  const cf = (entity?.CustomField ?? []).find(
-    (f) => (f.Name ?? '').toLowerCase() === fieldName.toLowerCase(),
-  );
-  const value = cf?.StringValue?.trim();
-  return value || null;
+  const want = String(fieldName).trim().toLowerCase();
+  return (entity?.CustomField ?? []).find(
+    (f) => String(f?.Name ?? '').trim().toLowerCase() === want,
+  ) ?? null;
+}
+
+/**
+ * Pull the value out of a CustomField entry, whatever shape it arrived in.
+ *
+ * Legacy sales-form slots are always `StringType` + `StringValue`. **Enhanced
+ * (modern) fields are not** — they support String, Number, Date and **List**, and
+ * List is what a DROPDOWN is. Rockwood's `Rep`, `Siding Color`, `Trim Color` and
+ * `Roofing Color` are all dropdowns, which is itself proof they are enhanced
+ * fields: a legacy slot is a free-text box and cannot be a dropdown at all.
+ *
+ * Intuit's exact JSON for a List value is not something I could confirm from the
+ * docs, so this reads every plausible carrier rather than betting on one, and a
+ * dropdown that arrives as `{Name, Value}` (an option id plus its label) yields the
+ * LABEL — "Cody" is what belongs in Synergy, not an option id nobody recognises.
+ * `describeQbCustomField` reports the keys actually seen so the real shape gets
+ * recorded the first time a live document carries one.
+ */
+export function qbCustomFieldValue(cf) {
+  if (!cf) return null;
+  const scalar = (v) => {
+    if (v == null) return null;
+    if (typeof v === 'string') return v.trim() || null;
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (typeof v === 'object') {
+      // A chosen option: prefer human-readable label keys over the id.
+      for (const k of ['Label', 'Name', 'StringValue', 'Value', 'value']) {
+        const inner = scalar(v[k]);
+        if (inner) return inner;
+      }
+    }
+    return null;
+  };
+  for (const k of ['StringValue', 'Value', 'ListValue', 'NumberValue', 'DateValue', 'BooleanValue']) {
+    const v = scalar(cf[k]);
+    if (v) return v;
+  }
+  return null;
+}
+
+/**
+ * The KEYS present on a CustomField entry — never the values. For diagnostics: it
+ * tells us how QuickBooks actually serialises a dropdown without putting a
+ * salesperson's name into error_events, which is customer data.
+ */
+export function describeQbCustomField(cf) {
+  if (!cf || typeof cf !== 'object') return null;
+  return Object.keys(cf)
+    .map((k) => (cf[k] && typeof cf[k] === 'object' ? `${k}{${Object.keys(cf[k]).join('|')}}` : k))
+    .join(',');
 }
 
 /** Historical alias — reads a QBO **Customer** custom field. See readQbCustomField. */

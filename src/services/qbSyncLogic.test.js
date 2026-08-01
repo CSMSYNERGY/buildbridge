@@ -5,6 +5,8 @@ import {
   shouldUpgradeStatus,
   readQbCustomerField,
   readQbCustomField,
+  qbCustomFieldValue,
+  describeQbCustomField,
   collectTxnCustomFieldNames,
   repByCustomer,
   deriveContactName,
@@ -433,6 +435,53 @@ describe('readQbCustomField — reads any entity that carries CustomField[]', ()
     // The historical alias is the same function — a Customer carrying the field
     // still works, it just is not where QuickBooks puts it.
     expect(readQbCustomerField(estimate, 'Rep')).toBe('Cody');
+  });
+});
+
+describe('qbCustomFieldValue — dropdown (List) fields, not just legacy text', () => {
+  // Rockwood's four fields are all DROPDOWNS, which is itself proof they are
+  // enhanced fields: a legacy slot is a free-text box and cannot be a dropdown.
+  // Intuit's exact List JSON is unconfirmed, so every plausible carrier is read.
+  it('reads a legacy StringType value', () => {
+    expect(qbCustomFieldValue({ Type: 'StringType', StringValue: 'Cody' })).toBe('Cody');
+  });
+
+  it('reads a bare Value', () => {
+    expect(qbCustomFieldValue({ Type: 'ListType', Value: 'Cody' })).toBe('Cody');
+  });
+
+  it('prefers the LABEL over the option id when a dropdown arrives as an object', () => {
+    // An option id in a Synergy field would be meaningless to staff.
+    expect(qbCustomFieldValue({ Type: 'ListType', Value: { Id: '7', Name: 'Cody' } })).toBe('Cody');
+    expect(qbCustomFieldValue({ ListValue: { Label: 'Cody', Id: '7' } })).toBe('Cody');
+  });
+
+  it('trims, and treats blank or absent as no value', () => {
+    expect(qbCustomFieldValue({ StringValue: '  Cody  ' })).toBe('Cody');
+    expect(qbCustomFieldValue({ StringValue: '   ' })).toBeNull();
+    expect(qbCustomFieldValue({ Type: 'ListType' })).toBeNull();
+    expect(qbCustomFieldValue(null)).toBeNull();
+  });
+
+  it('resolves a dropdown end-to-end through repByCustomer', () => {
+    const txn = {
+      CustomerRef: { value: '58' },
+      MetaData: { LastUpdatedTime: '2026-07-31T18:00:00Z' },
+      CustomField: [{ DefinitionId: '1', Name: 'Rep', Type: 'ListType', Value: { Id: '7', Name: 'Cody' } }],
+    };
+    expect(repByCustomer([txn], [], 'Rep').get('58')).toBe('Cody');
+  });
+});
+
+describe('describeQbCustomField — report the shape, never the value', () => {
+  it('names the keys, including nested ones, and no data', () => {
+    const shape = describeQbCustomField({ DefinitionId: '1', Name: 'Rep', Value: { Id: '7', Name: 'Cody' } });
+    expect(shape).toBe('DefinitionId,Name,Value{Id|Name}');
+    expect(shape).not.toContain('Cody');
+  });
+
+  it('returns null for a missing entry', () => {
+    expect(describeQbCustomField(null)).toBeNull();
   });
 });
 

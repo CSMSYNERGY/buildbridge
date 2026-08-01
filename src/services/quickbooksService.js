@@ -621,25 +621,40 @@ export async function getCustomFieldDefinitions(locationId) {
  *
  * @returns {Promise<Array<{name:string, definitionId:string|null, seenOn:string[]}>>}
  */
-export async function getTransactionCustomFieldNames(locationId, sample = 25) {
+export async function getRecentSalesDocs(locationId, sample = 50) {
   assertConfigured();
-  const n = Math.min(Math.max(Number(sample) || 25, 1), 100);
-  // Newest first: a company that renamed a field should surface the current name.
+  const n = Math.min(Math.max(Number(sample) || 50, 1), 100);
+  // `include=enhancedAllCustomFields` is the whole ballgame. Without it the response
+  // carries ONLY the three legacy sales-form slots — and Intuit maps those
+  // immutably, so they come back even when marked inactive, which is exactly the
+  // misleading result we got on Rockwood ("SIDING COLOR -1 (inactive)",
+  // "TRIM COLOR (inactive)") while the four fields on their actual form stayed
+  // invisible. With it, the modern ("enhanced") fields are returned too — including
+  // List/dropdown ones, which legacy slots cannot even represent.
+  // Ref: Intuit docs, "API response not showing existing custom field".
+  //
+  // Newest first, because the rep we want is whatever the latest document says.
   const q = (entity) =>
     makeQuickBooksRequest(
       locationId,
       'GET',
-      `/query?minorversion=75&query=${encodeURIComponent(
+      `/query?minorversion=75&include=enhancedAllCustomFields&query=${encodeURIComponent(
         `select * from ${entity} orderby MetaData.LastUpdatedTime desc maxresults ${n}`,
       )}`,
     )
       .then((d) => d?.QueryResponse?.[entity] ?? [])
       .catch((err) => {
-        console.error(`[quickbooksService] ${entity} custom-field probe failed:`, err?.message);
+        console.error(`[quickbooksService] ${entity} enhanced-field read failed:`, err?.message);
         return [];
       });
 
   const [estimates, invoices] = await Promise.all([q('Estimate'), q('Invoice')]);
+  return { estimates, invoices };
+}
+
+/** Field NAMES present on recent documents. Thin wrapper — see getRecentSalesDocs. */
+export async function getTransactionCustomFieldNames(locationId, sample = 50) {
+  const { estimates, invoices } = await getRecentSalesDocs(locationId, sample);
   return collectTxnCustomFieldNames(estimates, invoices);
 }
 

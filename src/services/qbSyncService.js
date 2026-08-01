@@ -8,7 +8,7 @@ import {
   findOrCreateCustomer,
   makeQuickBooksRequest,
   upsertEstimate,
-  getTransactionCustomFieldNames,
+  getRecentSalesDocs,
 } from './quickbooksService.js';
 import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
@@ -25,6 +25,9 @@ import {
   mergeCustomFields,
   qbCustomFieldEntries,
   repByCustomer,
+  collectTxnCustomFieldNames,
+  findQbCustomField,
+  describeQbCustomField,
   resolveItemRef,
   resolveSalesperson,
   salespersonCustomField,
@@ -414,7 +417,22 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // fields on their forms turn out to be App Foundations fields, the values never
   // reach us and no amount of configuration helps. Silence here used to look
   // identical to success.
-  const reps = repSource ? repByCustomer(estimates, invoices, repSource) : new Map();
+  // ⚠️ NOT the CDC documents. The `estimates`/`invoices` passed in come from Change
+  // Data Capture, which does not carry `include=enhancedAllCustomFields`, so a modern
+  // dropdown field is simply absent from them. The rep is therefore read from a
+  // dedicated recent-documents fetch that DOES request enhanced fields. Two extra
+  // reads per pass, only when a rep source is configured, and "latest document per
+  // customer" is the right window anyway.
+  let reps = new Map();
+  let repDocs = null;
+  if (repSource) {
+    try {
+      repDocs = await getRecentSalesDocs(locationId);
+      reps = repByCustomer(repDocs.estimates, repDocs.invoices, repSource);
+    } catch (err) {
+      console.warn(`[rockwood] enhanced custom-field read failed: ${err.message}`);
+    }
+  }
   if (repSource) {
     if (reps.size === 0) {
       // This pass carried no rep — but that is ambiguous, because the estimates and
@@ -423,14 +441,30 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       // documents: if the configured field exists there, this is a quiet pass and
       // there is nothing to report; if it does not, the configuration is genuinely
       // broken and we say so, naming the fields that DO exist so the fix is obvious.
-      let names = [];
-      try {
-        names = await getTransactionCustomFieldNames(locationId);
-      } catch (err) {
-        console.warn(`[rockwood] rep field probe failed: ${err.message}`);
-      }
+      const names = repDocs
+        ? collectTxnCustomFieldNames(repDocs.estimates, repDocs.invoices)
+        : [];
       const present = names.some((f) => f.name.toLowerCase() === repSource.toLowerCase());
-      if (names.length > 0 && !present) {
+      // The field is THERE but produced no value ⇒ we can see it and cannot read it.
+      // That is the dropdown/List case, and the only way to learn its real JSON is to
+      // report the KEYS a live entry carries. Keys only — a rep's name is customer data.
+      if (present) {
+        const shapes = new Set();
+        for (const txn of [...(repDocs?.estimates ?? []), ...(repDocs?.invoices ?? [])]) {
+          const cf = findQbCustomField(txn, repSource);
+          const shape = describeQbCustomField(cf);
+          if (shape) shapes.add(shape);
+        }
+        await recordError({
+          source: 'cron',
+          kind: 'qbo_rep_value_unreadable',
+          appSlug: 'quickbooks',
+          locationId,
+          upstream: 'qbo',
+          message: `QuickBooks field "${repSource}" IS present on recent documents, but no value could be read from it — most likely a dropdown (List) type whose JSON shape this reader does not yet handle. Entry shapes seen: ${[...shapes].join(' ; ') || '(none)'}. Send this line to whoever maintains BuildBridge; the fix is a one-line addition to qbCustomFieldValue.`,
+          context: { job: 'rockwood-quickbooks-sync', field: repSource, shapes: [...shapes] },
+        });
+      } else if (names.length > 0) {
         // Field NAMES and counts only — never a rep's name, which is customer data.
         await recordError({
           source: 'cron',
