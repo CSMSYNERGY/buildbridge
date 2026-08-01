@@ -8,6 +8,7 @@ import {
   findOrCreateCustomer,
   makeQuickBooksRequest,
   upsertEstimate,
+  getTransactionCustomFieldNames,
 } from './quickbooksService.js';
 import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
@@ -407,10 +408,55 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // reading `Customer.CustomField`, where the value has never been.
   const repSource = cfg?.qboAssignedUserField ?? null;
   const repTarget = cfg?.qboAssignedUserGhlField ?? null;
-  const reps = (repSource && repTarget) ? repByCustomer(estimates, invoices, repSource) : new Map();
-  // Nothing configured on either side ⇒ nothing to do. Checked AFTER reps so a
-  // location that wants only the rep (no status reflection) still runs.
-  if (!targetField && reps.size === 0) return;
+  // Resolved whenever a SOURCE is named, even with no target yet — the result is the
+  // diagnostic below, and it answers the one question nobody can answer from outside:
+  // does this QuickBooks company actually expose that field through REST? If the four
+  // fields on their forms turn out to be App Foundations fields, the values never
+  // reach us and no amount of configuration helps. Silence here used to look
+  // identical to success.
+  const reps = repSource ? repByCustomer(estimates, invoices, repSource) : new Map();
+  if (repSource) {
+    if (reps.size === 0) {
+      // This pass carried no rep — but that is ambiguous, because the estimates and
+      // invoices here come from Change Data Capture, so a quiet pass legitimately sees
+      // nothing at all. Resolve the ambiguity with ONE read-only probe of recent
+      // documents: if the configured field exists there, this is a quiet pass and
+      // there is nothing to report; if it does not, the configuration is genuinely
+      // broken and we say so, naming the fields that DO exist so the fix is obvious.
+      let names = [];
+      try {
+        names = await getTransactionCustomFieldNames(locationId);
+      } catch (err) {
+        console.warn(`[rockwood] rep field probe failed: ${err.message}`);
+      }
+      const present = names.some((f) => f.name.toLowerCase() === repSource.toLowerCase());
+      if (names.length > 0 && !present) {
+        // Field NAMES and counts only — never a rep's name, which is customer data.
+        await recordError({
+          source: 'cron',
+          kind: 'qbo_rep_field_not_found',
+          appSlug: 'quickbooks',
+          locationId,
+          upstream: 'qbo',
+          message: `Configured to read the salesperson from QuickBooks field "${repSource}", but no recent estimate or invoice carries a custom field by that name. The fields actually present are: ${names.map((f) => f.name).join(', ')}. Open BuildBridge → QuickBooks and pick one of those.`,
+          context: { job: 'rockwood-quickbooks-sync', field: repSource, found: names.map((f) => f.name) },
+        });
+      }
+    } else if (reps.size > 0 && !repTarget) {
+      await recordError({
+        source: 'cron',
+        kind: 'qbo_rep_target_missing',
+        appSlug: 'quickbooks',
+        locationId,
+        upstream: 'ghl',
+        message: `Read the salesperson from QuickBooks field "${repSource}" for ${reps.size} customer(s), but no Synergy field is chosen to copy it into, so nothing was written. Set "Copy it into this Synergy field" in BuildBridge → QuickBooks.`,
+        context: { job: 'rockwood-quickbooks-sync', field: repSource, customers: reps.size },
+      });
+    }
+  }
+  // Nothing to write ⇒ stop here. The rep half needs BOTH a resolved value and a
+  // destination; the diagnostics above have already explained whichever is missing.
+  if (!targetField && !(repTarget && reps.size > 0)) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
   const byCustomer = new Map();
@@ -424,8 +470,11 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     for (const est of estimates) consider(est.CustomerRef?.value, estimateStatus(est));
     for (const inv of invoices) consider(inv.CustomerRef?.value, 'Invoiced');
   }
-  // A customer whose only news is a rep still needs visiting.
-  for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+  // A customer whose only news is a rep still needs visiting — but only when there is
+  // somewhere to put it. Without a target these would be pointless GHL reads.
+  if (repTarget) {
+    for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+  }
 
   for (const [customerId, status] of byCustomer) {
     // Same per-record isolation as the contact loop above. The GET below was already
