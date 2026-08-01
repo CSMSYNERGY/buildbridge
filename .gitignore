@@ -5,6 +5,10 @@
 # Cloudflare / Wrangler
 .wrangler/
 
+# Supabase CLI local state (which project this clone is linked to) — per-machine,
+# and it names the project ref, so it does not belong in a PUBLIC repo.
+supabase/.temp/
+
 # Dependencies
 node_modules/
 
