@@ -14,12 +14,14 @@ import {
   makeQuickBooksRequest,
   getCustomFieldDefinitions,
   getTransactionCustomFieldNames,
+  getRecentSalesDocs,
   enableLegacySalesCustomField,
   listItems,
   getCompanyName,
   setCredentialDisplayName,
 } from '../services/quickbooksService.js';
 import { listOpenIssues } from '../services/errorLogService.js';
+import { collectRepValues } from '../services/qbSyncLogic.js';
 import {
   listMilestoneDefinitions,
   serializeDefinition,
@@ -204,6 +206,37 @@ function parseQboCustomFields(preferences) {
     }
   }
   return out;
+}
+
+/**
+ * GET /api/quickbooks/rep-values
+ * The distinct values of the configured rep field, from the company's own recent
+ * estimates and invoices — the left-hand dropdown of the rep → Synergy-user mapping.
+ *
+ * Observed values rather than the dropdown's defined option list, because the option
+ * list lives in the App Foundations API (paid tier) while the values ride along on
+ * every transaction for free. It also shows only what is actually in use.
+ *
+ * ⚠️ These are frequently OPTION IDS, not names — Rockwood's are "1" and "2". That is
+ * exactly why a mapping exists instead of name matching: nothing can be inferred from
+ * "1", so a human maps it once. `shape` is returned to make an unexpected
+ * serialisation diagnosable.
+ */
+export async function getQuickBooksRepValues(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const creds = await getCredentialsOrNull(locationId);
+    if (!creds) return res.json({ field: null, values: [] });
+
+    const settings = await getLocationSettings(locationId);
+    const field = settings?.qboAssignedUserField ?? null;
+    if (!field) return res.json({ field: null, values: [] });
+
+    const { estimates, invoices } = await getRecentSalesDocs(locationId);
+    res.json({ field, values: collectRepValues(estimates, invoices, field) });
+  } catch (err) {
+    next(err);
+  }
 }
 
 /**
@@ -600,6 +633,7 @@ function serializeSettings(s) {
     qboSalespersonQbField: s.qboSalespersonQbField ?? null,
     qboSalespersonSlot: s.qboSalespersonSlot ?? 1,
     qboSalespersonGhlField: s.qboSalespersonGhlField ?? null,
+    qboRepToAssignee: !!s.qboRepToAssignee,
     qboInvoiceLeadDays: s.qboInvoiceLeadDays,
   };
 }
@@ -635,6 +669,7 @@ export async function saveQuickBooksSettings(req, res, next) {
       qboSalespersonQbField,
       qboSalespersonSlot,
       qboSalespersonGhlField,
+      qboRepToAssignee,
       qboInvoiceLeadDays,
     } = req.body;
 
@@ -648,6 +683,7 @@ export async function saveQuickBooksSettings(req, res, next) {
       qboSalespersonQbField,
       qboSalespersonSlot,
       qboSalespersonGhlField,
+      qboRepToAssignee,
       qboInvoiceLeadDays,
     });
 

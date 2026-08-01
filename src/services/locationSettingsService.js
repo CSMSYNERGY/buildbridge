@@ -23,6 +23,7 @@ const DEFAULTS = {
   qboSalespersonQbField: null,
   qboSalespersonSlot: 1,
   qboSalespersonGhlField: null,
+  qboRepToAssignee: false,
   qboInvoiceLeadDays: 3,
   idearoomWebhookToken: null,
   idearoomPipelineId: null,
@@ -89,6 +90,9 @@ export async function upsertLocationSettings(locationId, fields = {}) {
   if (fields.qboSalespersonGhlField !== undefined) {
     const v = fields.qboSalespersonGhlField;
     set.qboSalespersonGhlField = v ? String(v) : null;
+  }
+  if (fields.qboRepToAssignee !== undefined) {
+    set.qboRepToAssignee = !!fields.qboRepToAssignee;
   }
   if (fields.qboInvoiceLeadDays !== undefined) {
     const n = Number(fields.qboInvoiceLeadDays);

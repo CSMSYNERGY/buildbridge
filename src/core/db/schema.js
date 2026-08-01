@@ -271,6 +271,12 @@ export const locationSettings = pgTable('location_settings', {
   // Optional GHL opportunity custom-field id naming the salesperson directly.
   // Set and non-empty on a deal ⇒ wins over the assigned-user mapping.
   qboSalespersonGhlField: text('qbo_salesperson_ghl_field'),
+  // ── QuickBooks rep → Synergy ASSIGNED USER (migration 0009, QBO→GHL) ──
+  // Set the contact's assigned user from the QuickBooks rep, via `qb_rep_user`
+  // mapper rows (external_key = the QBO rep value, ghl_value = Synergy user id).
+  // Off by default and explicit, never inferred from "mappings exist": assigning
+  // a contact moves lead ownership and fires notifications.
+  qboRepToAssignee: boolean('qbo_rep_to_assignee').notNull().default(false),
   // Default days before a milestone's date to raise its invoice (deposit is
   // always immediate). Copied onto each qb_milestones row at creation time.
   qboInvoiceLeadDays: integer('qbo_invoice_lead_days').notNull().default(3),

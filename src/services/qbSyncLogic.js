@@ -279,6 +279,59 @@ export function repByCustomer(estimates = [], invoices = [], fieldName) {
 }
 
 /**
+ * Which Synergy USER to assign for a given QuickBooks rep value.
+ *
+ * Deliberately a lookup and nothing else — no name matching, no fuzzy fallback.
+ * Proven necessary on live data: Rockwood's rep values are **"1"** and **"2"**,
+ * because a QuickBooks dropdown puts the option ID on the transaction, not the
+ * label. Nothing can be inferred from "1"; only someone who knows their own
+ * QuickBooks can say who it is. So the mapping IS the feature.
+ *
+ * `mappings` are `qb_rep_user` rows: `externalKey` = the QBO rep value as it
+ * arrives, `ghlValue` = the Synergy user id. Comparison is trimmed and
+ * case-insensitive so a mapping typed as "cody" still matches "Cody".
+ *
+ * @returns {?string} Synergy user id, or null to leave the assignment alone.
+ */
+export function resolveAssignee(mappings, repValue) {
+  const want = String(repValue ?? '').trim().toLowerCase();
+  if (!want) return null;
+  const rows = Array.isArray(mappings) ? mappings : [];
+  const hit = rows.find(
+    (m) => m && m.ghlValue && String(m.externalKey ?? '').trim().toLowerCase() === want,
+  );
+  return hit ? String(hit.ghlValue) : null;
+}
+
+/**
+ * Distinct rep values seen on a batch of transactions, with a label when one is
+ * available — this populates the left-hand dropdown of the mapping UI.
+ *
+ * Both are returned because we do not yet know whether QuickBooks ships a label
+ * alongside the option id. `value` is what the sync will match on and is the
+ * source of truth; `label` is cosmetic and falls back to the value. `shape` names
+ * the entry's KEYS so an unexpected serialisation is diagnosable without dumping
+ * data.
+ */
+export function collectRepValues(estimates = [], invoices = [], fieldName) {
+  const out = new Map(); // value -> { value, label, count, shape }
+  if (!fieldName) return [];
+  for (const txn of [...(estimates ?? []), ...(invoices ?? [])]) {
+    const cf = findQbCustomField(txn, fieldName);
+    const value = qbCustomFieldValue(cf);
+    if (!value) continue;
+    // A label is only meaningful if it differs from the raw value; when a dropdown
+    // arrives as {Id, Name} the reader already returns the Name, so value IS the
+    // label and there is nothing extra to show.
+    const label = (cf && typeof cf.Value === 'object' && (cf.Value.Name ?? cf.Value.Label)) || null;
+    const hit = out.get(value) ?? { value, label: label || value, count: 0, shape: describeQbCustomField(cf) };
+    hit.count += 1;
+    out.set(value, hit);
+  }
+  return [...out.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+}
+
+/**
  * Pick the QBO Item id to put on an invoice/estimate line from the tenant's
  * configured item mappings (mapperType 'qb_item'; each row externalKey = QBO
  * Item Id, ghlValue = the GHL/Synergy field that selects it) and this deal's

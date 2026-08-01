@@ -36,6 +36,7 @@ import {
   getQuickBooksSettings,
   saveQuickBooksSettings,
   getQuickBooksFields,
+  getQuickBooksRepValues,
   getQuickBooksItems,
   createSalespersonField,
 } from '../controllers/quickbooksController.js';
@@ -145,6 +146,10 @@ router.get('/quickbooks/settings', getQuickBooksSettings);
 router.put('/quickbooks/settings', actionLimiter, saveQuickBooksSettings);
 // QuickBooks company custom fields (for the field-mapper dropdown)
 router.get('/quickbooks/fields', getQuickBooksFields);
+// Distinct rep values on the company's own documents — the left dropdown of the
+// rep → Synergy-user mapping. Frequently option IDs ("1", "2"), which is why the
+// mapping exists at all.
+router.get('/quickbooks/rep-values', getQuickBooksRepValues);
 // Create/enable the legacy "Salesperson" sales-form custom field (QBO's UI no
 // longer offers legacy fields; the REST write path is the only way to get an
 // API-readable custom field without the tier-gated App Foundations scope)

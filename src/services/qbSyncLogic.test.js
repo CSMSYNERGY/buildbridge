@@ -8,6 +8,8 @@ import {
   qbCustomFieldValue,
   describeQbCustomField,
   collectTxnCustomFieldNames,
+  collectRepValues,
+  resolveAssignee,
   repByCustomer,
   deriveContactName,
   qbAddressToGhl,
@@ -470,6 +472,63 @@ describe('qbCustomFieldValue — dropdown (List) fields, not just legacy text', 
       CustomField: [{ DefinitionId: '1', Name: 'Rep', Type: 'ListType', Value: { Id: '7', Name: 'Cody' } }],
     };
     expect(repByCustomer([txn], [], 'Rep').get('58')).toBe('Cody');
+  });
+});
+
+describe('resolveAssignee — QuickBooks rep value → Synergy user id', () => {
+  // Rockwood's real values: QuickBooks sends the dropdown's OPTION ID, so these are
+  // "1" and "2", not names. Nothing is inferable from "1" — hence a mapping.
+  const maps = [
+    { externalKey: '1', ghlValue: 'usr_cody' },
+    { externalKey: '2', ghlValue: 'usr_carolyn' },
+  ];
+
+  it('maps an option id to the user it was pointed at', () => {
+    expect(resolveAssignee(maps, '1')).toBe('usr_cody');
+    expect(resolveAssignee(maps, '2')).toBe('usr_carolyn');
+  });
+
+  it('never guesses — an unmapped value assigns nobody', () => {
+    expect(resolveAssignee(maps, '3')).toBeNull();
+    expect(resolveAssignee([], '1')).toBeNull();
+    expect(resolveAssignee(maps, '')).toBeNull();
+    expect(resolveAssignee(maps, null)).toBeNull();
+    expect(resolveAssignee(undefined, '1')).toBeNull();
+  });
+
+  it('tolerates a name-shaped value, trimmed and case-insensitively', () => {
+    const byName = [{ externalKey: 'Cody', ghlValue: 'usr_cody' }];
+    expect(resolveAssignee(byName, ' cody ')).toBe('usr_cody');
+  });
+
+  it('ignores rows with no user to assign', () => {
+    expect(resolveAssignee([{ externalKey: '1', ghlValue: '' }], '1')).toBeNull();
+  });
+});
+
+describe('collectRepValues — the left-hand dropdown of the mapping UI', () => {
+  const mk = (v) => ({ CustomField: [{ DefinitionId: '1', Name: 'Rep', StringValue: v }] });
+
+  it('returns distinct values, most-used first', () => {
+    const got = collectRepValues([mk('1'), mk('2'), mk('1')], [], 'Rep');
+    expect(got.map((r) => r.value)).toEqual(['1', '2']);
+    expect(got[0].count).toBe(2);
+  });
+
+  it('falls back to the value as its own label when no label is carried', () => {
+    // The honest case for Rockwood: the id IS all we get, so the UI shows the id.
+    expect(collectRepValues([mk('1')], [], 'Rep')[0].label).toBe('1');
+  });
+
+  it('surfaces a label when a dropdown arrives as an object', () => {
+    const txn = { CustomField: [{ Name: 'Rep', Value: { Id: '1', Name: 'Cody' } }] };
+    const got = collectRepValues([txn], [], 'Rep');
+    expect(got[0]).toMatchObject({ value: 'Cody', label: 'Cody' });
+  });
+
+  it('returns [] with no field configured or nothing to read', () => {
+    expect(collectRepValues([mk('1')], [], null)).toEqual([]);
+    expect(collectRepValues([], [], 'Rep')).toEqual([]);
   });
 });
 

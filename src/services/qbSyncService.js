@@ -28,6 +28,7 @@ import {
   collectTxnCustomFieldNames,
   findQbCustomField,
   describeQbCustomField,
+  resolveAssignee,
   resolveItemRef,
   resolveSalesperson,
   salespersonCustomField,
@@ -411,6 +412,13 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // reading `Customer.CustomField`, where the value has never been.
   const repSource = cfg?.qboAssignedUserField ?? null;
   const repTarget = cfg?.qboAssignedUserGhlField ?? null;
+  // Assigning the Synergy USER from the rep — the route that needs no new field in
+  // the client's CRM. Mappings are read only when the toggle is on, so adding rows
+  // to look around cannot start reassigning anyone's leads.
+  const toAssignee = !!cfg?.qboRepToAssignee;
+  const repUserMaps = toAssignee && repSource
+    ? await listMappers(locationId, 'quickbooks', 'qb_rep_user')
+    : [];
   // Resolved whenever a SOURCE is named, even with no target yet — the result is the
   // diagnostic below, and it answers the one question nobody can answer from outside:
   // does this QuickBooks company actually expose that field through REST? If the four
@@ -549,9 +557,11 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       });
     }
   }
-  // Nothing to write ⇒ stop here. The rep half needs BOTH a resolved value and a
-  // destination; the diagnostics above have already explained whichever is missing.
-  if (!targetField && !(repTarget && reps.size > 0)) return;
+  // Nothing to write ⇒ stop here. The rep half needs a resolved value AND a
+  // destination — either a custom field or the assignee route; the diagnostics above
+  // have already explained whichever is missing.
+  const repHasDestination = (repTarget || (toAssignee && repUserMaps.length > 0)) && reps.size > 0;
+  if (!targetField && !repHasDestination) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
   const byCustomer = new Map();
@@ -566,8 +576,8 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     for (const inv of invoices) consider(inv.CustomerRef?.value, 'Invoiced');
   }
   // A customer whose only news is a rep still needs visiting — but only when there is
-  // somewhere to put it. Without a target these would be pointless GHL reads.
-  if (repTarget) {
+  // somewhere to put it. Without a destination these would be pointless GHL reads.
+  if (repHasDestination) {
     for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
   }
 
@@ -607,14 +617,27 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       if (repTarget && rep && String(readField(repTarget) ?? '') !== rep) {
         writes.push({ id: repTarget, value: rep });
       }
+      // The assignee route: the rep's mapped Synergy user becomes the contact's owner.
+      // Only when it CHANGES — reassigning re-fires notifications, so a no-op write is
+      // not harmless here the way a repeated field write would be.
+      let assignTo = null;
+      if (toAssignee && rep) {
+        const mapped = resolveAssignee(repUserMaps, rep);
+        if (mapped && String(existing?.contact?.assignedTo ?? '') !== mapped) assignTo = mapped;
+      }
+
       // Nothing changed ⇒ no PUT. Skipping the request also skips touchLink, which is
       // correct: an unchanged contact should not have its echo cursor moved.
-      if (writes.length === 0) continue;
+      if (writes.length === 0 && !assignTo) continue;
 
       // Merge into existing custom fields so a write never wipes the other's field.
       let customFields = existing?.contact?.customFields;
       for (const w of writes) customFields = mergeCustomFields(customFields, w);
-      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
+      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
+        ...(writes.length ? { customFields } : {}),
+        ...(assignTo ? { assignedTo: assignTo } : {}),
+      });
+      if (assignTo) stats.qbRepAssigned = (stats.qbRepAssigned ?? 0) + 1;
       if (writes.some((w) => w.id === repTarget)) stats.qbRepUpdated = (stats.qbRepUpdated ?? 0) + 1;
       // Advance the link cursor so this GHL write isn't re-detected as a
       // GHL-origin change and pushed back to QBO next cycle (echo suppression).

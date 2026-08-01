@@ -127,6 +127,15 @@ export default function QuickBooks() {
   const [spDraft, setSpDraft] = useState({ user: '', name: '' });
   const [savingSpMap, setSavingSpMap] = useState(false);
 
+  // QuickBooks rep → Synergy assigned user (migration 0009). Two dropdowns: the rep
+  // values seen on their own documents, and their Synergy users. A mapping is
+  // required rather than name-matching because a QuickBooks dropdown puts the option
+  // ID on the transaction — Rockwood's values are literally "1" and "2".
+  const [repValues, setRepValues] = useState([]);
+  const [repUserMaps, setRepUserMaps] = useState([]);
+  const [repDraft, setRepDraft] = useState({ rep: '', user: '' });
+  const [savingRepMap, setSavingRepMap] = useState(false);
+
   // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
   // when a token dies, the tenant's saved mappings and sync config are still valid and
   // must stay visible and editable. Hiding them would turn a token problem into apparent
@@ -217,7 +226,13 @@ export default function QuickBooks() {
           setMappings(all.filter((m) => m.mapperType === 'custom_field'));
           setItemMaps(all.filter((m) => m.mapperType === 'qb_item'));
           setSpMaps(all.filter((m) => m.mapperType === 'qb_salesperson'));
+          setRepUserMaps(all.filter((m) => m.mapperType === 'qb_rep_user'));
         })
+        .catch(() => {}),
+      // Non-fatal: without the rep values the mapping row falls back to free text.
+      fetchWithAuth('/api/quickbooks/rep-values')
+        .then((r) => (r.ok ? r.json() : { values: [] }))
+        .then((d) => setRepValues(d.values ?? []))
         .catch(() => {}),
       // Non-fatal: without the roster the salesperson picker falls back to the
       // saved values only — it must not stop the rest of the page loading.
@@ -470,6 +485,7 @@ export default function QuickBooks() {
           qboAssignedUserField: cur.qboAssignedUserField || null,
           qboAssignedUserGhlField: cur.qboAssignedUserGhlField || null,
           qboStatusGhlField: cur.qboStatusGhlField || null,
+          qboRepToAssignee: !!cur.qboRepToAssignee,
           qboSalespersonQbField: cur.qboSalespersonQbField || null,
           qboSalespersonSlot: cur.qboSalespersonSlot ?? 1,
           qboSalespersonGhlField: cur.qboSalespersonGhlField || null,
@@ -569,6 +585,45 @@ export default function QuickBooks() {
       const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to remove mapping');
       setSpMaps((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
+
+  // ── QuickBooks rep → Synergy assigned user ─────────────────────────────────
+  const repLabel = (v) => repValues.find((r) => r.value === v)?.label ?? v;
+  const usedReps = new Set(repUserMaps.map((m) => m.externalKey));
+
+  async function addRepUserMap() {
+    if (!repDraft.rep || !repDraft.user) return;
+    setSavingRepMap(true);
+    try {
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType: 'qb_rep_user',
+          externalKey: repDraft.rep,   // the QuickBooks rep value, exactly as it arrives
+          ghlValue: repDraft.user,     // the Synergy user id to assign
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to add mapping');
+      setRepUserMaps((prev) => [...prev.filter((m) => m.id !== data.mapper.id), data.mapper]);
+      setRepDraft({ rep: '', user: '' });
+      toast({ title: 'Rep mapped' });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingRepMap(false);
+    }
+  }
+
+  async function deleteRepUserMap(id) {
+    try {
+      const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove mapping');
+      setRepUserMaps((prev) => prev.filter((m) => m.id !== id));
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     }
@@ -745,6 +800,7 @@ export default function QuickBooks() {
     qboAssignedUserField: null,
     qboAssignedUserGhlField: null,
     qboStatusGhlField: null,
+    qboRepToAssignee: false,
     qboSalespersonQbField: null,
     qboSalespersonSlot: 1,
     qboSalespersonGhlField: null,
@@ -1071,8 +1127,96 @@ export default function QuickBooks() {
                     <p className="text-xs text-muted-foreground">
                       Read from the <strong>estimate or invoice</strong> — that is where QuickBooks keeps sales-form
                       fields like <code>Rep</code>, even when they are marked hidden on the printed form. The most
-                      recent document for each customer wins. Set both dropdowns to enable.
+                      recent document for each customer wins. Copying it into a Synergy field is optional; the
+                      usual choice is to <strong>assign the Synergy user</strong> instead — see below.
                     </p>
+                  </div>
+
+                  {/* Rep → assigned user. Ahsan, 2026-08-01: "I should be able to click a
+                      drop down for assigned users in Synergy and select Cody in there."
+                      Needs no new field in the client's CRM, which is the whole point. */}
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium" style={{ color: '#3d3672' }}>
+                      <input
+                        type="checkbox"
+                        checked={!!s.qboRepToAssignee}
+                        onChange={(e) => setField('qboRepToAssignee')(e.target.checked)}
+                      />
+                      Set the Synergy <strong>assigned user</strong> from the QuickBooks rep
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      QuickBooks sends the dropdown's <strong>internal value</strong>, not the name — on this company
+                      they are <code>1</code> and <code>2</code> — so each one has to be pointed at a person once.
+                      Nothing is assigned until a rep is mapped and this box is ticked.
+                    </p>
+
+                    {s.qboRepToAssignee && (
+                      <>
+                        {repUserMaps.length > 0 ? (
+                          <ul className="space-y-2">
+                            {repUserMaps.map((m) => (
+                              <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                                <span className="font-medium truncate" style={{ color: '#3d3672' }}>
+                                  {repLabel(m.externalKey)}
+                                </span>
+                                <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                <span className="truncate" style={{ color: '#1b7895' }}>{userLabel(m.ghlValue)}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => deleteRepUserMap(m.id)}
+                                  className="ml-auto text-xs text-muted-foreground hover:text-destructive"
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            No reps mapped yet — nothing will be assigned.
+                          </p>
+                        )}
+                        <div className="flex gap-2">
+                          <Select
+                            value={repDraft.rep}
+                            onChange={(e) => setRepDraft((d) => ({ ...d, rep: e.target.value }))}
+                          >
+                            <option value="">QuickBooks rep…</option>
+                            {repValues.map((r) => (
+                              <option key={r.value} value={r.value} disabled={usedReps.has(r.value)}>
+                                {r.label === r.value ? r.value : `${r.label} (${r.value})`}
+                              </option>
+                            ))}
+                          </Select>
+                          <Select
+                            value={repDraft.user}
+                            onChange={(e) => setRepDraft((d) => ({ ...d, user: e.target.value }))}
+                          >
+                            <option value="">Synergy user…</option>
+                            {ghlUsers.map((u) => (
+                              <option key={u.id} value={u.id}>
+                                {u.email ? `${u.name} (${u.email})` : u.name}
+                              </option>
+                            ))}
+                          </Select>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={savingRepMap || !repDraft.rep || !repDraft.user}
+                            onClick={addRepUserMap}
+                          >
+                            {savingRepMap ? 'Adding…' : 'Add'}
+                          </Button>
+                        </div>
+                        {repValues.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            No rep values found on recent estimates or invoices yet. Pick the QuickBooks field above
+                            first, then reload.
+                          </p>
+                        )}
+                      </>
+                    )}
                     {/* QBO's UI no longer offers legacy sales-form custom fields, and
                         only legacy fields are visible to the API — so the app creates
                         the field itself via the QuickBooks API. */}
