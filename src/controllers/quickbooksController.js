@@ -570,6 +570,9 @@ function serializeSettings(s) {
     qboAssignedUserField: s.qboAssignedUserField ?? null,
     qboAssignedUserGhlField: s.qboAssignedUserGhlField ?? null,
     qboStatusGhlField: s.qboStatusGhlField ?? null,
+    qboSalespersonQbField: s.qboSalespersonQbField ?? null,
+    qboSalespersonSlot: s.qboSalespersonSlot ?? 1,
+    qboSalespersonGhlField: s.qboSalespersonGhlField ?? null,
     qboInvoiceLeadDays: s.qboInvoiceLeadDays,
   };
 }
@@ -602,6 +605,9 @@ export async function saveQuickBooksSettings(req, res, next) {
       qboAssignedUserField,
       qboAssignedUserGhlField,
       qboStatusGhlField,
+      qboSalespersonQbField,
+      qboSalespersonSlot,
+      qboSalespersonGhlField,
       qboInvoiceLeadDays,
     } = req.body;
 
@@ -612,6 +618,9 @@ export async function saveQuickBooksSettings(req, res, next) {
       qboAssignedUserField,
       qboAssignedUserGhlField,
       qboStatusGhlField,
+      qboSalespersonQbField,
+      qboSalespersonSlot,
+      qboSalespersonGhlField,
       qboInvoiceLeadDays,
     });
 

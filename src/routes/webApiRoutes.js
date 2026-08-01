@@ -11,6 +11,7 @@ import {
   cancelSubscriptionHandler,
   getGhlFields,
   getGhlPipelines,
+  getGhlUsers,
   getMappers,
   createMapper,
   updateMapper,
@@ -103,6 +104,7 @@ router.delete('/subscription/cancel', actionLimiter, cancelSubscriptionHandler);
 // GHL fields + pipelines
 router.get('/ghl/fields', getGhlFields);
 router.get('/ghl/pipelines', getGhlPipelines);
+router.get('/ghl/users', getGhlUsers);
 
 // Mappers CRUD
 router.get('/mappers', getMappers);

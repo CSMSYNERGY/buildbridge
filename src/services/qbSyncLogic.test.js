@@ -10,6 +10,9 @@ import {
   mergeCustomFields,
   qbCustomFieldEntries,
   resolveItemRef,
+  resolveSalesperson,
+  salespersonCustomField,
+  mergeQboCustomFields,
   milestoneIsDue,
   normalizeMilestoneInput,
   summarizeQboFault,
@@ -343,6 +346,107 @@ describe('resolveItemRef — QBO item selection from qb_item mappings', () => {
 
   it('ignores malformed rows (missing externalKey) and coerces the id to a string', () => {
     expect(resolveItemRef([{ ghlValue: 'x' }, { externalKey: 7, ghlValue: 'y' }], { y: 1 })).toBe('7');
+  });
+});
+
+describe('resolveSalesperson — who gets credited on the QuickBooks document', () => {
+  // Fixtures use example.com on purpose — this repo is PUBLIC, so no real client's
+  // domain, staff name or identifier belongs in it, including in test data.
+  const maps = [
+    { externalKey: 'Dave Miller', ghlValue: 'usr_dave' },
+    { externalKey: 'Anna Ruiz', ghlValue: 'anna@example.com' },
+    { externalKey: 'Sam Poole', ghlValue: 'Sam Poole' },
+  ];
+  const dave = { id: 'usr_dave', email: 'dave@example.com', name: 'Dave Miller' };
+
+  it('writes nothing when nothing is configured or nothing matches', () => {
+    expect(resolveSalesperson()).toBeNull();
+    expect(resolveSalesperson({ mappings: [], user: dave })).toBeNull();
+    expect(resolveSalesperson({ mappings: maps, user: null })).toBeNull();
+    expect(resolveSalesperson({ mappings: maps, user: { id: 'usr_nobody' } })).toBeNull();
+  });
+
+  it('NEVER falls back to the GHL user\'s own name when unmapped', () => {
+    // The whole point: a plausible-but-unrecognised name in a client's books
+    // misattributes commission while looking authoritative.
+    expect(resolveSalesperson({ mappings: maps, user: { id: 'usr_x', name: 'Someone Else' } })).toBeNull();
+  });
+
+  it('matches the assigned user by id, email, or name — case- and space-insensitively', () => {
+    expect(resolveSalesperson({ mappings: maps, user: dave })).toBe('Dave Miller');
+    expect(resolveSalesperson({ mappings: maps, user: { id: 'u2', email: 'ANNA@example.com ' } })).toBe('Anna Ruiz');
+    expect(resolveSalesperson({ mappings: maps, user: { id: 'u3', firstName: 'Sam', lastName: 'Poole' } })).toBe('Sam Poole');
+  });
+
+  it('lets a per-deal GHL custom field override the assigned-user mapping', () => {
+    const r = resolveSalesperson({
+      mappings: maps, user: dave, ghlFieldId: 'cf_sp', ghlFieldValues: { cf_sp: 'Guest Closer' },
+    });
+    expect(r).toBe('Guest Closer');
+  });
+
+  it('falls through to the mapping when the override field is absent or blank', () => {
+    const base = { mappings: maps, user: dave, ghlFieldId: 'cf_sp' };
+    expect(resolveSalesperson({ ...base, ghlFieldValues: {} })).toBe('Dave Miller');
+    expect(resolveSalesperson({ ...base, ghlFieldValues: { cf_sp: '   ' } })).toBe('Dave Miller');
+  });
+
+  it('takes the first meaningful entry from a multi-select override field', () => {
+    const r = resolveSalesperson({
+      mappings: [], ghlFieldId: 'cf_sp', ghlFieldValues: { cf_sp: ['', 'Anna Ruiz', 'Dave Miller'] },
+    });
+    expect(r).toBe('Anna Ruiz');
+  });
+});
+
+describe('salespersonCustomField — the QBO legacy sales-form entry', () => {
+  it('builds a StringType entry keyed on the slot as DefinitionId', () => {
+    expect(salespersonCustomField('Salesperson', 2, 'Dave Miller')).toEqual([
+      { DefinitionId: '2', Name: 'Salesperson', Type: 'StringType', StringValue: 'Dave Miller' },
+    ]);
+  });
+
+  it('returns null unless field name, value, and a legal slot are all present', () => {
+    expect(salespersonCustomField('', 1, 'Dave')).toBeNull();
+    expect(salespersonCustomField('Salesperson', 1, '')).toBeNull();
+    expect(salespersonCustomField('Salesperson', 1, '   ')).toBeNull();
+    expect(salespersonCustomField('Salesperson', 0, 'Dave')).toBeNull();
+    expect(salespersonCustomField('Salesperson', 4, 'Dave')).toBeNull();
+  });
+});
+
+describe('mergeQboCustomFields — a sparse update must not blank other slots', () => {
+  const existing = [
+    { DefinitionId: '1', Name: 'Salesperson', Type: 'StringType', StringValue: 'Old Rep' },
+    { DefinitionId: '3', Name: 'Job #', Type: 'StringType', StringValue: 'J-1042' },
+  ];
+
+  it('replaces our slot and leaves every other slot untouched', () => {
+    const ours = salespersonCustomField('Salesperson', 1, 'Dave Miller');
+    const merged = mergeQboCustomFields(existing, ours);
+    expect(merged).toHaveLength(2);
+    expect(merged.find((f) => f.DefinitionId === '1').StringValue).toBe('Dave Miller');
+    expect(merged.find((f) => f.DefinitionId === '3').StringValue).toBe('J-1042');
+  });
+
+  it('sends NOTHING when we have nothing to add, rather than echoing the document back', () => {
+    // An unconfigured location must issue the exact request it issued before this
+    // feature existed — re-posting QuickBooks' own array risks a 400 on read-only
+    // properties, for zero benefit.
+    expect(mergeQboCustomFields(existing, null)).toBeNull();
+    expect(mergeQboCustomFields(existing, [])).toBeNull();
+  });
+
+  it('returns null — not [] — when there is nothing on either side, so the field is OMITTED', () => {
+    // upsertEstimate only sends CustomField when non-empty; an empty array on a
+    // sparse update would erase whatever the client had typed in QuickBooks.
+    expect(mergeQboCustomFields(null, null)).toBeNull();
+    expect(mergeQboCustomFields([], [])).toBeNull();
+  });
+
+  it('adds our entry to a document that had no custom fields at all', () => {
+    const ours = salespersonCustomField('Salesperson', 1, 'Dave Miller');
+    expect(mergeQboCustomFields(undefined, ours)).toEqual(ours);
   });
 });
 

@@ -257,6 +257,20 @@ export const locationSettings = pgTable('location_settings', {
   // (Estimate created/sent, Accepted, Invoiced). Picked in Settings; blank =
   // don't reflect status.
   qboStatusGhlField: text('qbo_status_ghl_field'),
+  // ── Salesperson → QuickBooks sales document (migration 0008, GHL→QBO) ──
+  // Distinct from qboAssignedUserField above, which reads a salesperson OUT of
+  // QuickBooks into GHL. This writes one IN, onto the estimate/invoice, because
+  // QBO's API never reveals who is logged in.
+  //
+  // Name of the LEGACY sales-form custom field to write, e.g. "Salesperson".
+  // Blank/null = feature off.
+  qboSalespersonQbField: text('qbo_salesperson_qb_field'),
+  // Which legacy slot (1-3) that field occupies — QuickBooks addresses it on a
+  // transaction by DefinitionId, and the slot IS the DefinitionId.
+  qboSalespersonSlot: integer('qbo_salesperson_slot').notNull().default(1),
+  // Optional GHL opportunity custom-field id naming the salesperson directly.
+  // Set and non-empty on a deal ⇒ wins over the assigned-user mapping.
+  qboSalespersonGhlField: text('qbo_salesperson_ghl_field'),
   // Default days before a milestone's date to raise its invoice (deposit is
   // always immediate). Copied onto each qb_milestones row at creation time.
   qboInvoiceLeadDays: integer('qbo_invoice_lead_days').notNull().default(3),

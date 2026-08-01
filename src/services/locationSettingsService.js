@@ -20,6 +20,9 @@ const DEFAULTS = {
   qboAssignedUserField: null,
   qboAssignedUserGhlField: null,
   qboStatusGhlField: null,
+  qboSalespersonQbField: null,
+  qboSalespersonSlot: 1,
+  qboSalespersonGhlField: null,
   qboInvoiceLeadDays: 3,
   idearoomWebhookToken: null,
   idearoomPipelineId: null,
@@ -70,6 +73,22 @@ export async function upsertLocationSettings(locationId, fields = {}) {
   if (fields.qboStatusGhlField !== undefined) {
     const v = fields.qboStatusGhlField;
     set.qboStatusGhlField = v ? String(v) : null;
+  }
+  if (fields.qboSalespersonQbField !== undefined) {
+    const v = fields.qboSalespersonQbField;
+    set.qboSalespersonQbField = v ? String(v).trim() : null;
+  }
+  if (fields.qboSalespersonSlot !== undefined) {
+    // Clamped rather than rejected, and to the same 1-3 the DB check enforces:
+    // an out-of-range slot is a DefinitionId QuickBooks cannot address, and
+    // discovering that as a 400 on a client's estimate push is far worse than
+    // landing on slot 1 here.
+    const n = Number(fields.qboSalespersonSlot);
+    set.qboSalespersonSlot = [1, 2, 3].includes(n) ? n : DEFAULTS.qboSalespersonSlot;
+  }
+  if (fields.qboSalespersonGhlField !== undefined) {
+    const v = fields.qboSalespersonGhlField;
+    set.qboSalespersonGhlField = v ? String(v) : null;
   }
   if (fields.qboInvoiceLeadDays !== undefined) {
     const n = Number(fields.qboInvoiceLeadDays);

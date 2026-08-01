@@ -117,6 +117,16 @@ export default function QuickBooks() {
   const [itemMaps, setItemMaps] = useState([]);
   const [savingItemMap, setSavingItemMap] = useState(false);
 
+  // Salesperson → QuickBooks sales document (migration 0008). `qb_salesperson`
+  // mapper rows are Synergy user → the salesperson NAME QuickBooks stores, and
+  // the user list is a dropdown for the same reason the QuickBooks field picker
+  // is: this mapping is matched by id/email/name, so a typo fails by silently
+  // never matching rather than by erroring.
+  const [ghlUsers, setGhlUsers] = useState([]);
+  const [spMaps, setSpMaps] = useState([]);
+  const [spDraft, setSpDraft] = useState({ user: '', name: '' });
+  const [savingSpMap, setSavingSpMap] = useState(false);
+
   // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
   // when a token dies, the tenant's saved mappings and sync config are still valid and
   // must stay visible and editable. Hiding them would turn a token problem into apparent
@@ -206,7 +216,14 @@ export default function QuickBooks() {
           const all = d.mappers ?? [];
           setMappings(all.filter((m) => m.mapperType === 'custom_field'));
           setItemMaps(all.filter((m) => m.mapperType === 'qb_item'));
+          setSpMaps(all.filter((m) => m.mapperType === 'qb_salesperson'));
         })
+        .catch(() => {}),
+      // Non-fatal: without the roster the salesperson picker falls back to the
+      // saved values only — it must not stop the rest of the page loading.
+      fetchWithAuth('/api/ghl/users')
+        .then((r) => (r.ok ? r.json() : { users: [] }))
+        .then((d) => setGhlUsers(d.users ?? []))
         .catch(() => {}),
       fetchWithAuth('/api/quickbooks/milestones')
         .then((r) => (r.ok ? r.json() : { definitions: [] }))
@@ -453,6 +470,9 @@ export default function QuickBooks() {
           qboAssignedUserField: cur.qboAssignedUserField || null,
           qboAssignedUserGhlField: cur.qboAssignedUserGhlField || null,
           qboStatusGhlField: cur.qboStatusGhlField || null,
+          qboSalespersonQbField: cur.qboSalespersonQbField || null,
+          qboSalespersonSlot: cur.qboSalespersonSlot ?? 1,
+          qboSalespersonGhlField: cur.qboSalespersonGhlField || null,
         }),
       });
       const data = await res.json();
@@ -502,6 +522,53 @@ export default function QuickBooks() {
       const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to remove mapping');
       setMappings((prev) => prev.filter((m) => m.id !== id));
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
+
+  // ── Salesperson mapping (Synergy user → QuickBooks salesperson name) ───────
+  const userLabel = (v) => {
+    const u = ghlUsers.find((x) => x.id === v || x.email === v || x.name === v);
+    return u ? (u.email ? `${u.name} (${u.email})` : u.name) : v;
+  };
+  // The mapper's unique key is (location, app, type, externalKey), and externalKey
+  // here is the QuickBooks salesperson NAME — so re-adding a name updates which
+  // user points at it rather than creating a second row. That is the right shape
+  // (one salesperson, one name) but it means the NAME is what must be unique, not
+  // the user; a user already mapped is greyed out so the pairing stays 1:1.
+  const usedSpUsers = new Set(spMaps.map((m) => m.ghlValue));
+
+  async function addSalespersonMap() {
+    if (!spDraft.user || !spDraft.name.trim()) return;
+    setSavingSpMap(true);
+    try {
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType: 'qb_salesperson',
+          externalKey: spDraft.name.trim(),
+          ghlValue: spDraft.user,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to add mapping');
+      setSpMaps((prev) => [...prev.filter((m) => m.id !== data.mapper.id), data.mapper]);
+      setSpDraft({ user: '', name: '' });
+      toast({ title: 'Salesperson mapped' });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingSpMap(false);
+    }
+  }
+
+  async function deleteSalespersonMap(id) {
+    try {
+      const res = await fetchWithAuth(`/api/mappers/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to remove mapping');
+      setSpMaps((prev) => prev.filter((m) => m.id !== id));
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     }
@@ -678,6 +745,9 @@ export default function QuickBooks() {
     qboAssignedUserField: null,
     qboAssignedUserGhlField: null,
     qboStatusGhlField: null,
+    qboSalespersonQbField: null,
+    qboSalespersonSlot: 1,
+    qboSalespersonGhlField: null,
     qboInvoiceLeadDays: 3,
   };
 
@@ -1063,6 +1133,131 @@ export default function QuickBooks() {
                     Only create QuickBooks customers for contacts that have an opportunity in this pipeline
                     (e.g. once a lead moves into "Buildings"). Edits to already-synced contacts always flow through.
                   </p>
+                </div>
+              )}
+
+              {/* Salesperson → QuickBooks (GHL→QBO). QuickBooks' API never says who is
+                  logged in, so the rep has to be carried across from Synergy and written
+                  onto the estimate as a sales-form custom field. */}
+              {(s.qboSyncDirection === 'ghl_to_qb' || s.qboSyncDirection === 'two_way') && (
+                <div className="space-y-3 pl-6">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="spQbField">Write the salesperson into this QuickBooks field</Label>
+                    <div className="flex gap-2">
+                      <Select
+                        id="spQbField"
+                        value={s.qboSalespersonQbField ?? ''}
+                        onChange={(e) => setField('qboSalespersonQbField')(e.target.value || null)}
+                      >
+                        <option value="">— off —</option>
+                        {s.qboSalespersonQbField
+                          && !qbFields.some((f) => f.name === s.qboSalespersonQbField) && (
+                            <option value={s.qboSalespersonQbField}>{s.qboSalespersonQbField} (saved)</option>
+                        )}
+                        {qbFields.map((f) => (
+                          <option key={f.id ?? f.name} value={f.name}>{f.name}</option>
+                        ))}
+                      </Select>
+                      {/* The slot IS QuickBooks' DefinitionId for the field — it has to
+                          match the slot the company has that field in, or the write is
+                          rejected. Three is all QuickBooks offers. */}
+                      <Select
+                        id="spSlot"
+                        value={String(s.qboSalespersonSlot ?? 1)}
+                        onChange={(e) => setField('qboSalespersonSlot')(Number(e.target.value))}
+                        style={{ maxWidth: 110 }}
+                      >
+                        <option value="1">Slot 1</option>
+                        <option value="2">Slot 2</option>
+                        <option value="3">Slot 3</option>
+                      </Select>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Leave off and nothing is written. Use the <strong>Create "Salesperson" field</strong> button
+                      above if this company has no sales-form custom field yet.
+                    </p>
+                  </div>
+
+                  {s.qboSalespersonQbField && (
+                    <>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="spGhlField">Or take it from this Synergy field on the deal (optional)</Label>
+                        <Select
+                          id="spGhlField"
+                          value={s.qboSalespersonGhlField ?? ''}
+                          onChange={(e) => setField('qboSalespersonGhlField')(e.target.value || null)}
+                        >
+                          <option value="">— use the assigned user —</option>
+                          {ghlFields.map((f) => (
+                            <option key={f.id ?? f.key} value={f.id ?? f.key}>{f.label}</option>
+                          ))}
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          When this field has a value on the opportunity it wins — a name typed on the deal
+                          beats the rule below. Otherwise the deal's assigned user is looked up here:
+                        </p>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Synergy user → QuickBooks salesperson</Label>
+                        {spMaps.length > 0 ? (
+                          <ul className="space-y-2">
+                            {spMaps.map((m) => (
+                              <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                                <span className="truncate" style={{ color: '#1b7895' }}>{userLabel(m.ghlValue)}</span>
+                                <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                <span className="font-medium truncate" style={{ color: '#3d3672' }}>{m.externalKey}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => deleteSalespersonMap(m.id)}
+                                  className="ml-auto text-xs text-muted-foreground hover:text-destructive"
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            No one is mapped yet — estimates will go across with the salesperson blank.
+                          </p>
+                        )}
+                        <div className="flex gap-2">
+                          <Select
+                            value={spDraft.user}
+                            onChange={(e) => setSpDraft((d) => ({ ...d, user: e.target.value }))}
+                          >
+                            <option value="">Synergy user…</option>
+                            {ghlUsers.map((u) => (
+                              <option key={u.id} value={u.id} disabled={usedSpUsers.has(u.id)}>
+                                {u.email ? `${u.name} (${u.email})` : u.name}
+                              </option>
+                            ))}
+                          </Select>
+                          <Input
+                            value={spDraft.name}
+                            onChange={(e) => setSpDraft((d) => ({ ...d, name: e.target.value }))}
+                            placeholder="Name as QuickBooks stores it"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={savingSpMap || !spDraft.user || !spDraft.name.trim()}
+                            onClick={addSalespersonMap}
+                          >
+                            {savingSpMap ? 'Adding…' : 'Add'}
+                          </Button>
+                        </div>
+                        {ghlUsers.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            BuildBridge could not read the user list from Synergy — reload, and check the
+                            connection if it stays empty.
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 

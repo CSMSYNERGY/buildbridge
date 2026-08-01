@@ -24,6 +24,9 @@ import {
   mergeCustomFields,
   qbCustomFieldEntries,
   resolveItemRef,
+  resolveSalesperson,
+  salespersonCustomField,
+  mergeQboCustomFields,
 } from './qbSyncLogic.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -608,7 +611,7 @@ function oppGhlFieldValues(opp) {
   return out;
 }
 
-async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, linkIndex) {
+async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, linkIndex, cfg) {
   const data = await makeGhlRequest(
     locationId,
     'GET',
@@ -629,6 +632,35 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
   // blocked this tenant since 07-30).
   const itemMaps = await listMappers(locationId, 'quickbooks', 'qb_item');
 
+  // ── Salesperson (migration 0008) ──
+  // QuickBooks' API never says who is logged in, so the salesperson has to be
+  // carried over from GHL and stamped on the document as a legacy sales-form
+  // custom field. Entirely opt-in: with no field name configured, none of this
+  // runs and not a single extra API call is made.
+  const salespersonField = cfg?.qboSalespersonQbField ?? null;
+  let salespersonMaps = [];
+  let ghlUsersById = new Map();
+  if (salespersonField) {
+    salespersonMaps = await listMappers(locationId, 'quickbooks', 'qb_salesperson');
+    // The opportunity carries `assignedTo` (a user id) and nothing else about the
+    // person, so the roster is fetched ONCE per pass — not per deal — and only
+    // when a mapping actually exists to consume it. A failure here is non-fatal:
+    // the per-deal override still works, and losing the salesperson must never
+    // stop estimates syncing.
+    if (salespersonMaps.length > 0) {
+      try {
+        const users = await makeGhlRequest(
+          locationId, 'GET', `/users/?locationId=${encodeURIComponent(locationId)}`,
+        );
+        for (const u of users?.users ?? []) {
+          if (u?.id) ghlUsersById.set(String(u.id), u);
+        }
+      } catch (err) {
+        console.warn(`[rockwood] salesperson: could not load GHL users: ${err.message}`);
+      }
+    }
+  }
+
   let processedThrough = 0;
   let handled = 0;
   // Opportunities skipped because no QBO item could be determined for them.
@@ -639,7 +671,19 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
     // The QBO item to bill for THIS deal, resolved from the deal's own GHL
     // custom-field values (so a 2+ item mapping picks the item the deal's
     // selecting field points at; null → no usable mapping, handled below).
-    const itemRef = resolveItemRef(itemMaps, oppGhlFieldValues(opp));
+    const oppFieldValues = oppGhlFieldValues(opp);
+    const itemRef = resolveItemRef(itemMaps, oppFieldValues);
+    // Who to credit on the QuickBooks document. Null when unconfigured or
+    // unmatched — and then nothing is written, rather than a guessed name.
+    const salesperson = salespersonField
+      ? resolveSalesperson({
+        mappings: salespersonMaps,
+        ghlFieldValues: oppFieldValues,
+        ghlFieldId: cfg?.qboSalespersonGhlField ?? null,
+        user: ghlUsersById.get(String(opp.assignedTo ?? '')) ?? null,
+      })
+      : null;
+    const spFields = salespersonCustomField(salespersonField, cfg?.qboSalespersonSlot ?? 1, salesperson);
     const ghlUpdatedAt = opp.updatedAt ?? opp.dateUpdated;
     if (ghlUpdatedAt && new Date(ghlUpdatedAt) <= since) {
       handled++; // already covered by the cursor — not deferred work
@@ -701,6 +745,10 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
           amountCents,
           description: opp.name,
           itemRef: effectiveItemRef,
+          // Merged against what the estimate already carries: a sparse update
+          // REPLACES the CustomField array, so sending only our slot would blank
+          // the other two — fields this location may well fill in by hand.
+          customFields: mergeQboCustomFields(estimate.CustomField, spFields),
         });
         await touchLink(link);
         stats.ghlToQbEstimatesUpdated++;
@@ -727,6 +775,8 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
           amountCents,
           description: opp.name,
           itemRef,
+          // Nothing exists to merge with on a create.
+          customFields: spFields,
         });
         await upsertLink(linkIndex, locationId, 'estimate', opp.id, estimate.Id);
         stats.ghlToQbEstimatesCreated++;
@@ -892,7 +942,7 @@ export async function syncLocation(locationId, settings) {
         : since;
       if (pushMark < cursorAt) cursorAt = pushMark;
     } else {
-      const est = await syncGhlOpportunitiesToQb(locationId, since, stats, passDeadline, linkIndex);
+      const est = await syncGhlOpportunitiesToQb(locationId, since, stats, passDeadline, linkIndex, cfg);
       stats.ghlToQbEstimatesDeferred = est.deferred;
 
       if (est.deferred > 0) {

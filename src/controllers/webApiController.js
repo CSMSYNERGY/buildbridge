@@ -242,6 +242,36 @@ export async function getGhlPipelines(req, res, next) {
   }
 }
 
+// ─── GHL Users ─────────────────────────────────────────────────────────────
+// The roster behind the salesperson mapping (migration 0008). Exposed so the
+// config UI can offer a DROPDOWN of real users instead of a free-text box: the
+// mapping is matched on id/email/name, and a typo in any of them fails silently
+// by simply never matching — the exact failure the QuickBooks-field picker was
+// converted to a dropdown to avoid (2026-07-28).
+export async function getGhlUsers(req, res, next) {
+  try {
+    const { locationId } = req.user;
+
+    const data = await makeGhlRequest(
+      locationId,
+      'GET',
+      `/users/?locationId=${encodeURIComponent(locationId)}`,
+    );
+
+    // Only what the picker needs. Deliberately NOT the whole user object — it
+    // carries phone numbers and permission blobs that this screen has no use for.
+    const users = (data?.users ?? []).map((u) => ({
+      id: u.id,
+      name: u.name || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email || u.id,
+      email: u.email ?? null,
+    }));
+
+    res.json({ users });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function createMapper(req, res, next) {
   try {
     const { locationId } = req.user;

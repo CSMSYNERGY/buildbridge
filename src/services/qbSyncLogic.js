@@ -171,6 +171,115 @@ export function resolveItemRef(itemMappings, ghlFieldValues = {}) {
   return null;
 }
 
+/**
+ * Resolve the salesperson NAME to stamp on a QuickBooks sales document for one
+ * deal, or null to write nothing.
+ *
+ * QuickBooks' API never exposes the logged-in user, so the salesperson has to be
+ * carried across from GHL (Carolyn, 2026-07-31). Two sources, most-specific first:
+ *
+ *   1. `ghlFieldId` — a GHL opportunity custom field naming the salesperson
+ *      outright. A value typed on THIS deal beats a location-wide rule, so it
+ *      wins. This is the "driven by a GHL custom field" half of the requirement.
+ *   2. `mappings` (mapperType 'qb_salesperson') — the deal's assigned GHL user
+ *      translated to a QuickBooks salesperson name. Each row is
+ *      { ghlValue: <user id | email | name>, externalKey: <QBO salesperson name> }.
+ *      Matching accepts any of the three because the client types this mapping by
+ *      hand and an id is the least likely thing they have to hand; comparison is
+ *      case-insensitive and trimmed for the same reason.
+ *
+ * Returns null when neither resolves. That is deliberate and NOT a fallback to the
+ * GHL user's own name: an unrecognised name written into a client's books is worse
+ * than an empty field, because it looks authoritative and silently misattributes
+ * commission. Same lesson as the hardcoded ItemRef '1'.
+ *
+ * @param {object}   opts
+ * @param {Array}    [opts.mappings]        qb_salesperson mapper rows
+ * @param {object}   [opts.ghlFieldValues]  { <fieldId>: value } for this deal
+ * @param {?string}  [opts.ghlFieldId]      configured salesperson custom-field id
+ * @param {?object}  [opts.user]            the deal's assigned GHL user
+ * @returns {?string}
+ */
+export function resolveSalesperson({
+  mappings, ghlFieldValues = {}, ghlFieldId = null, user = null,
+} = {}) {
+  // 1. Per-deal override.
+  if (ghlFieldId) {
+    const raw = (ghlFieldValues ?? {})[ghlFieldId];
+    // Arrays turn up for multi-select GHL fields; take the first meaningful entry
+    // rather than stringifying the whole array into the client's books.
+    const first = Array.isArray(raw) ? raw.find((v) => v != null && String(v).trim() !== '') : raw;
+    const value = first == null ? '' : String(first).trim();
+    if (value) return value;
+  }
+
+  // 2. Assigned user → mapper row.
+  const maps = Array.isArray(mappings)
+    ? mappings.filter((m) => m && m.externalKey && m.ghlValue != null)
+    : [];
+  if (maps.length === 0 || !user) return null;
+
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+  // Every identifier this user could plausibly have been written down as.
+  const identities = new Set(
+    [user.id, user.email, user.name, [user.firstName, user.lastName].filter(Boolean).join(' ')]
+      .map(norm)
+      .filter(Boolean),
+  );
+  if (identities.size === 0) return null;
+
+  const hit = maps.find((m) => identities.has(norm(m.ghlValue)));
+  return hit ? String(hit.externalKey).trim() || null : null;
+}
+
+/**
+ * Build the QuickBooks `CustomField` array that carries the salesperson, or null
+ * when the location has not configured the feature / nothing resolved.
+ *
+ * Shape is Intuit's legacy sales-form custom field: DefinitionId is the slot
+ * (1-3), Name must match what the company has that slot named, and the value is
+ * always StringType — the legacy slots are strings only.
+ *
+ * @param {?string} fieldName  location's qboSalespersonQbField
+ * @param {number}  slot       location's qboSalespersonSlot (1-3)
+ * @param {?string} value      resolved salesperson name
+ */
+export function salespersonCustomField(fieldName, slot, value) {
+  const name = String(fieldName ?? '').trim();
+  const val = String(value ?? '').trim();
+  if (!name || !val) return null;
+  const id = Number(slot);
+  if (![1, 2, 3].includes(id)) return null;
+  return [{ DefinitionId: String(id), Name: name, Type: 'StringType', StringValue: val }];
+}
+
+/**
+ * Merge our CustomField entries into whatever the QuickBooks document already
+ * carries, keyed on DefinitionId (the slot), ours winning.
+ *
+ * This exists because a QBO sparse update REPLACES an array wholesale rather than
+ * merging it. Sending only slot 1 on an update would therefore blank slots 2 and 3
+ * — other people's fields, on a document we were only asked to re-price. Read the
+ * document's own CustomField back and merge, exactly as the GHL contact path
+ * already does for custom fields on its side.
+ *
+ * @param {Array} existing  the document's current CustomField array
+ * @param {Array} ours      entries to set (may be null/empty)
+ */
+export function mergeQboCustomFields(existing, ours) {
+  const base = Array.isArray(existing) ? existing.filter(Boolean) : [];
+  const add = Array.isArray(ours) ? ours.filter(Boolean) : [];
+  // Nothing of ours to write ⇒ send NOTHING, rather than echoing the document's
+  // own fields back at it. A location that has not configured this feature must
+  // produce a byte-identical request to the one it produced before this existed:
+  // echoing means re-posting values QuickBooks gave us, and any read-only
+  // property that came back in that array turns a working sync into a 400.
+  if (add.length === 0) return null;
+  const byId = new Map(base.map((f) => [String(f.DefinitionId ?? ''), f]));
+  for (const f of add) byId.set(String(f.DefinitionId ?? ''), f);
+  return [...byId.values()];
+}
+
 // Same scrub rules as ghlService's summarizeGhlError — the two summaries feed the
 // same error_events table under the same "no customer data" constraint.
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;

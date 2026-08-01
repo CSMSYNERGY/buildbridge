@@ -873,7 +873,7 @@ export async function createInvoice(locationId, { qbCustomerId, amountCents, des
  * Pass qbEstimateId + syncToken to update (QBO requires sparse update with SyncToken).
  */
 export async function upsertEstimate(locationId, {
-  qbEstimateId, syncToken, qbCustomerId, amountCents, description, itemRef,
+  qbEstimateId, syncToken, qbCustomerId, amountCents, description, itemRef, customFields,
 }) {
   // No fallback item: the old `itemRef || '1'` guessed at the client's chart of
   // items, and any company without an item Id 1 rejects the write with
@@ -894,6 +894,12 @@ export async function upsertEstimate(locationId, {
         SalesItemLineDetail: { ItemRef: { value: String(itemRef) } },
       },
     ],
+    // Legacy sales-form custom fields — today this carries the salesperson (0008).
+    // OMITTED entirely when empty rather than sent as []: on a sparse update an
+    // empty array would blank whatever the document already had, which is exactly
+    // the field a location that hasn't configured this feature still fills in by
+    // hand inside QuickBooks. The caller merges before passing (mergeQboCustomFields).
+    ...(Array.isArray(customFields) && customFields.length ? { CustomField: customFields } : {}),
   };
 
   const result = await makeQuickBooksRequest(locationId, 'POST', '/estimate?minorversion=75', body);
