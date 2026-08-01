@@ -477,14 +477,33 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
         });
       }
     } else if (reps.size > 0 && !repTarget) {
+      // Name the CANDIDATES rather than just saying "go set a field". Whoever reads
+      // this row is being asked to choose a destination, and the choice matters —
+      // pick the wrong field and every synced contact has that field overwritten. So
+      // the row carries the location's contact custom fields (id + label). Field
+      // labels are the tenant's own configuration, not customer data.
+      let candidates = [];
+      try {
+        const d = await makeGhlRequest(
+          locationId, 'GET', `/locations/${encodeURIComponent(locationId)}/customFields?model=contact`,
+        );
+        candidates = (d?.customFields ?? [])
+          .filter((f) => f?.id)
+          .map((f) => `${f.name ?? f.fieldKey ?? '(unnamed)'} [${f.id}]`);
+      } catch (err) {
+        console.warn(`[rockwood] could not list GHL custom fields: ${err.message}`);
+      }
       await recordError({
         source: 'cron',
         kind: 'qbo_rep_target_missing',
         appSlug: 'quickbooks',
         locationId,
         upstream: 'ghl',
-        message: `Read the salesperson from QuickBooks field "${repSource}" for ${reps.size} customer(s), but no Synergy field is chosen to copy it into, so nothing was written. Set "Copy it into this Synergy field" in BuildBridge → QuickBooks.`,
-        context: { job: 'rockwood-quickbooks-sync', field: repSource, customers: reps.size },
+        message: `Read the salesperson from QuickBooks field "${repSource}" for ${reps.size} customer(s), but no Synergy field is chosen to copy it into, so nothing was written. Set "Copy it into this Synergy field" in BuildBridge → QuickBooks. Available contact fields: ${candidates.join(' | ') || '(could not list them)'}`,
+        context: {
+          job: 'rockwood-quickbooks-sync', field: repSource, customers: reps.size,
+          candidates,
+        },
       });
     }
   }
