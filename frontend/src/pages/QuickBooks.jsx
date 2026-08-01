@@ -1069,7 +1069,9 @@ export default function QuickBooks() {
                       ))}
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      The salesperson from that QuickBooks field is copied into this Synergy custom field. Set both to enable.
+                      Read from the <strong>estimate or invoice</strong> — that is where QuickBooks keeps sales-form
+                      fields like <code>Rep</code>, even when they are marked hidden on the printed form. The most
+                      recent document for each customer wins. Set both dropdowns to enable.
                     </p>
                     {/* QBO's UI no longer offers legacy sales-form custom fields, and
                         only legacy fields are visible to the API — so the app creates
@@ -1173,8 +1175,9 @@ export default function QuickBooks() {
                       </Select>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Leave off and nothing is written. Use the <strong>Create "Salesperson" field</strong> button
-                      above if this company has no sales-form custom field yet.
+                      Optional, and the reverse of the salesperson setting above: this <strong>writes</strong> a rep
+                      from Synergy onto new QuickBooks estimates. Most companies want the read direction instead —
+                      leave this off unless you specifically need Synergy to set the rep in QuickBooks.
                     </p>
                   </div>
 

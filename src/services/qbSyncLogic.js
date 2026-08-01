@@ -134,14 +134,93 @@ export function qbCustomFieldEntries(customer, mappings) {
   return out;
 }
 
-/** Read a QBO Customer custom field by name (case-insensitive); null if unset/empty. */
-export function readQbCustomerField(customer, fieldName) {
+/**
+ * Read a custom field by name (case-insensitive) off ANY QBO entity that carries a
+ * `CustomField[]` — Customer, Estimate, Invoice. Null if unset/empty.
+ *
+ * The entity matters, and getting it wrong is why the salesperson mapping never
+ * worked. Carolyn's 2026-07-31 screen share showed the field on the ESTIMATE
+ * (`Rep` = "Cody", marked *(hidden)*, alongside Siding/Trim/Roofing Color) — QBO
+ * sales-form custom fields live on the transaction, not on the customer record.
+ * `readQbCustomerField` below is the historical alias and still reads the Customer;
+ * new callers should say which entity they mean.
+ */
+export function readQbCustomField(entity, fieldName) {
   if (!fieldName) return null;
-  const cf = (customer?.CustomField ?? []).find(
+  const cf = (entity?.CustomField ?? []).find(
     (f) => (f.Name ?? '').toLowerCase() === fieldName.toLowerCase(),
   );
   const value = cf?.StringValue?.trim();
   return value || null;
+}
+
+/** Historical alias — reads a QBO **Customer** custom field. See readQbCustomField. */
+export const readQbCustomerField = readQbCustomField;
+
+/**
+ * Distinct custom-field NAMES actually present on a batch of QBO transactions.
+ *
+ * This is the answer to "the custom field isn't popping up in BuildBridge". The
+ * field picker was fed from two definition sources, and on this company both come
+ * back empty: REST `Preferences` only carries the three LEGACY sales-form slots,
+ * and the modern Custom fields manager is only readable through the App
+ * Foundations GraphQL API, which 403s without a scope Intuit gates behind a paid
+ * tier. But the VALUES ride along on every transaction regardless — Rockwood's
+ * estimate carries `Rep`, `Siding Color`, `Trim Color` and `Roofing Color` — so
+ * the reliable way to learn a company's field names is to read its own documents
+ * rather than ask for a schema we are not allowed to see.
+ *
+ * Returns [{ name, definitionId, seenOn }], most-frequent first, so the picker
+ * offers the fields the company actually uses.
+ */
+export function collectTxnCustomFieldNames(estimates = [], invoices = []) {
+  const seen = new Map(); // lower(name) -> { name, definitionId, seenOn:Set, count }
+  const scan = (list, label) => {
+    for (const txn of Array.isArray(list) ? list : []) {
+      for (const f of txn?.CustomField ?? []) {
+        const name = String(f?.Name ?? '').trim();
+        if (!name) continue;
+        const key = name.toLowerCase();
+        const hit = seen.get(key) ?? { name, definitionId: null, seenOn: new Set(), count: 0 };
+        hit.count += 1;
+        hit.seenOn.add(label);
+        // First non-empty DefinitionId wins — it is stable per field, and having it
+        // lets a future writer address the field without a second lookup.
+        if (!hit.definitionId && f?.DefinitionId != null) hit.definitionId = String(f.DefinitionId);
+        seen.set(key, hit);
+      }
+    }
+  };
+  scan(estimates, 'Estimate');
+  scan(invoices, 'Invoice');
+  return [...seen.values()]
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .map((h) => ({ name: h.name, definitionId: h.definitionId, seenOn: [...h.seenOn] }));
+}
+
+/**
+ * Which salesperson/rep value to reflect into GHL for each QB customer.
+ *
+ * Keyed by QB customer id because that is what links to a GHL contact. Newest
+ * document wins: `TxnDate` then `MetaData.LastUpdatedTime`, so a rep change on a
+ * later estimate supersedes an older one rather than depending on array order.
+ * Invoices and estimates are treated equally — the field is the same field, and a
+ * company that only invoices should still get a rep.
+ */
+export function repByCustomer(estimates = [], invoices = [], fieldName) {
+  const out = new Map(); // customerId -> { value, when }
+  if (!fieldName) return out;
+  const when = (t) => Date.parse(t?.MetaData?.LastUpdatedTime ?? t?.TxnDate ?? '') || 0;
+  for (const txn of [...(estimates ?? []), ...(invoices ?? [])]) {
+    const customerId = txn?.CustomerRef?.value;
+    if (!customerId) continue;
+    const value = readQbCustomField(txn, fieldName);
+    if (!value) continue;
+    const ts = when(txn);
+    const prev = out.get(customerId);
+    if (!prev || ts >= prev.when) out.set(customerId, { value, when: ts });
+  }
+  return new Map([...out].map(([k, v]) => [k, v.value]));
 }
 
 /**

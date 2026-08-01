@@ -4,6 +4,9 @@ import {
   estimateStatus,
   shouldUpgradeStatus,
   readQbCustomerField,
+  readQbCustomField,
+  collectTxnCustomFieldNames,
+  repByCustomer,
   deriveContactName,
   qbAddressToGhl,
   ghlAddressToQb,
@@ -346,6 +349,90 @@ describe('resolveItemRef — QBO item selection from qb_item mappings', () => {
 
   it('ignores malformed rows (missing externalKey) and coerces the id to a string', () => {
     expect(resolveItemRef([{ ghlValue: 'x' }, { externalKey: 7, ghlValue: 'y' }], { y: 1 })).toBe('7');
+  });
+});
+
+describe('collectTxnCustomFieldNames — learning field names from the company\'s own documents', () => {
+  // Modelled on Rockwood's real estimate (2026-07-31 screen share): four sales-form
+  // custom fields, of which `Rep` is the salesperson and is marked hidden.
+  const est = {
+    CustomField: [
+      { DefinitionId: '1', Name: 'Rep', StringValue: 'Cody' },
+      { DefinitionId: '2', Name: 'Siding Color', StringValue: 'Lifetime Wood Treatment' },
+      { DefinitionId: '3', Name: 'Trim Color', StringValue: 'Lifetime Wood Treatment' },
+      { DefinitionId: '4', Name: 'Roofing Color', StringValue: 'Burnished Slate' },
+    ],
+  };
+
+  it('finds every field name on the transaction, with its DefinitionId', () => {
+    const got = collectTxnCustomFieldNames([est], []);
+    expect(got.map((f) => f.name).sort()).toEqual(['Rep', 'Roofing Color', 'Siding Color', 'Trim Color']);
+    expect(got.find((f) => f.name === 'Rep')).toMatchObject({ definitionId: '1', seenOn: ['Estimate'] });
+  });
+
+  it('merges estimates and invoices and ranks the most-used field first', () => {
+    const inv = { CustomField: [{ DefinitionId: '1', Name: 'Rep', StringValue: 'Dana' }] };
+    const got = collectTxnCustomFieldNames([est], [inv]);
+    expect(got[0].name).toBe('Rep');
+    expect(got[0].seenOn.sort()).toEqual(['Estimate', 'Invoice']);
+  });
+
+  it('survives empty, missing and malformed input rather than throwing', () => {
+    expect(collectTxnCustomFieldNames()).toEqual([]);
+    expect(collectTxnCustomFieldNames([{}], [null])).toEqual([]);
+    expect(collectTxnCustomFieldNames([{ CustomField: [{ Name: '  ' }] }], [])).toEqual([]);
+  });
+});
+
+describe('repByCustomer — carrying the rep off the transaction, keyed to the QB customer', () => {
+  const mk = (customerId, rep, updated) => ({
+    CustomerRef: { value: customerId },
+    MetaData: { LastUpdatedTime: updated },
+    CustomField: rep ? [{ DefinitionId: '1', Name: 'Rep', StringValue: rep }] : [],
+  });
+
+  it('reads the configured field off the estimate', () => {
+    const got = repByCustomer([mk('58', 'Cody', '2026-07-31T10:00:00Z')], [], 'Rep');
+    expect(got.get('58')).toBe('Cody');
+  });
+
+  it('is case-insensitive on the field name, as QuickBooks labels are', () => {
+    expect(repByCustomer([mk('58', 'Cody', '2026-07-31T10:00:00Z')], [], 'rep').get('58')).toBe('Cody');
+  });
+
+  it('takes the NEWEST document when a customer has several, not array order', () => {
+    const older = mk('58', 'Cody', '2026-07-01T10:00:00Z');
+    const newer = mk('58', 'Dana', '2026-07-31T10:00:00Z');
+    expect(repByCustomer([newer, older], [], 'Rep').get('58')).toBe('Dana');
+    expect(repByCustomer([older, newer], [], 'Rep').get('58')).toBe('Dana');
+  });
+
+  it('treats invoices as equal to estimates — an invoice-only company still gets a rep', () => {
+    expect(repByCustomer([], [mk('58', 'Cody', '2026-07-31T10:00:00Z')], 'Rep').get('58')).toBe('Cody');
+  });
+
+  it('writes nothing when unconfigured, unset, or the customer is unknown', () => {
+    expect(repByCustomer([mk('58', 'Cody', '2026-07-31T10:00:00Z')], [], null).size).toBe(0);
+    expect(repByCustomer([mk('58', '', '2026-07-31T10:00:00Z')], [], 'Rep').size).toBe(0);
+    expect(repByCustomer([mk(undefined, 'Cody', '2026-07-31T10:00:00Z')], [], 'Rep').size).toBe(0);
+  });
+
+  it('does not confuse two customers', () => {
+    const got = repByCustomer(
+      [mk('58', 'Cody', '2026-07-31T10:00:00Z'), mk('77', 'Dana', '2026-07-31T11:00:00Z')], [], 'Rep',
+    );
+    expect(got.get('58')).toBe('Cody');
+    expect(got.get('77')).toBe('Dana');
+  });
+});
+
+describe('readQbCustomField — reads any entity that carries CustomField[]', () => {
+  it('reads off an Estimate, which is where sales-form fields actually live', () => {
+    const estimate = { CustomField: [{ Name: 'Rep', StringValue: 'Cody' }] };
+    expect(readQbCustomField(estimate, 'Rep')).toBe('Cody');
+    // The historical alias is the same function — a Customer carrying the field
+    // still works, it just is not where QuickBooks puts it.
+    expect(readQbCustomerField(estimate, 'Rep')).toBe('Cody');
   });
 });
 

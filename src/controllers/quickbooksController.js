@@ -13,6 +13,7 @@ import {
   revokeToken,
   makeQuickBooksRequest,
   getCustomFieldDefinitions,
+  getTransactionCustomFieldNames,
   enableLegacySalesCustomField,
   listItems,
   getCompanyName,
@@ -227,9 +228,18 @@ export async function getQuickBooksFields(req, res, next) {
     // custom fields found yet — make sure custom fields are set up in the QuickBooks
     // company", i.e. it blamed the client's QuickBooks setup for OUR dead token. That is
     // the same lie as the green Connected badge, one card lower down.
+    // THIRD source, added 2026-08-01 and in practice the only one that answers on a
+    // real company: the names carried on the company's own recent transactions.
+    // Rockwood has four sales-form custom fields — `Rep` (the salesperson, value
+    // "Cody", marked hidden), `Siding Color`, `Trim Color`, `Roofing Color` — and
+    // NEITHER definition source above returns them: Preferences exposes only the
+    // three legacy slots, and the App Foundations reader is disabled by default
+    // because its scope is gated behind a paid Intuit tier. That is precisely why
+    // the picker came up empty and the salesperson mapping could never be set.
     let prefsFailed = false;
     let definitionsFailed = false;
-    const [prefs, definitions] = await Promise.all([
+    let txnFailed = false;
+    const [prefs, definitions, txnFields] = await Promise.all([
       makeQuickBooksRequest(locationId, 'GET', '/preferences?minorversion=75')
         .then((d) => parseQboCustomFields(d?.Preferences))
         .catch((err) => {
@@ -242,6 +252,11 @@ export async function getQuickBooksFields(req, res, next) {
         definitionsFailed = true;
         return [];
       }),
+      getTransactionCustomFieldNames(locationId).catch((err) => {
+        console.error('[quickbooks] transaction custom-field probe failed:', err?.message);
+        txnFailed = true;
+        return [];
+      }),
     ]);
 
     // Merge, de-duplicated by name (a field can legitimately appear in both when a
@@ -251,6 +266,18 @@ export async function getQuickBooksFields(req, res, next) {
     for (const f of prefs) byName.set(f.name, { ...f, source: 'sales_form' });
     for (const d of definitions) {
       byName.set(d.name, { ...(byName.get(d.name) ?? {}), ...d, source: 'custom_fields' });
+    }
+    // Transactions go LAST so a name only they know still lands, but they do not
+    // overwrite a definition source's richer metadata (dataType, entity associations).
+    for (const t of txnFields) {
+      const prev = byName.get(t.name);
+      byName.set(t.name, {
+        id: t.name, name: t.name,
+        ...(prev ?? {}),
+        definitionId: prev?.definitionId ?? t.definitionId ?? null,
+        seenOn: t.seenOn,
+        source: prev?.source ?? 'transaction',
+      });
     }
 
     // `unavailable` means NO source could answer — so an empty list must NOT be read as
@@ -271,7 +298,7 @@ export async function getQuickBooksFields(req, res, next) {
     const definitionsAnswered = env.QBO_ENABLE_CUSTOM_FIELDS_API && !definitionsFailed;
     res.json({
       fields: [...byName.values()],
-      unavailable: prefsFailed && !definitionsAnswered,
+      unavailable: prefsFailed && !definitionsAnswered && txnFailed,
     });
   } catch (err) {
     next(err);

@@ -23,6 +23,7 @@ import {
   ghlAddressToQb,
   mergeCustomFields,
   qbCustomFieldEntries,
+  repByCustomer,
   resolveItemRef,
   resolveSalesperson,
   salespersonCustomField,
@@ -398,7 +399,18 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
 // qbSyncLogic.js (pure + unit-tested).
 async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex) {
   const targetField = cfg?.qboStatusGhlField ?? null;
-  if (!targetField) return; // status reflection not configured
+  // Salesperson/rep, carried off the TRANSACTION. Carolyn, 2026-07-31: "it's hidden
+  // on the invoice and the estimate, but they're using it for tracking. So we would
+  // have to bring this, whatever field is in here, and they map it to their GHL
+  // field." On Rockwood that field is `Rep` (value "Cody"), sitting beside Siding /
+  // Trim / Roofing Color. This pair of settings already existed — it was simply
+  // reading `Customer.CustomField`, where the value has never been.
+  const repSource = cfg?.qboAssignedUserField ?? null;
+  const repTarget = cfg?.qboAssignedUserGhlField ?? null;
+  const reps = (repSource && repTarget) ? repByCustomer(estimates, invoices, repSource) : new Map();
+  // Nothing configured on either side ⇒ nothing to do. Checked AFTER reps so a
+  // location that wants only the rep (no status reflection) still runs.
+  if (!targetField && reps.size === 0) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
   const byCustomer = new Map();
@@ -408,8 +420,12 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       byCustomer.set(customerId, status);
     }
   };
-  for (const est of estimates) consider(est.CustomerRef?.value, estimateStatus(est));
-  for (const inv of invoices) consider(inv.CustomerRef?.value, 'Invoiced');
+  if (targetField) {
+    for (const est of estimates) consider(est.CustomerRef?.value, estimateStatus(est));
+    for (const inv of invoices) consider(inv.CustomerRef?.value, 'Invoiced');
+  }
+  // A customer whose only news is a rep still needs visiting.
+  for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
 
   for (const [customerId, status] of byCustomer) {
     // Same per-record isolation as the contact loop above. The GET below was already
@@ -428,22 +444,38 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       // Don't downgrade: read the contact's current status value first.
       const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
         .catch(() => null);
-      const current = (existing?.contact?.customFields ?? []).find(
-        (f) => f.id === targetField || f.fieldKey === targetField,
-      );
-      const currentVal = current?.value ?? current?.fieldValue;
-      if (!shouldUpgradeStatus(currentVal, status)) continue;
+      const readField = (id) => {
+        const f = (existing?.contact?.customFields ?? []).find(
+          (x) => x.id === id || x.fieldKey === id,
+        );
+        return f?.value ?? f?.fieldValue;
+      };
 
-      // Merge into existing custom fields so we never wipe the salesperson field.
-      const customFields = mergeCustomFields(existing?.contact?.customFields, {
-        id: targetField,
-        value: status,
-      });
+      // Two independent writes into one PUT. Each decides for itself whether it has
+      // anything to say, because they move on different rules: status only ever
+      // climbs, while the rep is simply the latest value and may legitimately change
+      // to a different name.
+      const writes = [];
+      if (targetField && status && shouldUpgradeStatus(readField(targetField), status)) {
+        writes.push({ id: targetField, value: status });
+      }
+      const rep = reps.get(customerId);
+      if (repTarget && rep && String(readField(repTarget) ?? '') !== rep) {
+        writes.push({ id: repTarget, value: rep });
+      }
+      // Nothing changed ⇒ no PUT. Skipping the request also skips touchLink, which is
+      // correct: an unchanged contact should not have its echo cursor moved.
+      if (writes.length === 0) continue;
+
+      // Merge into existing custom fields so a write never wipes the other's field.
+      let customFields = existing?.contact?.customFields;
+      for (const w of writes) customFields = mergeCustomFields(customFields, w);
       await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, { customFields });
+      if (writes.some((w) => w.id === repTarget)) stats.qbRepUpdated = (stats.qbRepUpdated ?? 0) + 1;
       // Advance the link cursor so this GHL write isn't re-detected as a
       // GHL-origin change and pushed back to QBO next cycle (echo suppression).
       await touchLink(link);
-      stats.qbStatusUpdated++;
+      if (writes.some((w) => w.id === targetField)) stats.qbStatusUpdated++;
     } catch (err) {
       stats.qbStatusFailed++;
       console.error(`[rockwood] status reflect failed for QB customer ${customerId}:`, err.message);

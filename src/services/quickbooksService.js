@@ -6,7 +6,7 @@ import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { ensureLocation } from './locationService.js';
-import { summarizeQboFault } from './qbSyncLogic.js';
+import { summarizeQboFault, collectTxnCustomFieldNames } from './qbSyncLogic.js';
 
 const QUICKBOOKS_SLUG = 'quickbooks';
 
@@ -600,6 +600,47 @@ export async function getCustomFieldDefinitions(locationId) {
         .filter((a) => a && a.active !== false && a.associatedEntity)
         .map((a) => a.associatedEntity),
     }));
+}
+
+/**
+ * Custom-field NAMES discovered from the company's own recent transactions.
+ *
+ * This exists because neither definition source works on a real company: REST
+ * `Preferences` carries only the three legacy sales-form slots, and the modern
+ * Custom fields manager needs the App Foundations scope, which 403s behind a paid
+ * Intuit tier. So the picker came back empty and the mapping could never be
+ * configured — "the custom field is not popping up".
+ *
+ * The values, though, ride along on the documents themselves. Rockwood's estimate
+ * carries `Rep` (= "Cody", marked hidden), `Siding Color`, `Trim Color` and
+ * `Roofing Color`. Reading their own estimates and invoices therefore tells us
+ * exactly which fields the company uses, needs no scope beyond what the sync
+ * already has, and works for legacy and modern fields alike.
+ *
+ * Never throws: a failure here must degrade the picker, not break the page.
+ *
+ * @returns {Promise<Array<{name:string, definitionId:string|null, seenOn:string[]}>>}
+ */
+export async function getTransactionCustomFieldNames(locationId, sample = 25) {
+  assertConfigured();
+  const n = Math.min(Math.max(Number(sample) || 25, 1), 100);
+  // Newest first: a company that renamed a field should surface the current name.
+  const q = (entity) =>
+    makeQuickBooksRequest(
+      locationId,
+      'GET',
+      `/query?minorversion=75&query=${encodeURIComponent(
+        `select * from ${entity} orderby MetaData.LastUpdatedTime desc maxresults ${n}`,
+      )}`,
+    )
+      .then((d) => d?.QueryResponse?.[entity] ?? [])
+      .catch((err) => {
+        console.error(`[quickbooksService] ${entity} custom-field probe failed:`, err?.message);
+        return [];
+      });
+
+  const [estimates, invoices] = await Promise.all([q('Estimate'), q('Invoice')]);
+  return collectTxnCustomFieldNames(estimates, invoices);
 }
 
 /**
