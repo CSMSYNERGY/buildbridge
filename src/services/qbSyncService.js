@@ -493,16 +493,58 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       } catch (err) {
         console.warn(`[rockwood] could not list GHL custom fields: ${err.message}`);
       }
+
+      // ── DRY RUN: could we set the ASSIGNED USER instead of a custom field? ──
+      // Carolyn asked for exactly this and was talked out of it (07-31, 54:32:
+      // "Can we not do it with the regular fields … the owner" → "assignee"; and
+      // 56:38, rejecting a custom field because "then we would have to go create an
+      // app workflow"). It needs NO new field in the client's CRM — which matters
+      // now that their 12 contact fields turn out to hold nothing rep-shaped.
+      // Reports the match only. Reassigning a contact changes lead ownership and
+      // notifications, so it is not something to start doing off an inference.
+      let assigneeReport = null;
+      try {
+        const u = await makeGhlRequest(
+          locationId, 'GET', `/users/?locationId=${encodeURIComponent(locationId)}`,
+        );
+        const users = (u?.users ?? []).filter((x) => x?.id);
+        const norm = (v) => String(v ?? '').trim().toLowerCase();
+        const index = new Map();
+        for (const x of users) {
+          for (const k of [x.name, x.email, [x.firstName, x.lastName].filter(Boolean).join(' ')]) {
+            if (norm(k)) index.set(norm(k), x);
+          }
+        }
+        const distinct = [...new Set(reps.values())];
+        const matched = [], unmatched = [];
+        for (const rep of distinct) {
+          const hit = index.get(norm(rep))
+            // A bare first name is the realistic case ("Cody"), so fall back to a
+            // first-name match — but ONLY when exactly one user matches, because
+            // two Codys means we must not guess which.
+            ?? (users.filter((x) => norm(x.firstName) === norm(rep)).length === 1
+              ? users.find((x) => norm(x.firstName) === norm(rep))
+              : null);
+          (hit ? matched : unmatched).push(hit ? `${rep} -> ${hit.id}` : rep);
+        }
+        assigneeReport = { users: users.length, distinctReps: distinct.length, matched, unmatched };
+      } catch (err) {
+        console.warn(`[rockwood] assignee dry-run failed: ${err.message}`);
+      }
       await recordError({
         source: 'cron',
         kind: 'qbo_rep_target_missing',
         appSlug: 'quickbooks',
         locationId,
         upstream: 'ghl',
-        message: `Read the salesperson from QuickBooks field "${repSource}" for ${reps.size} customer(s), but no Synergy field is chosen to copy it into, so nothing was written. Set "Copy it into this Synergy field" in BuildBridge → QuickBooks. Available contact fields: ${candidates.join(' | ') || '(could not list them)'}`,
+        message: `Read the salesperson from QuickBooks field "${repSource}" for ${reps.size} customer(s), but no Synergy field is chosen to copy it into, so nothing was written. Available contact fields: ${candidates.join(' | ') || '(could not list them)'}. ASSIGNEE DRY RUN (nothing assigned): ${
+          assigneeReport
+            ? `${assigneeReport.users} Synergy user(s); ${assigneeReport.distinctReps} distinct rep name(s); matched ${assigneeReport.matched.length} [${assigneeReport.matched.join(', ')}]; unmatched ${assigneeReport.unmatched.length} [${assigneeReport.unmatched.join(', ')}]`
+            : '(could not run)'
+        }`,
         context: {
           job: 'rockwood-quickbooks-sync', field: repSource, customers: reps.size,
-          candidates,
+          candidates, assignee: assigneeReport,
         },
       });
     }
