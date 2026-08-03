@@ -1091,10 +1091,25 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
   // and it stops the moment a mapping exists. Names and ids only — a product name is the
   // tenant's own catalogue, not customer data.
   if (itemMaps.length === 0) {
+    // Report a USEFUL subset, not the catalogue. errorLogService caps any array at 20
+    // and the message at 2000 chars — correct caps, an error row must not carry an
+    // unbounded product list — so a raw dump silently truncated alphabetically and hid
+    // everything after "b" on Rockwood's 100+ SKUs.
+    //
+    // What matters for this setting is the GENERIC line, because upsertEstimate sets the
+    // line Amount from the opportunity's value: the item's own price is irrelevant, it
+    // just has to represent "a building". Size-coded SKUs (ac10x12, b10x14 …) are the
+    // wrong shape — one of them as the location default would bill every deal as that
+    // size. So: the total, then priceless/generic items first, then name matches.
     let available = [];
+    let totalItems = null;
     try {
-      available = (await listItems(locationId))
-        .map((i) => `${i.name} [${i.id}]${i.unitPrice != null ? ` $${i.unitPrice}` : ''}`);
+      const items = await listItems(locationId);
+      totalItems = items.length;
+      const generic = items.filter((i) => i.unitPrice == null);
+      const named = items.filter((i) => i.unitPrice != null && /shed|building|barn|garage|cabin/i.test(i.name));
+      available = [...generic, ...named]
+        .map((i) => `${i.name} [${i.id}]${i.unitPrice != null ? ` $${i.unitPrice}` : ' (no fixed price)'}`);
     } catch (err) {
       console.warn(`[rockwood] could not list QuickBooks items: ${err.message}`);
     }
@@ -1104,10 +1119,10 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
       appSlug: 'quickbooks',
       locationId,
       upstream: 'qbo',
-      message: `No QuickBooks item is configured for this location, so EVERY estimate push is refused — an estimate has no default item to fall back on. ${unmapped} opportunity(ies) skipped this pass. Pick one in BuildBridge → QuickBooks under "Bill invoices and estimates as"; a skipped opportunity syncs again the next time it changes in GHL. Items in this QuickBooks company: ${available.join(' | ') || '(could not list them)'}`,
+      message: `No QuickBooks item is configured for this location, so EVERY estimate push is refused — an estimate has no default item to fall back on. ${unmapped} opportunity(ies) skipped this pass. Pick one in BuildBridge → QuickBooks under "Bill invoices and estimates as"; a skipped opportunity syncs again the next time it changes in GHL. This company has ${totalItems ?? '?'} item(s); the ones suited to being the single default (no fixed price, or named like a building) are: ${available.join(' | ') || '(could not list them)'}`,
       context: {
         job: 'rockwood-quickbooks-sync', skippedOpportunities: unmapped,
-        configuredMappings: 0, availableItems: available,
+        configuredMappings: 0, totalItems, candidateItems: available,
       },
     });
   } else if (unmapped > 0) {
