@@ -402,7 +402,7 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
 // Highest status reached wins so we never downgrade (e.g. a re-sent estimate
 // after invoicing won't overwrite "Invoiced"). Status/rank logic lives in
 // qbSyncLogic.js (pure + unit-tested).
-async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex) {
+async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex, deadlineAt) {
   const targetField = cfg?.qboStatusGhlField ?? null;
   // Salesperson/rep, carried off the TRANSACTION. Carolyn, 2026-07-31: "it's hidden
   // on the invoice and the estimate, but they're using it for tracking. So we would
@@ -612,7 +612,26 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
   }
 
+  let visited = 0;
   for (const [customerId, status] of byCustomer) {
+    // ── Budget guard ──────────────────────────────────────────────────────────
+    // This loop had NO guard, which was survivable while it only ran for the
+    // handful of customers whose sales-doc status had changed. The rep work made it
+    // iterate every customer carrying a rep — 53 on Rockwood — each costing a GHL
+    // GET even when nothing needs writing. That ate the pass budget before the
+    // GHL→QuickBooks half ran, so that half deferred, and a deferred half rewinds
+    // the shared cursor to `since`: observed 2026-08-03, the cursor sat at 07:15 for
+    // over an hour while passes kept running. Same deadlock shape as 07-30/07-31.
+    //
+    // Stopping early is safe here in a way it is not elsewhere: this loop derives
+    // everything from the CURRENT QuickBooks documents and writes only on change, so
+    // an unvisited customer is simply picked up next tick. Nothing is lost, and it
+    // does not touch `processedThrough`, so it cannot move the cursor past unhandled
+    // work either.
+    if (deadlineAt && visited > 0 && Date.now() >= deadlineAt) {
+      stats.qbRepDeferred = (stats.qbRepDeferred ?? 0) + 1;
+      continue; // count the rest rather than break, so the stat is the true remainder
+    }
     // Same per-record isolation as the contact loop above. The GET below was already
     // guarded but the PUT was not, so one contact GHL rejected here aborted the whole
     // pass — after the contacts had synced and before setSyncState, which is the worst
@@ -626,6 +645,7 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
         continue;
       }
 
+      visited += 1;
       // Don't downgrade: read the contact's current status value first.
       const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
         .catch(() => null);
@@ -1143,7 +1163,7 @@ export async function syncLocation(locationId, settings) {
         ? new Date(Math.max(pull.processedThrough, since.getTime()))
         : since;
     } else {
-      await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex);
+      await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex, passDeadline);
     }
   }
 
