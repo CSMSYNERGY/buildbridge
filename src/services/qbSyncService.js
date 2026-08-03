@@ -484,7 +484,38 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
           context: { job: 'rockwood-quickbooks-sync', field: repSource, found: names.map((f) => f.name) },
         });
       }
-    } else if (reps.size > 0 && !repTarget) {
+    } else if (reps.size > 0 && toAssignee
+               && [...new Set(reps.values())].some((v) => !resolveAssignee(repUserMaps, v))) {
+      // Assignee route is ON but some rep value points at nobody. Actionable, and it
+      // stays useful long after setup: a NEW rep added in QuickBooks lands here
+      // instead of being silently skipped. Lists the Synergy users so the fix is a
+      // choice, not a hunt — the rep values are option ids, so no one can guess.
+      const distinct = [...new Set(reps.values())];
+      const unmapped = distinct.filter((v) => !resolveAssignee(repUserMaps, v));
+      let roster = [];
+      try {
+        const u = await makeGhlRequest(
+          locationId, 'GET', `/users/?locationId=${encodeURIComponent(locationId)}`,
+        );
+        roster = (u?.users ?? []).filter((x) => x?.id).map((x) => `${
+          x.name || [x.firstName, x.lastName].filter(Boolean).join(' ') || x.email || '(unnamed)'
+        } [${x.id}]`);
+      } catch (err) {
+        console.warn(`[rockwood] could not list Synergy users: ${err.message}`);
+      }
+      await recordError({
+        source: 'cron',
+        kind: 'qbo_rep_unmapped',
+        appSlug: 'quickbooks',
+        locationId,
+        upstream: 'ghl',
+        message: `${unmapped.length} of ${distinct.length} QuickBooks rep value(s) are not mapped to a Synergy user, so those contacts were left unassigned. Unmapped: ${unmapped.join(', ')}. Map them in BuildBridge → QuickBooks. Synergy users: ${roster.join(' | ') || '(could not list them)'}`,
+        context: {
+          job: 'rockwood-quickbooks-sync', field: repSource,
+          unmapped, mapped: distinct.length - unmapped.length, users: roster,
+        },
+      });
+    } else if (reps.size > 0 && !repTarget && !toAssignee) {
       // Name the CANDIDATES rather than just saying "go set a field". Whoever reads
       // this row is being asked to choose a destination, and the choice matters —
       // pick the wrong field and every synced contact has that field overwritten. So
