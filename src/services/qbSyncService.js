@@ -1075,40 +1075,55 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
     }
   }
 
-  if (unmapped > 0) {
-    stats.ghlToQbEstimatesUnmapped = unmapped;
-    // Name the items that EXIST. This row has been telling people to "add an Item
-    // mapping" without saying what they could map to — and on Rockwood it has been
-    // firing continuously while 9 opportunities a pass go unbilled, because nobody
-    // could act on it without first going into QuickBooks to look.
-    // One QBO query, and only while the location is misconfigured: it stops the moment
-    // a mapping exists. Names and ids only — a product name is the tenant's own
-    // catalogue, not customer data.
+  if (unmapped > 0) stats.ghlToQbEstimatesUnmapped = unmapped;
+
+  // TWO different problems, and they were conflated behind `unmapped > 0`:
+  //
+  //  (a) NO mapping configured at all. That is broken *now*, whether or not a deal
+  //      happened to change this pass — every estimate this location ever pushes will
+  //      be refused. Gating it on traffic meant a quiet stretch looked healthy, and it
+  //      is why Rockwood sat unbilled since 07-31 without a current row to look at.
+  //  (b) Mappings exist but none matched THESE deals. That genuinely is per-deal, so it
+  //      still only makes sense when something was skipped.
+  //
+  // (a) also carries the company's item list, so the fix is a choice rather than a trip
+  // into QuickBooks to look up the catalogue. One QBO query, only while misconfigured,
+  // and it stops the moment a mapping exists. Names and ids only — a product name is the
+  // tenant's own catalogue, not customer data.
+  if (itemMaps.length === 0) {
     let available = [];
-    if (itemMaps.length === 0) {
-      try {
-        available = (await listItems(locationId))
-          .map((i) => `${i.name} [${i.id}]${i.unitPrice != null ? ` $${i.unitPrice}` : ''}`);
-      } catch (err) {
-        console.warn(`[rockwood] could not list QuickBooks items: ${err.message}`);
-      }
+    try {
+      available = (await listItems(locationId))
+        .map((i) => `${i.name} [${i.id}]${i.unitPrice != null ? ` $${i.unitPrice}` : ''}`);
+    } catch (err) {
+      console.warn(`[rockwood] could not list QuickBooks items: ${err.message}`);
     }
-    // One durable, actionable row per pass — this is a single configuration
-    // problem, not `unmapped` separate failures. Fingerprint stays stable
-    // across passes (digits normalise to <n>), so occurrences accumulate on
-    // one row until someone configures the mapping.
     await recordError({
       source: 'cron',
       kind: 'qbo_item_mapping_missing',
       appSlug: 'quickbooks',
       locationId,
       upstream: 'qbo',
-      message: itemMaps.length === 0
-        ? `Cannot push estimates to QuickBooks: no item mapping is configured for this location, so there is no QuickBooks item to bill. ${unmapped} opportunity(ies) skipped this pass. Add an Item mapping in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL. Items available in this QuickBooks company: ${available.join(' | ') || '(could not list them)'}`
-        : `Cannot push ${unmapped} opportunity(ies) to QuickBooks: ${itemMaps.length} item mappings exist but none matched these deals' fields, so there is no QuickBooks item to bill. Check the Item mappings in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL.`,
+      message: `No QuickBooks item is configured for this location, so EVERY estimate push is refused — an estimate has no default item to fall back on. ${unmapped} opportunity(ies) skipped this pass. Pick one in BuildBridge → QuickBooks under "Bill invoices and estimates as"; a skipped opportunity syncs again the next time it changes in GHL. Items in this QuickBooks company: ${available.join(' | ') || '(could not list them)'}`,
       context: {
         job: 'rockwood-quickbooks-sync', skippedOpportunities: unmapped,
-        configuredMappings: itemMaps.length, availableItems: available,
+        configuredMappings: 0, availableItems: available,
+      },
+    });
+  } else if (unmapped > 0) {
+    // One durable, actionable row per pass — this is a single configuration problem,
+    // not `unmapped` separate failures. Fingerprint stays stable across passes (digits
+    // normalise to <n>), so occurrences accumulate on one row.
+    await recordError({
+      source: 'cron',
+      kind: 'qbo_item_mapping_missing',
+      appSlug: 'quickbooks',
+      locationId,
+      upstream: 'qbo',
+      message: `Cannot push ${unmapped} opportunity(ies) to QuickBooks: ${itemMaps.length} item mappings exist but none matched these deals' fields, so there is no QuickBooks item to bill. Check the Item mappings in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL.`,
+      context: {
+        job: 'rockwood-quickbooks-sync', skippedOpportunities: unmapped,
+        configuredMappings: itemMaps.length,
       },
     });
   }
