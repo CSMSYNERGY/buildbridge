@@ -55,6 +55,18 @@ const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // the same handful of records fail every 15 minutes. Observed in production 2026-07-30.
 const SYNC_PASS_BUDGET_MS = 60_000;
 
+// How many contacts the sales-doc/rep loop may visit per pass.
+//
+// This loop used to run for the handful of customers whose sales-doc STATUS changed;
+// carrying the rep made it iterate every customer holding one — 53 on Rockwood — and
+// each visit is a GHL GET plus, on change, a PUT and a link touch. A time budget is
+// the wrong instrument for that: it cannot stop the loop from eating the whole pass,
+// and an invocation has finite subrequests and wall-clock regardless of what the clock
+// says. 10 is a few seconds of I/O in any weather, leaves the later halves their slice,
+// and drains a 53-customer backlog in ~6 passes (~90 minutes) — where the alternative
+// was a pass that never finished at all.
+const REP_VISITS_PER_PASS = 10;
+
 async function getSyncSince(locationId) {
   const [state] = await db
     .select()
@@ -628,7 +640,21 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     // an unvisited customer is simply picked up next tick. Nothing is lost, and it
     // does not touch `processedThrough`, so it cannot move the cursor past unhandled
     // work either.
-    if (deadlineAt && visited > 0 && Date.now() >= deadlineAt) {
+    // A HARD CAP, not just a deadline. The deadline guard alone was not enough and the
+    // reason matters: guarding *at* `passDeadline` lets this loop legitimately consume
+    // the entire 60s budget and still exit "cleanly", starving every later stage — and
+    // 60s is itself longer than this pass can safely run, since each visit costs a GHL
+    // subrequest and the invocation has finite subrequests and wall-clock. Observed
+    // 2026-08-03: passes did work, then vanished — no cursor write, no alarm, no error
+    // row, which is what a platform-level termination looks like (a thrown error would
+    // have been recorded).
+    //
+    // A count is predictable where a timeout is not: ~10 contacts is a few seconds of
+    // I/O whatever the network is doing, so the later halves always get budget and the
+    // invocation always reaches setSyncState. The remainder is picked up next tick —
+    // safe here because every value is re-derived from the current QuickBooks documents
+    // and written only on change.
+    if (visited >= REP_VISITS_PER_PASS || (deadlineAt && visited > 0 && Date.now() >= deadlineAt)) {
       stats.qbRepDeferred = (stats.qbRepDeferred ?? 0) + 1;
       continue; // count the rest rather than break, so the stat is the true remainder
     }
