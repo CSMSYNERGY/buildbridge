@@ -641,6 +641,12 @@ export default function QuickBooks() {
   // keeps that one row correct instead of leaving invisible configuration steering real invoices.
   const milestoneItemMap = itemMaps.length === 1 ? itemMaps[0] : null;
   const milestoneItemId = milestoneItemMap?.externalKey ?? '';
+  // Once the sync PUSHES to QuickBooks, this item stops being optional. An estimate
+  // has no default to fall back on — upsertEstimate refuses without an itemRef and the
+  // opportunity is skipped — whereas a milestone invoice does fall back. Same setting,
+  // two very different consequences, so the copy below distinguishes them instead of
+  // telling everyone they can leave it alone.
+  const itemRequiredForEstimates = s.qboSyncDirection === 'ghl_to_qb' || s.qboSyncDirection === 'two_way';
   const itemLabel = (id) => {
     const it = qbItems.find((i) => i.id === id);
     if (!it) return id;
@@ -1579,7 +1585,9 @@ export default function QuickBooks() {
                     selection to read — it bills a stage of a job — so there is one choice per
                     client, not one per field. */}
                 <div className="space-y-1.5">
-                  <Label htmlFor="milestoneItem">Bill milestone invoices as</Label>
+                  <Label htmlFor="milestoneItem">
+                    {itemRequiredForEstimates ? 'Bill invoices and estimates as' : 'Bill milestone invoices as'}
+                  </Label>
                   <Select
                     id="milestoneItem"
                     className="max-w-[320px]"
@@ -1587,7 +1595,17 @@ export default function QuickBooks() {
                     disabled={savingItemMap}
                     onChange={(e) => setMilestoneItem(e.target.value)}
                   >
-                    <option value="">QuickBooks' default item</option>
+                    {/* "Let QuickBooks choose" is safe for a milestone INVOICE — that path
+                        falls back to a default item. It is NOT safe once the sync pushes
+                        ESTIMATES: those fail closed with no item, and the opportunity is
+                        skipped silently. Rockwood followed this option's advice and lost
+                        every estimate for three days, so it says so now rather than
+                        presenting the two cases as equivalent. */}
+                    <option value="">
+                      {itemRequiredForEstimates
+                        ? "QuickBooks' default item — ⚠ estimates will NOT sync"
+                        : "QuickBooks' default item"}
+                    </option>
                     {qbItems.map((i) => (
                       <option key={i.id} value={i.id}>
                         {i.name}{i.unitPrice != null ? ` ($${i.unitPrice})` : ''}
@@ -1607,10 +1625,12 @@ export default function QuickBooks() {
                         : 'No QuickBooks items found yet. Add a product or service in QuickBooks, then reload. Until then invoices use QuickBooks’ default item.'
                     ) : (
                       <>
-                        The product or service every milestone invoice is billed against.
+                        The product or service every milestone invoice{itemRequiredForEstimates ? ' and every synced estimate' : ''} is billed against.
                         {milestoneItemMap
                           ? <> Currently <strong>{itemLabel(milestoneItemId)}</strong>.</>
-                          : ' Leave this alone to let QuickBooks choose.'}
+                          : itemRequiredForEstimates
+                            ? <> <strong style={{ color: '#B91C1C' }}>Nothing is chosen, so estimates are not reaching QuickBooks at all.</strong> An estimate has no default to fall back on — it is skipped instead. Pick an item to start them syncing.</>
+                            : ' Leave this alone to let QuickBooks choose.'}
                       </>
                     )}
                   </p>
