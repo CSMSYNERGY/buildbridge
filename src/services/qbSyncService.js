@@ -9,6 +9,7 @@ import {
   makeQuickBooksRequest,
   upsertEstimate,
   getRecentSalesDocs,
+  listItems,
 } from './quickbooksService.js';
 import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
@@ -1076,6 +1077,22 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
 
   if (unmapped > 0) {
     stats.ghlToQbEstimatesUnmapped = unmapped;
+    // Name the items that EXIST. This row has been telling people to "add an Item
+    // mapping" without saying what they could map to — and on Rockwood it has been
+    // firing continuously while 9 opportunities a pass go unbilled, because nobody
+    // could act on it without first going into QuickBooks to look.
+    // One QBO query, and only while the location is misconfigured: it stops the moment
+    // a mapping exists. Names and ids only — a product name is the tenant's own
+    // catalogue, not customer data.
+    let available = [];
+    if (itemMaps.length === 0) {
+      try {
+        available = (await listItems(locationId))
+          .map((i) => `${i.name} [${i.id}]${i.unitPrice != null ? ` $${i.unitPrice}` : ''}`);
+      } catch (err) {
+        console.warn(`[rockwood] could not list QuickBooks items: ${err.message}`);
+      }
+    }
     // One durable, actionable row per pass — this is a single configuration
     // problem, not `unmapped` separate failures. Fingerprint stays stable
     // across passes (digits normalise to <n>), so occurrences accumulate on
@@ -1087,9 +1104,12 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
       locationId,
       upstream: 'qbo',
       message: itemMaps.length === 0
-        ? `Cannot push estimates to QuickBooks: no item mapping is configured for this location, so there is no QuickBooks item to bill. ${unmapped} opportunity(ies) skipped this pass. Add an Item mapping in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL.`
+        ? `Cannot push estimates to QuickBooks: no item mapping is configured for this location, so there is no QuickBooks item to bill. ${unmapped} opportunity(ies) skipped this pass. Add an Item mapping in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL. Items available in this QuickBooks company: ${available.join(' | ') || '(could not list them)'}`
         : `Cannot push ${unmapped} opportunity(ies) to QuickBooks: ${itemMaps.length} item mappings exist but none matched these deals' fields, so there is no QuickBooks item to bill. Check the Item mappings in BuildBridge → QuickBooks Config; a skipped opportunity syncs again the next time it changes in GHL.`,
-      context: { job: 'rockwood-quickbooks-sync', skippedOpportunities: unmapped },
+      context: {
+        job: 'rockwood-quickbooks-sync', skippedOpportunities: unmapped,
+        configuredMappings: itemMaps.length, availableItems: available,
+      },
     });
   }
 
