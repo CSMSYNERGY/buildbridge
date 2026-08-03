@@ -1208,6 +1208,37 @@ export async function syncLocation(locationId, settings) {
     }
   }
 
+  // ── Cursor-stall alarm ────────────────────────────────────────────────────────
+  // The cursor not advancing is this integration's signature failure — three
+  // incidents now (07-30, 07-31, 08-03) — and it has been INVISIBLE every time:
+  // passes keep running, contacts keep syncing, and nothing anywhere says the window
+  // stopped moving. Meanwhile the same QuickBooks changeset is re-read every 15
+  // minutes and never shrinks, so it cannot recover on its own.
+  //
+  // Fires only on the actual deadlock condition — a completed pass that left the
+  // cursor no further forward than it found it — and names which half deferred, so
+  // the cause is in the row instead of requiring a live `wrangler tail`.
+  if (cursorAt.getTime() <= since.getTime()) {
+    await recordError({
+      source: 'cron',
+      kind: 'qbo_sync_cursor_stalled',
+      appSlug: 'quickbooks',
+      locationId,
+      message: `Sync cursor did not advance (still ${since.toISOString()}), so the same QuickBooks window will be re-read next pass and cannot shrink. Deferred counts — QB→GHL contacts: ${stats.qbToGhlContactsDeferred}, GHL→QB contacts: ${stats.ghlToQbContactsDeferred}, GHL→QB estimates: ${stats.ghlToQbEstimatesDeferred}, rep/status loop: ${stats.qbRepDeferred ?? 0}. Whichever is non-zero is the half that ran out of budget; it needs a smaller slice or a cheaper inner loop.`,
+      context: {
+        job: 'rockwood-quickbooks-sync',
+        since: since.toISOString(),
+        deferred: {
+          qbToGhlContacts: stats.qbToGhlContactsDeferred,
+          ghlToQbContacts: stats.ghlToQbContactsDeferred,
+          ghlToQbEstimates: stats.ghlToQbEstimatesDeferred,
+          repLoop: stats.qbRepDeferred ?? 0,
+        },
+        skipped: stats.skipped,
+      },
+    });
+  }
+
   await setSyncState(locationId, cursorAt);
   console.log(`[rockwood] sync ${locationId} (${direction}):`, JSON.stringify(stats));
   return stats;
