@@ -1,0 +1,15 @@
+# Deliberately narrow. This repo has always relied on git's default handling for its
+# source files, and `core.autocrlf = true` is set locally, so a blanket `* text=auto` here
+# would renormalise the whole tree in one commit. Only the shell entrypoints are pinned.
+
+# Git hooks MUST stay LF even on Windows checkouts. With autocrlf on and no rule here, git
+# rewrites .githooks/pre-push to CRLF on checkout, and a CRLF shell script breaks in ways
+# that are easy to miss: `case "$1" in` becomes `in<CR>` and dies with "word unexpected"
+# under dash, and a trailing-backslash line continuation escapes the CR instead of the
+# newline so the command silently splits in two. Learned the hard way in StructureStudio
+# on 2026-08-04 — the hook there survived CRLF only because it used neither construct.
+.githooks/** text eol=lf
+
+# Pre-emptive: same reasoning for any shell script added later. There is deliberately no
+# .sh in the tree right now; the rule stays so the next one someone adds is born correct.
+*.sh text eol=lf

@@ -1,0 +1,49 @@
+#!/bin/sh
+# Pre-push freshness gate — the portable half of StructureStudio's .githooks/pre-push.
+# Wire it up once per clone:
+#   git config core.hooksPath .githooks
+#
+# THE RULE (2026-08-02): run `git pull --rebase origin <your branch>` immediately before
+# every push. This hook refuses the push while you are behind and names the command.
+# Zero output means go.
+#
+# WHY THIS IS A GATE AND NOT ADVICE: several Claude sessions plus a human share these
+# clones and these branches. On 2026-08-02 eight commits landed on a shared branch while
+# one session was mid-feature; the push bounced, and the recovery (stash, rebase, re-verify
+# every change) is exactly the kind of manual scramble where work gets clobbered. Rebasing
+# FIRST also means any correctness checks run against the code as it will really exist on
+# the remote, not as it existed in isolation.
+#
+# The hook deliberately does NOT run the pull for you: a rebase rewrites the working tree,
+# and a hook that does that mid-push is a nasty surprise the first time it hits a conflict.
+# It names the one command; you run it knowingly.
+#
+# Emergency bypass: git push --no-verify — if you use it, say so in the commit message.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" != "HEAD" ]; then
+  # Fail OPEN on a fetch problem: offline or a flaky network must not make the repo
+  # unpushable. A brand-new branch with no upstream lands here too, which is fine.
+  if git fetch --quiet origin "$branch" 2>/dev/null; then
+    behind=$(git rev-list --count "HEAD..FETCH_HEAD" 2>/dev/null || echo 0)
+    if [ "${behind:-0}" -gt 0 ]; then
+      echo "pre-push: refused — origin/$branch has $behind commit(s) you do not have." >&2
+      echo "" >&2
+      echo "  git pull --rebase origin $branch" >&2
+      echo "" >&2
+      echo "Then push again. (Rebase first so your work lands on top of theirs, and so any" >&2
+      echo "checks below run against what is really on the remote. Bypass: --no-verify.)" >&2
+      exit 1
+    fi
+  else
+    echo "pre-push: could not reach origin — skipping the freshness check." >&2
+  fi
+fi
+
+# ── Repo-specific correctness checks belong below this line ───────────────────────────
+# StructureStudio runs scripts/preflight.mjs here, because nothing in that repo compiles
+# ahead of time and a broken reference ships silently to a customer's tab. This repo has
+# no pre-push correctness gate yet. If you add one (lint / typecheck / tests), first
+# confirm it passes clean on the branch tip: a gate that fails on day one makes the repo
+# unpushable and teaches everyone to reach for --no-verify, which is worse than no gate.
