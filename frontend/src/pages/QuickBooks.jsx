@@ -160,6 +160,24 @@ export default function QuickBooks() {
   // immediate — but the STORED one is what makes the name survive a refresh.
   const companyName = config?.companyName ?? testResult?.companyName ?? null;
 
+  // Settings with defaults applied. Declared HERE, above every reader, rather than beside the
+  // JSX that mostly uses it: itemRequiredForEstimates below runs in the render body, so a later
+  // `const s` put this whole page in a temporal dead zone and every load of /buildbridge/quickbooks
+  // died on "Cannot access 's' before initialization" (2026-08-04 → 08-05, 14 crashes).
+  const s = settings ?? {
+    qboSyncDirection: 'off',
+    qboMilestoneInvoicing: false,
+    qboContactSyncPipelineId: null,
+    qboAssignedUserField: null,
+    qboAssignedUserGhlField: null,
+    qboStatusGhlField: null,
+    qboRepToAssignee: false,
+    qboSalespersonQbField: null,
+    qboSalespersonSlot: 1,
+    qboSalespersonGhlField: null,
+    qboInvoiceLeadDays: 3,
+  };
+
   // Extracted so the freshness re-read below can reuse it verbatim.
   const loadConfig = useCallback(() => (
     fetchWithAuth('/api/quickbooks/config')
@@ -798,20 +816,6 @@ export default function QuickBooks() {
   }
 
   if (loading) return <p className="text-muted-foreground text-sm">Loading configuration…</p>;
-
-  const s = settings ?? {
-    qboSyncDirection: 'off',
-    qboMilestoneInvoicing: false,
-    qboContactSyncPipelineId: null,
-    qboAssignedUserField: null,
-    qboAssignedUserGhlField: null,
-    qboStatusGhlField: null,
-    qboRepToAssignee: false,
-    qboSalespersonQbField: null,
-    qboSalespersonSlot: 1,
-    qboSalespersonGhlField: null,
-    qboInvoiceLeadDays: 3,
-  };
 
   return (
     <div style={{ position: 'relative' }}>
