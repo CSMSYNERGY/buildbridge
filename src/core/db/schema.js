@@ -208,6 +208,11 @@ export const qbSyncLinks = pgTable('qb_sync_links', {
   ghlId: text('ghl_id').notNull(),
   qbId: text('qb_id').notNull(),
   lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+  // The GHL-derived name as of our last push (migration 0010). Lets the push half ask
+  // "did this name CHANGE in Synergy?" instead of "does it DIFFER from QuickBooks?" —
+  // the difference between syncing an edit and overwriting the client's own ledger
+  // every pass. NULL = no baseline yet; seed it, write nothing.
+  lastPushedName: text('last_pushed_name'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [

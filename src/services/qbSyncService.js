@@ -21,6 +21,8 @@ import {
   shouldUpgradeStatus,
   readQbCustomerField,
   deriveContactName,
+  nameSyncDecision,
+  qbCustomerChanges,
   qbAddressToGhl,
   ghlAddressToQb,
   mergeCustomFields,
@@ -143,7 +145,11 @@ function lookupLink(index, entityType, { ghlId, qbId }) {
 // Writes one link row AND records it in the pass's link index, so records later
 // in the same pass (e.g. the opportunities loop looking up a contact link the
 // contacts loop just created) see it without a re-query.
-async function upsertLink(linkIndex, locationId, entityType, ghlId, qbId) {
+// `lastPushedName` is the name baseline (migration 0010) — only written when the
+// caller has one to record, so a link created by the QB→GHL half (an adoption)
+// keeps its NULL and is treated as "do not rename this customer" until a pass has
+// seen what GHL says.
+async function upsertLink(linkIndex, locationId, entityType, ghlId, qbId, lastPushedName = null) {
   const [row] = await db
     .insert(qbSyncLinks)
     .values({
@@ -153,10 +159,16 @@ async function upsertLink(linkIndex, locationId, entityType, ghlId, qbId) {
       ghlId: String(ghlId),
       qbId: String(qbId),
       lastSyncedAt: new Date(),
+      ...(lastPushedName ? { lastPushedName } : {}),
     })
     .onConflictDoUpdate({
       target: [qbSyncLinks.locationId, qbSyncLinks.entityType, qbSyncLinks.ghlId],
-      set: { qbId: String(qbId), lastSyncedAt: new Date(), updatedAt: new Date() },
+      set: {
+        qbId: String(qbId),
+        lastSyncedAt: new Date(),
+        updatedAt: new Date(),
+        ...(lastPushedName ? { lastPushedName } : {}),
+      },
     })
     .returning();
   indexLink(linkIndex, row);
@@ -166,13 +178,17 @@ async function upsertLink(linkIndex, locationId, entityType, ghlId, qbId) {
 // Advances the link's echo-suppression cursor. Mutating the row object also
 // updates the pass's link index (it holds the same reference), so a write in
 // one half is not re-detected as a fresh change by the other half.
-async function touchLink(link) {
+//
+// `baseline` (optional) records the name we just pushed — or, for a link that had
+// none, the name GHL currently holds. Same write, so remembering it is free.
+async function touchLink(link, baseline = null) {
   const now = new Date();
   await db
     .update(qbSyncLinks)
-    .set({ lastSyncedAt: now, updatedAt: now })
+    .set({ lastSyncedAt: now, updatedAt: now, ...(baseline ? { lastPushedName: baseline } : {}) })
     .where(eq(qbSyncLinks.id, link.id));
   link.lastSyncedAt = now;
+  if (baseline) link.lastPushedName = baseline;
 }
 
 // Skip changes we made ourselves during the previous pass (echo suppression):
@@ -742,16 +758,19 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
 // lead moves into the "Buildings" pipeline). Returns null when no pipeline is
 // configured → no gating (push all changed contacts).
 async function contactIdsInPipeline(locationId, pipelineId) {
-  if (!pipelineId) return null;
+  if (!pipelineId) return null; // not configured → no gating (see the caller)
+  // Deliberately NOT caught here. This used to fail OPEN — a transient GHL error
+  // returned null, which the caller reads as "no gating", i.e. push EVERY changed
+  // contact into the client's accounting system. That is the opposite polarity to
+  // the one this repo uses for accounting writes everywhere else, and it would
+  // strike precisely when a location is newly connected and its whole contact list
+  // is inside the first-sync window. The caller now skips creates for the pass and
+  // reports it; an empty pipeline still correctly gates everything.
   const data = await makeGhlRequest(
     locationId,
     'GET',
     `/opportunities/search?location_id=${encodeURIComponent(locationId)}&pipeline_id=${encodeURIComponent(pipelineId)}&limit=100`,
-  ).catch(() => null);
-
-  // Fail open: if the lookup errored, don't gate (a transient GHL error must not
-  // silently stop all contact creation). An empty pipeline correctly gates all.
-  if (!data) return null;
+  );
 
   const set = new Set();
   for (const opp of data.opportunities ?? []) {
@@ -777,7 +796,35 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
 
   // Contact-push gating: when a pipeline is configured, only CREATE contacts
   // that have an opportunity in it. Existing linked contacts still update.
-  const pipelineGate = await contactIdsInPipeline(locationId, settings?.qboContactSyncPipelineId);
+  let pipelineGate = null;
+  try {
+    pipelineGate = await contactIdsInPipeline(locationId, settings?.qboContactSyncPipelineId);
+  } catch (err) {
+    // Configured but unreadable ⇒ DEFER THE WHOLE HALF, and do it before the loop.
+    //
+    // Failing closed on the creates alone was wrong in a way that took an adversarial
+    // review to see: `handled`/`processedThrough` advance for every contact the loop
+    // walks, so skipped creates would have left deferred === 0, the cursor would have
+    // been written to the run start, and the next pass's `<= since` filter would have
+    // dropped those contacts for good — a transient GHL blip losing customers
+    // permanently. Fail-closed has to mean "retry", not "skip".
+    //
+    // Returning deferred = the whole page (with no high-water mark) holds the cursor at
+    // `since`, so this pass is simply re-run next tick. Updates to already-linked
+    // contacts wait one tick too; they are idempotent and cost nothing.
+    await recordThrown(err, {
+      source: 'cron',
+      kind: 'qbo_contact_gate_unavailable',
+      appSlug: 'quickbooks',
+      locationId,
+      upstream: 'ghl',
+      // recordThrown lifts upstreamStatus/stack/path off the error — which keeps a 401
+      // (support must fix it) distinguishable from a 502 (it will pass), and keeps the
+      // fingerprint from collapsing every status into one row.
+      context: { job: 'rockwood-quickbooks-sync', pipelineId: String(settings?.qboContactSyncPipelineId ?? '') },
+    });
+    return { processedThrough: 0, deferred: contacts.length };
+  }
 
   let processedThrough = 0;
   let handled = 0;
@@ -825,20 +872,65 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
         if (!customer) continue;
         if (targetIsNewer(ghlUpdatedAt, customer.MetaData?.LastUpdatedTime)) continue; // QB wins
 
+        // The NAME is sent only when it CHANGED in Synergy since our last push —
+        // not merely because QuickBooks holds something different. QuickBooks is the
+        // client's ledger and legitimately spells a customer differently (a
+        // convention, a business name, or a correction they typed by hand); pushing
+        // on difference re-imposes GHL's spelling on every pass that looks newer,
+        // which is why a manual fix "will soon be switched back". A link with no
+        // baseline yet — every pre-0010 link, and every customer we adopted rather
+        // than created — is seeded here and left alone.
+        const nameDecision = nameSyncDecision(name, link.lastPushedName);
+
+        // Then: only fields that actually differ. A case-only difference is never a
+        // change (see qbCustomerChanges), and a no-op write would still bump the
+        // customer's QuickBooks LastUpdatedTime, which is an input to the LWW
+        // comparison above. BillAddr stays whole-object: sent or not sent.
+        //
+        // firstName/lastName are passed UNCONDITIONALLY, unlike the display name.
+        // Gating them on the display-name baseline looked tidy and was a real defect:
+        // the derived display name is often the `contactName` blob, which is
+        // independent of the parts, so a client fixing "Jon" → "John" on a contact
+        // named "Acme Sheds" would never have reached QuickBooks again. They need no
+        // baseline of their own because qbCustomerChanges already compares them
+        // case-insensitively against the live customer, which is the only protection
+        // the incident actually required — and it pins DisplayName when it emits a
+        // component, so QuickBooks cannot regenerate the name from them.
+        const changes = qbCustomerChanges(
+          {
+            ...(nameDecision.push ? { name } : {}),
+            firstName,
+            lastName,
+            email: contact.email,
+            phone: contact.phone,
+            billAddr,
+          },
+          customer,
+        );
+        if (Object.keys(changes).length === 0) {
+          // Nothing to say to QuickBooks. Still advance the echo cursor, or this
+          // contact is re-examined on every pass for as long as it stays changed.
+          await touchLink(link, nameDecision.baseline);
+          stats.ghlToQbContactsUnchanged++;
+          continue;
+        }
+
         await makeQuickBooksRequest(locationId, 'POST', '/customer?minorversion=75', {
           Id: customer.Id,
           SyncToken: customer.SyncToken,
           sparse: true,
-          ...(name ? { DisplayName: name } : {}),
-          ...(firstName ? { GivenName: firstName } : {}),
-          ...(lastName ? { FamilyName: lastName } : {}),
-          ...(contact.email ? { PrimaryEmailAddr: { Address: contact.email } } : {}),
-          ...(contact.phone ? { PrimaryPhone: { FreeFormNumber: contact.phone } } : {}),
-          // BillAddr is whole-object even under sparse:true — only sent when GHL
-          // has an address, so a GHL contact without one can't wipe QB's.
-          ...(billAddr ? { BillAddr: billAddr } : {}),
+          ...changes,
         });
-        await touchLink(link);
+        // Baseline is recorded only after QuickBooks accepted the write, so a failed
+        // push is retried next pass instead of being remembered as done.
+        await touchLink(link, nameDecision.baseline);
+        // Counted only when the body carried a DisplayName that DIFFERS from what
+        // QuickBooks held — not from the decision to try, and not from the pinned copy
+        // qbCustomerChanges adds when it emits a name component. This stat is the
+        // tripwire for this incident returning, so it must count actual renames only.
+        if (changes.DisplayName && changes.DisplayName !== String(customer.DisplayName ?? '').trim()) {
+          stats.ghlToQbNamesUpdated++;
+        }
         stats.ghlToQbContactsUpdated++;
       } else {
         // Not yet in QuickBooks → only push if it clears the pipeline gate.
@@ -854,7 +946,17 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
           phone: contact.phone,
           billAddr,
         });
-        await upsertLink(linkIndex, locationId, 'contact', contact.id, customer.Id);
+        // Record the name baseline at link time. Right whether findOrCreateCustomer
+        // CREATED this customer (it is the name we sent) or MATCHED an existing one
+        // (it is what GHL said when we linked, so a later GHL rename still pushes
+        // while today's ledger spelling is left alone).
+        //
+        // Falls back to the email because that is what findOrCreateCustomer used as the
+        // DisplayName when GHL had no name at all (`name ?? email`). Leaving the
+        // baseline NULL there would mean the customer stays named after an email
+        // address forever: the first pass where GHL finally has a name would hit the
+        // null-baseline branch and seed instead of pushing.
+        await upsertLink(linkIndex, locationId, 'contact', contact.id, customer.Id, name ?? contact.email ?? null);
         stats.ghlToQbContactsCreated++;
       }
     } catch (err) {
@@ -1186,6 +1288,16 @@ export async function syncLocation(locationId, settings) {
     qbStatusFailed: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,
+    // Linked contacts whose GHL side changed but whose QuickBooks customer already
+    // matched — no write sent. Case-only name differences land here (see
+    // qbCustomerChanges), which is what stops the sync overwriting the
+    // capitalisation a client fixes by hand in their own books.
+    ghlToQbContactsUnchanged: 0,
+    // Customer names actually rewritten. Should be RARE — only a genuine rename in
+    // Synergy since our last push (see nameSyncDecision). A number that tracks
+    // ghlToQbContactsUpdated means something is pushing names on difference again,
+    // which is the 2026-08-05 incident coming back.
+    ghlToQbNamesUpdated: 0,
     ghlToQbContactsFailed: 0,
     ghlToQbContactsDeferred: 0,
     ghlToQbEstimatesCreated: 0,

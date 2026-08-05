@@ -58,15 +58,187 @@ export function shouldUpgradeStatus(current, incoming) {
   return i > c;
 }
 
+/** All-lowercase and containing at least one letter that COULD have been capitalised. */
+function isAllLower(v) {
+  const s = String(v ?? '');
+  return /\p{Ll}/u.test(s) && s === s.toLowerCase();
+}
+
 /**
- * Derive a single display name from a GHL contact's fields, preferring an
- * explicit contactName, then first+last, then a plain name. Returns null only
- * when nothing usable is present (fixes the old `?? null` that never fired
- * because ''.join always returns a string).
+ * Derive a single display name from a GHL contact's fields: the explicit
+ * single-name blob (`contactName`, else `name`) wins over first+last, except for
+ * the capitalisation rule below. Returns null only when nothing usable is present
+ * (fixes the old `?? null` that never fired because ''.join always returns a
+ * string).
+ *
+ * ⚠️ The blob-vs-parts CAPITALISATION rule (2026-08-05) exists because of a real
+ * client report: "my customers in QBO keep getting their names switched to all
+ * lower case … they are not lower case in GHL". BuildBridge never lowercases
+ * anything — but this name becomes the QuickBooks customer's `DisplayName`, and
+ * the single-blob field (`contactName`/`name`) on GHL's contacts-list payload can
+ * hold a lowercased copy of a name whose `firstName`/`lastName` — the fields
+ * GHL's own UI displays — are properly capitalised. Preferring the blob then
+ * wrote "john smith" into a client's books every pass.
+ *
+ * So: when the blob and the parts spell the SAME name and only the blob's
+ * capitals are missing, the parts win. When they genuinely differ the blob still
+ * wins, because that difference is meaningful — `contactName` is where a company
+ * or DBA name lives ("Acme LLC" for a contact named Jo Bo), and that must keep
+ * reaching QuickBooks as-is.
  */
 export function deriveContactName({ contactName, firstName, lastName, name } = {}) {
-  const combined = [firstName, lastName].filter(Boolean).join(' ').trim();
-  return (contactName && contactName.trim()) || combined || (name && name.trim()) || null;
+  // Precedence is unchanged from before the casing rule: contactName, then
+  // first+last, then a plain `name`. Deliberately NOT collapsed into one "blob"
+  // candidate — ranking `name` above the parts would silently change which value
+  // becomes a QuickBooks DisplayName for any payload carrying both (GHL's own
+  // QB→GHL write puts DisplayName in `name`, so "Smith, John" would start beating
+  // "John Smith"). It also means a lowercase `name` is already outranked by the
+  // parts and needs no casing rule of its own.
+  const blob = (contactName && contactName.trim()) || null;
+  // Each part trimmed before joining: padded fields are routine in CSV-imported GHL
+  // contacts, and " Smith" would otherwise defeat the equality test below.
+  const parts = [firstName, lastName]
+    .map((p) => (p == null ? '' : String(p).trim()))
+    .filter(Boolean)
+    .join(' ') || null;
+  const fallback = (name && name.trim()) || null;
+
+  if (!blob) return parts || fallback;
+  if (!parts) return blob;
+  // Same name, two capitalisations → take the one that still has its capitals.
+  // Whitespace is collapsed first so "John  Smith" vs "john smith" still matches.
+  const flat = (s) => s.replace(/\s+/g, ' ').toLowerCase();
+  if (flat(blob) === flat(parts)) {
+    return isAllLower(blob) && !isAllLower(parts) ? parts : blob;
+  }
+  // KNOWN LIMIT: when the strings genuinely differ the blob wins even if it is
+  // lowercase, because a difference usually means the blob carries information the
+  // parts do not — a company/DBA name ("Acme LLC" for a contact named Jo Bo), or a
+  // middle initial. Choosing capitalisation over information is not obviously right,
+  // and title-casing a name we were given is its own class of wrong ("McDonald",
+  // "de Vries", "JJ"). On the UPDATE path this is harmless — qbCustomerChanges never
+  // rewrites a name that differs only in case, so a QuickBooks record already spelled
+  // properly is left alone. It is only visible on a customer we CREATE.
+  return blob;
+}
+
+/**
+ * Should this pass send the contact's NAME to QuickBooks, and what should the link
+ * remember afterwards?
+ *
+ * This is the permanent half of the 2026-08-05 lowercase-name incident, and it is
+ * about semantics rather than casing. The push half used to compare GHL's current
+ * name against the QuickBooks customer's current name and write whenever they
+ * DIFFERED — but a difference is not a change. QuickBooks legitimately holds a
+ * different name for the same person: a ledger convention ("Smith, John"), a
+ * business name, or simply a correction the client typed. Writing on difference
+ * means every pass in which GHL's side looks newer — and any touch of a contact in
+ * the CRM makes it look newer, a tag, a note, an automation, our own rep-field
+ * write — re-imposes GHL's spelling. That is why the client's correction "will
+ * soon be switched back".
+ *
+ * With a baseline the question becomes the right one: has the name changed in
+ * Synergy since we last pushed it? If not, we say nothing and their ledger keeps
+ * what they typed. A genuine rename still flows.
+ *
+ * No baseline (`null`) covers every link that predates migration 0010 and every
+ * QuickBooks customer we ADOPTED rather than created — precisely the records whose
+ * name we have least right to overwrite. So we seed the baseline from GHL's
+ * current value and write nothing that pass: self-healing, and a later real rename
+ * still propagates.
+ *
+ * @param {?string} derived          deriveContactName() for this GHL contact
+ * @param {?string} lastPushedName   link.lastPushedName
+ * @returns {{push: boolean, baseline: ?string}} baseline is what to store (null = leave as-is)
+ */
+export function nameSyncDecision(derived, lastPushedName) {
+  const next = derived == null ? null : String(derived).trim() || null;
+  if (!next) return { push: false, baseline: null };           // nothing to say or remember
+  if (lastPushedName == null) return { push: false, baseline: next }; // seed only
+  if (next === lastPushedName) return { push: false, baseline: null };
+  return { push: true, baseline: next };
+}
+
+/**
+ * The fields of a QuickBooks customer that this GHL contact actually CHANGES —
+ * the body of a sparse update with everything QuickBooks already agrees with
+ * removed. Returns {} when there is nothing to write, so the caller can skip the
+ * request entirely.
+ *
+ * Names compare case-INSENSITIVELY, and that is the point. QuickBooks is the
+ * client's own book of record and they curate the capitalisation in it by hand;
+ * when the letters match and only the capitals differ, we have no better
+ * information than they do, so their version stands. Without this the sync
+ * fights the human: they fix "john smith" → "John Smith" in QuickBooks, the
+ * correction flows back into GHL (which leaves its own lowercase blob field
+ * untouched), the next GHL-side change re-detects the contact, and the lowercase
+ * name lands again — "I can switch it back but it will soon be switched back"
+ * (client report, 2026-08-05).
+ *
+ * A real rename still syncs: different letters are a change, different capitals
+ * are not.
+ *
+ * @param {object} next      { name, firstName, lastName, email, phone, billAddr }
+ * @param {object} customer  the QBO Customer as it stands right now
+ */
+export function qbCustomerChanges(next = {}, customer = {}) {
+  const out = {};
+  const clean = (v) => (v == null ? '' : String(v).trim());
+  const sameText = (a, b) => clean(a).toLowerCase() === clean(b).toLowerCase();
+
+  // Values are written TRIMMED, not just compared trimmed. Comparing " new@x.com "
+  // against "old@x.com" says "changed" and then sending the padded string earns a
+  // QBO ValidationFault on every pass forever, because a rejected write never
+  // advances the link.
+  if (next.name && !sameText(next.name, customer.DisplayName)) out.DisplayName = clean(next.name);
+  if (next.firstName && !sameText(next.firstName, customer.GivenName)) out.GivenName = clean(next.firstName);
+  if (next.lastName && !sameText(next.lastName, customer.FamilyName)) out.FamilyName = clean(next.lastName);
+  // Email: case-insensitive by the same argument plus the RFC — mailbox casing is
+  // not identity, so a case flip is not worth a write into someone's books.
+  if (next.email && !sameText(next.email, customer.PrimaryEmailAddr?.Address)) {
+    out.PrimaryEmailAddr = { Address: clean(next.email) };
+  }
+  // Phone: compared by DIGITS, not byte-for-byte. This is the same lesson as the
+  // name, one field over. QuickBooks holds "(406) 555-0100"; the QB→GHL half copies
+  // it into GHL, which stores a normalised "+14065550100"; a byte comparison then
+  // reports a change on every single pass and overwrites the formatting the client
+  // typed into their own ledger — the reported incident, on PrimaryPhone. Same digits
+  // ⇒ same phone ⇒ nothing to say. A genuinely different number still syncs.
+  const digits = (v) => {
+    const d = clean(v).replace(/\D/g, '');
+    // GHL stores a US number in E.164 ("+14065550100") while QuickBooks keeps it as
+    // typed ("(406) 555-0100"), so an 11-digit string starting with 1 is the SAME phone
+    // as its 10-digit form. NANP only — deliberately no general libphonenumber-style
+    // parsing, which would be guessing at a country for every client we have.
+    return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  };
+  if (next.phone && digits(next.phone) !== digits(customer.PrimaryPhone?.FreeFormNumber)) {
+    out.PrimaryPhone = { FreeFormNumber: clean(next.phone) };
+  }
+  // BillAddr is whole-object even under sparse:true, so it is sent or not sent —
+  // compare only the keys we would send, and skip when every one already matches.
+  // ⚠️ KNOWN PRE-EXISTING HAZARD, not introduced here and not fixed here: because the
+  // object is replaced wholesale, sending it drops any QBO address key GHL cannot
+  // represent (Line2/Line3, and PostalCode/Country when the GHL contact has none).
+  // Change-gating it means this now fires far less often than before, but the round
+  // trip through GHL's single `address1` (Line1..Line3 comma-joined) makes a
+  // multi-line QBO address compare as different every time. See the work log.
+  if (next.billAddr) {
+    const current = customer.BillAddr ?? {};
+    const differs = Object.entries(next.billAddr).some(([k, v]) => !sameText(v, current[k]));
+    if (differs) out.BillAddr = next.billAddr;
+  }
+
+  // Pin DisplayName whenever a name COMPONENT is going over without it. Intuit's
+  // Customer reference says DisplayName is generated by concatenating the name
+  // components supplied in the request when DisplayName is not supplied — so a
+  // GivenName-only sparse body could have QuickBooks regenerate the very field this
+  // whole change exists to protect. Sending the customer's CURRENT DisplayName back
+  // cannot alter anything: it is the value QuickBooks already holds.
+  if ((out.GivenName || out.FamilyName) && !out.DisplayName && clean(customer.DisplayName)) {
+    out.DisplayName = clean(customer.DisplayName);
+  }
+  return out;
 }
 
 /**

@@ -12,6 +12,8 @@ import {
   resolveAssignee,
   repByCustomer,
   deriveContactName,
+  nameSyncDecision,
+  qbCustomerChanges,
   qbAddressToGhl,
   ghlAddressToQb,
   mergeCustomFields,
@@ -192,6 +194,165 @@ describe('deriveContactName — one clean name from GHL fields', () => {
     expect(deriveContactName({})).toBeNull();
     expect(deriveContactName({ firstName: '', lastName: '' })).toBeNull();
     expect(deriveContactName(undefined)).toBeNull();
+  });
+
+  // The 2026-08-05 client report: QBO customer names kept reverting to all lowercase
+  // while GHL showed them properly capitalised.
+  it('takes the capitalised first+last over a lowercase blob of the same name', () => {
+    expect(deriveContactName({ contactName: 'john smith', firstName: 'John', lastName: 'Smith' }))
+      .toBe('John Smith');
+    expect(deriveContactName({ name: 'john smith', firstName: 'John', lastName: 'Smith' }))
+      .toBe('John Smith');
+  });
+  it('keeps the blob when it is a DIFFERENT name, lowercase or not', () => {
+    // contactName is where a company/DBA name lives — not a casing variant.
+    expect(deriveContactName({ contactName: 'acme llc', firstName: 'Jo', lastName: 'Bo' }))
+      .toBe('acme llc');
+  });
+  it('keeps the blob when IT is the capitalised one', () => {
+    expect(deriveContactName({ contactName: 'John Smith', firstName: 'john', lastName: 'smith' }))
+      .toBe('John Smith');
+  });
+  it('keeps first+last ABOVE a plain `name`, as it always did', () => {
+    // Ranking `name` above the parts would silently change which value becomes a
+    // QuickBooks DisplayName — and `name` is where the QB→GHL half writes the ledger's
+    // own DisplayName back into GHL, so "Smith, John" would start beating "John Smith".
+    expect(deriveContactName({ name: 'Smith, John', firstName: 'John', lastName: 'Smith' }))
+      .toBe('John Smith');
+    // Which also means a lowercase `name` is already outranked and needs no casing rule.
+    expect(deriveContactName({ name: 'john smith', firstName: 'John', lastName: 'Smith' }))
+      .toBe('John Smith');
+  });
+  it('trims each part before joining, so padded GHL fields still match the blob', () => {
+    // Padded fields are routine in CSV-imported GHL contacts; " Smith" would otherwise
+    // defeat the equality test and let the lowercase blob through.
+    expect(deriveContactName({ contactName: 'john smith', firstName: 'John ', lastName: ' Smith' }))
+      .toBe('John Smith');
+  });
+  it('collapses internal whitespace when comparing the two spellings', () => {
+    expect(deriveContactName({ contactName: 'john  smith', firstName: 'John', lastName: 'Smith' }))
+      .toBe('John Smith');
+  });
+  it('leaves an intentional mixed-case spelling alone', () => {
+    expect(deriveContactName({ contactName: 'McDonald Farms', firstName: 'McDonald', lastName: 'Farms' }))
+      .toBe('McDonald Farms');
+    // Neither side has capitals to prefer → first-listed wins, as before.
+    expect(deriveContactName({ contactName: 'john smith', firstName: 'john', lastName: 'smith' }))
+      .toBe('john smith');
+  });
+});
+
+describe('nameSyncDecision — push a name CHANGE, never a difference', () => {
+  it('seeds the baseline and writes nothing when there is none (legacy or adopted link)', () => {
+    // The whole point: a customer we did not name keeps its ledger spelling, and the
+    // next genuine rename still propagates because we now know what GHL said.
+    expect(nameSyncDecision('John Smith', null)).toEqual({ push: false, baseline: 'John Smith' });
+    expect(nameSyncDecision('John Smith', undefined)).toEqual({ push: false, baseline: 'John Smith' });
+  });
+  it('says nothing when the GHL name has not changed since our last push', () => {
+    expect(nameSyncDecision('John Smith', 'John Smith')).toEqual({ push: false, baseline: null });
+  });
+  it('pushes a real rename and moves the baseline', () => {
+    expect(nameSyncDecision('John Smythe', 'John Smith'))
+      .toEqual({ push: true, baseline: 'John Smythe' });
+  });
+  it('a QuickBooks-side hand-edit cannot trigger a push — only GHL moves the baseline', () => {
+    // Client fixed "john smith" -> "John Smith" in QuickBooks. GHL still says what it
+    // said, so we have nothing to report and their edit survives every later pass.
+    expect(nameSyncDecision('john smith', 'john smith')).toEqual({ push: false, baseline: null });
+  });
+  it('treats a GHL casing change as a change (qbCustomerChanges is the second gate)', () => {
+    expect(nameSyncDecision('John Smith', 'john smith'))
+      .toEqual({ push: true, baseline: 'John Smith' });
+  });
+  it('does nothing at all when GHL has no name', () => {
+    expect(nameSyncDecision(null, 'John Smith')).toEqual({ push: false, baseline: null });
+    expect(nameSyncDecision('   ', null)).toEqual({ push: false, baseline: null });
+  });
+});
+
+describe('qbCustomerChanges — only write what QuickBooks does not already have', () => {
+  const customer = {
+    DisplayName: 'John Smith',
+    GivenName: 'John',
+    FamilyName: 'Smith',
+    PrimaryEmailAddr: { Address: 'john@example.com' },
+    PrimaryPhone: { FreeFormNumber: '(406) 555-0100' },
+    BillAddr: { Line1: '12 Mill Creek', City: 'Hamilton', CountrySubDivisionCode: 'MT' },
+  };
+
+  it('is empty when nothing differs', () => {
+    expect(qbCustomerChanges(
+      { name: 'John Smith', firstName: 'John', lastName: 'Smith', email: 'john@example.com', phone: '(406) 555-0100' },
+      customer,
+    )).toEqual({});
+  });
+  it('IGNORES a case-only difference — the client curates capitals in their own books', () => {
+    expect(qbCustomerChanges(
+      { name: 'john smith', firstName: 'john', lastName: 'smith', email: 'JOHN@example.com' },
+      customer,
+    )).toEqual({});
+  });
+  it('still writes a real rename', () => {
+    expect(qbCustomerChanges({ name: 'John Smythe', lastName: 'Smythe' }, customer))
+      .toEqual({ DisplayName: 'John Smythe', FamilyName: 'Smythe' });
+  });
+  // The same lesson as the name, one field over: GHL normalises phones, so a byte
+  // comparison would rewrite the client's formatting on every single pass.
+  it('IGNORES a phone reformat — same digits, same phone', () => {
+    expect(qbCustomerChanges({ phone: '4065550100' }, customer)).toEqual({});
+    expect(qbCustomerChanges({ phone: '406.555.0100' }, customer)).toEqual({});
+  });
+  it('IGNORES the E.164 form GHL normalises a US number into', () => {
+    // This is the actual round trip: QB holds "(406) 555-0100", the QB→GHL half copies
+    // it to GHL, GHL stores "+14065550100", and a byte comparison would then rewrite the
+    // client's formatting every 15 minutes — the reported incident, on PrimaryPhone.
+    expect(qbCustomerChanges({ phone: '+14065550100' }, customer)).toEqual({});
+    expect(qbCustomerChanges({ phone: '+1 (406) 555-0100' }, customer)).toEqual({});
+  });
+  it('still writes a genuinely different number', () => {
+    expect(qbCustomerChanges({ phone: '4065559999' }, customer))
+      .toEqual({ PrimaryPhone: { FreeFormNumber: '4065559999' } });
+  });
+  it('writes TRIMMED values, not just compares trimmed ones', () => {
+    // A padded address earns a QBO ValidationFault on every pass forever, because a
+    // rejected write never advances the link.
+    expect(qbCustomerChanges({ email: '  NEW@example.com  ' }, customer))
+      .toEqual({ PrimaryEmailAddr: { Address: 'NEW@example.com' } });
+    expect(qbCustomerChanges({ name: '  John Smythe ' }, customer))
+      .toEqual({ DisplayName: 'John Smythe' });
+  });
+  it('pins the existing DisplayName whenever a name COMPONENT goes over without it', () => {
+    // QBO regenerates DisplayName from the components supplied when DisplayName is
+    // absent, which would defeat the whole fix. Sending back the value it already
+    // holds cannot change anything.
+    expect(qbCustomerChanges({ firstName: 'Jonathan' }, customer))
+      .toEqual({ GivenName: 'Jonathan', DisplayName: 'John Smith' });
+  });
+  it('does not invent a DisplayName for a customer that has none', () => {
+    expect(qbCustomerChanges({ firstName: 'Jonathan' }, { GivenName: 'John' }))
+      .toEqual({ GivenName: 'Jonathan' });
+  });
+  it('omits BillAddr when every key we would send already matches', () => {
+    expect(qbCustomerChanges(
+      { billAddr: { Line1: '12 Mill Creek', City: 'hamilton' } },
+      customer,
+    )).toEqual({});
+  });
+  it('sends BillAddr whole when any part differs', () => {
+    const billAddr = { Line1: '99 New Road', City: 'Hamilton' };
+    expect(qbCustomerChanges({ billAddr }, customer)).toEqual({ BillAddr: billAddr });
+  });
+  it('writes everything for a customer QuickBooks has nothing on', () => {
+    expect(qbCustomerChanges({ name: 'New Person', firstName: 'New', email: 'new@example.com' }, {}))
+      .toEqual({
+        DisplayName: 'New Person',
+        GivenName: 'New',
+        PrimaryEmailAddr: { Address: 'new@example.com' },
+      });
+  });
+  it('never blanks a QuickBooks value GHL simply lacks', () => {
+    expect(qbCustomerChanges({ name: 'John Smith' }, customer)).toEqual({});
   });
 });
 
