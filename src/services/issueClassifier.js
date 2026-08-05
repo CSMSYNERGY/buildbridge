@@ -112,11 +112,93 @@ export function isIssueCurrent(row, { now = Date.now(), lastOkAt = null, lastSyn
  * Getting the system wrong is not cosmetic: a GoHighLevel authorisation failure that reads
  * "reconnect QuickBooks" sends someone round a loop of a remedy that cannot work.
  */
+// Problems where BuildBridge reached everything successfully and simply has not been told
+// enough to finish the job. These are keyed on `kind` and MUST be answered before the
+// `upstream` branches below.
+//
+// WHY, because this cost a client two days of the wrong diagnosis: these rows carry an
+// `upstream` tag naming the system the data came FROM, not a system that failed.
+// `qbo_rep_target_missing` is tagged 'ghl' because the value was headed for GoHighLevel — and
+// with no HTTP status it fell through the GHL branch to its catch-all, so a tenant with a
+// perfectly healthy integration was told "BuildBridge could not reach Synergy for this
+// location, so records are not moving" on a card whose very next line read "last completed
+// sync 11 minutes ago" (Rockwood, 225 occurrences, 08-03 → 08-05). Both halves were false:
+// that same pass had read 53 customers out of QuickBooks and listed the location's custom
+// fields out of GoHighLevel.
+//
+// A setup gap and an outage need opposite reactions — one is a dropdown the tenant sets in
+// thirty seconds, the other is a support call — so guessing wrong does not merely misinform,
+// it sends them to the wrong place and manufactures a support ticket for self-serve config.
+export const SETUP_GAP_TEXT = {
+  qbo_rep_target_missing:
+    'BuildBridge is reading the salesperson out of QuickBooks, but no Synergy field has been chosen to copy it into, so that value is being discarded. Everything else is syncing normally. Choose the field in BuildBridge → QuickBooks.',
+  qbo_rep_field_not_found:
+    'BuildBridge is set to read the salesperson from a QuickBooks field that no recent estimate or invoice actually carries, so no salesperson is being read at all. Check the field name in BuildBridge → QuickBooks.',
+  qbo_rep_unmapped:
+    'Some QuickBooks salesperson names are not matched to a Synergy user, so those contacts were left unassigned rather than assigned to the wrong person. Map them in BuildBridge → QuickBooks.',
+  qbo_item_mapping_missing:
+    'No QuickBooks item is set for billing these deals, so their estimates cannot be created — QuickBooks requires an item and an estimate has no default to fall back on. Set one in BuildBridge → QuickBooks; skipped deals are picked up again automatically once it is.',
+};
+
+// Problems that are BuildBridge's to fix, where telling the tenant to check a setting would
+// send them looking for one that does not exist.
+export const OURS_TEXT = {
+  qbo_rep_value_unreadable:
+    'BuildBridge can see the QuickBooks salesperson field but cannot yet read the kind of value stored in it, so no salesperson is being copied. This is a BuildBridge limitation, not a setting — contact CSM Synergy support.',
+  qbo_sync_cursor_stalled:
+    'The QuickBooks sync has stopped moving forward and keeps re-reading the same window, so recent changes may be delayed. Nothing is lost and there is nothing for you to change — contact CSM Synergy support.',
+  ensure_location_failed:
+    'BuildBridge could not record this location in its own database, so parts of the integration may not run. QuickBooks is not the problem and there is nothing for you to do.',
+  idearoom_unparsable_body:
+    'A lead arrived from IdeaRoom in a format BuildBridge could not read, so it was stored raw rather than created. Support can see it — contact CSM Synergy.',
+  idearoom_unmappable_lead:
+    'A lead arrived from IdeaRoom with no email address and no phone number, so it could not be created in Synergy. Check the field mapping in IdeaRoom.',
+  idearoom_token_lookup_failed:
+    'BuildBridge could not identify which location an IdeaRoom lead belongs to, so it was not created. Contact CSM Synergy support.',
+  idearoom_capture_failed:
+    'BuildBridge could not record an inbound IdeaRoom lead in its own database, so that lead may be missing. Contact CSM Synergy support.',
+  idearoom_push_failed:
+    'A lead from IdeaRoom was received but could not be created in Synergy, so it is missing rather than delayed. Contact CSM Synergy support.',
+  idearoom_processing_error:
+    'BuildBridge failed while processing a lead from IdeaRoom, so that lead may be missing. Contact CSM Synergy support.',
+  // Somebody could not get IN. On 2026-07-27 a 400 "Invalid or expired OAuth state" blocked
+  // every marketplace install for days, so this one is about access, not about syncing.
+  entry_blocked:
+    'Someone could not finish installing or signing in to BuildBridge, so this location may not be connected yet. Try the install link again from the start; if it keeps failing, contact CSM Synergy support.',
+  // The browser ingest endpoint also accepts a client-supplied kind, so an arbitrary string can
+  // reach the table and the generic sentence stays reachable by design. This is only the
+  // default the server picks when the browser sent no kind of its own.
+  client_error:
+    'Something went wrong in the BuildBridge screen you were using. Reloading usually clears it; if it keeps happening, contact CSM Synergy support.',
+};
+
+// Individual records that did not make it across. Naming the direction correctly here needs
+// care, because THE KIND PREFIX NAMES THE SOURCE OF THE DATA, NOT THE SYSTEM THAT FAILED:
+// `ghl_contact_push_failed` is raised inside `syncGhlContactsToQb`, so the write that failed
+// was to QuickBooks, not to Synergy. Reading those prefixes as "GoHighLevel broke" would
+// produce exactly the inverted sentence this file exists to prevent — verified against the
+// enclosing function and the call it wraps, not the name.
+export const PER_RECORD_TEXT = {
+  ghl_contact_push_failed:
+    'Some Synergy contacts could not be written into QuickBooks, so those customers are missing or out of date in QuickBooks. Support can see which ones.',
+  ghl_estimate_push_failed:
+    'Some deals could not have their estimate created in QuickBooks, so those estimates are missing there. Support can see which ones.',
+  qbo_status_reflect_failed:
+    'The status of a QuickBooks estimate or invoice could not be copied back into Synergy, so a deal may show an out-of-date status there. Support can see which ones.',
+};
+
 export function summarizeIssue(row) {
   const kind = row?.kind ?? '';
   const upstream = row?.upstream ?? '';
   const status = Number(row?.upstream_status) || 0;
   const message = String(row?.message ?? '');
+
+  // Kind-keyed sentences first — before any `upstream` tag can pick one. For every kind in
+  // these three tables the tag names which system the DATA came from, so letting it choose
+  // is what produced "could not reach Synergy" for an unset dropdown.
+  if (SETUP_GAP_TEXT[kind]) return { code: kind, text: SETUP_GAP_TEXT[kind] };
+  if (OURS_TEXT[kind]) return { code: kind, text: OURS_TEXT[kind] };
+  if (PER_RECORD_TEXT[kind]) return { code: kind, text: PER_RECORD_TEXT[kind] };
 
   // Ours, not theirs.
   if (upstream === 'db' || /^(Failed query:|db-proxy:)|DB_WORKER/i.test(message)) {
@@ -143,7 +225,15 @@ export function summarizeIssue(row) {
     if (status === 429) {
       return { code: 'ghl_throttled', text: 'Synergy is rate-limiting BuildBridge, so records are delayed rather than lost.' };
     }
-    return { code: 'ghl_unreachable', text: 'BuildBridge could not reach Synergy for this location, so records are not moving.' };
+    // "Could not reach" is a CLAIM ABOUT THE NETWORK, so it now requires evidence of one:
+    // a server-class status or a transport error. It used to be the blind fallthrough for
+    // every ghl-tagged row, which is how a config gap with no status at all came to be
+    // reported as an outage. Anything else gets a sentence that describes what is known
+    // and stops there — vague is recoverable, confidently wrong is not.
+    if (status >= 500 || /timeout|timed out|network|fetch failed|ECONNRESET|ENOTFOUND|EAI_AGAIN/i.test(message)) {
+      return { code: 'ghl_unreachable', text: 'BuildBridge could not reach Synergy for this location, so records are not moving.' };
+    }
+    return { code: 'ghl_other', text: 'A BuildBridge task involving Synergy did not complete. Support can see the detail.' };
   }
 
   // QuickBooks — split by status, because the remedy differs completely.
@@ -169,6 +259,13 @@ export function summarizeIssue(row) {
   }
   if (kind === 'qbo_sync_failed') return { code: 'sync_failed', text: 'A scheduled QuickBooks sync did not finish.' };
   if (kind === 'cron_job_failed') return { code: 'cron_failed', text: 'A scheduled background job did not finish.' };
+
+  // A qbo-tagged row with no status that matched nothing above. Deliberately AFTER the
+  // kind-specific sentences, so it can never shadow "that customer has not been billed" —
+  // the whole point of those is that they say more than this does.
+  if (upstream === 'qbo') {
+    return { code: 'qbo_other', text: 'A BuildBridge task involving QuickBooks did not complete. Support can see the detail.' };
+  }
   return { code: 'unknown', text: 'A background task for this integration failed.' };
 }
 

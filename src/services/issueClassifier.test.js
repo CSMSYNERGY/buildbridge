@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   issueClass,
   isIssueCurrent,
@@ -10,6 +13,60 @@ import {
 const NOW = new Date('2026-07-29T15:00:00Z').getTime();
 const mins = (n) => new Date(NOW + n * 60_000).toISOString();
 const row = (over = {}) => ({ last_seen_at: mins(-1), ...over });
+
+const SRC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Two kinds are recorded inside a conditional rather than as a plain property:
+//   kind: err.kind ?? (isEntryFailure ? 'entry_blocked' : undefined)
+//   kind: typeof kind === 'string' ? kind.slice(0, 60) : 'client_error'
+// Matching a ternary mechanically means either missing these or dragging in the neighbouring
+// `typeof x === 'string'` and `appSlug: 'idearoom'` literals as if they were kinds — a guard
+// that invents kinds is as bad as one that misses them. So these two are named, WITH the
+// reason. If that idiom spreads, extend this list; the count assertion below is what stops
+// the derived half from silently shrinking in the meantime.
+const CONDITIONALLY_RECORDED_KINDS = [['entry_blocked', null], ['client_error', null]];
+
+/**
+ * Every `kind` this app records, paired with the `upstream` it is recorded with —
+ * read out of `src/` rather than hand-listed, so the completeness check cannot drift.
+ *
+ * Hermetic: local file reads only, no network and no database, same as the rest of this file.
+ * Test files are skipped so fixture kinds invented by tests are not mistaken for real ones.
+ *
+ * Note `client_error`: the browser ingest endpoint accepts a client-supplied kind (sliced to
+ * 60 chars), so the set of kinds in the table is genuinely open and the `unknown` sentence
+ * stays reachable by design. This guard covers what the SERVER chooses to record.
+ */
+function recordedKinds() {
+  const files = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js') && !e.name.endsWith('.test.js')) files.push(p);
+    }
+  })(SRC_DIR);
+
+  // Plain `kind: 'x'`, and the `kind: err.kind ?? 'x'` default used by the three wrappers that
+  // let a thrown error name its own kind. Both anchored so `text('kind')` in the Drizzle
+  // schema and `appSlug:` on the same line cannot masquerade as a kind.
+  const patterns = [/kind:\s*'([a-z0-9_]+)'/g, /kind:\s*[^,\n]*?\?\?\s*'([a-z0-9_]+)'/g];
+
+  const found = new Map(CONDITIONALLY_RECORDED_KINDS);
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const re of patterns) {
+      for (const m of text.matchAll(re)) {
+        // `upstream` belongs to the same recordError/recordThrown object literal, which may sit
+        // either side of the `kind` line — so look in a window around it rather than after it.
+        const around = text.slice(Math.max(0, m.index - 400), m.index + 400);
+        const up = /upstream:\s*'([a-z]+)'/.exec(around);
+        if (!found.has(m[1])) found.set(m[1], up ? up[1] : null);
+      }
+    }
+  }
+  return [...found];
+}
 
 describe('issueClass — deny-by-default, so nothing is cleared by an unrelated success', () => {
   it('classifies a token-refresh rejection as a credential problem', () => {
@@ -165,18 +222,61 @@ describe('summarizeIssue — name the right system and the right remedy', () => 
   });
 
   it('every kind this app actually records classifies to a real sentence, not the fallback', () => {
-    // A forgotten sentence should fail the build rather than quietly reach a tenant as
-    // "A background task for this integration failed."
-    const kindsInUse = [
-      'ghl_api_error', 'qbo_api_error', 'qbo_sync_failed', 'qbo_contact_sync_failed',
-      'milestone_invoice_failed', 'cron_job_failed',
-    ];
-    for (const kind of kindsInUse) {
-      // Supply the upstream each is actually recorded with.
-      const upstream = kind.startsWith('ghl') ? 'ghl' : (kind.startsWith('qbo_api') ? 'qbo' : null);
-      const status = upstream ? 400 : 0;
-      const { code } = summarizeIssue(row({ kind, upstream, upstream_status: status }));
-      expect(code, `${kind} fell through to the generic sentence`).not.toBe('unknown');
+    // DERIVED FROM SOURCE, not hand-listed. The hand-written version of this test named six
+    // kinds while `src/` recorded eighteen, so the twelve it never mentioned went unchecked —
+    // including `qbo_rep_target_missing`, which reached a real tenant as "BuildBridge could
+    // not reach Synergy" for two days. A guard whose coverage is a literal drifts the moment
+    // someone adds a kind, and drifts silently, which is the worst property a guard can have.
+    // Reading the tree keeps it honest: a new `kind:` with no sentence fails right here.
+    for (const [kind, upstream] of recordedKinds()) {
+      const { code } = summarizeIssue(row({ kind, upstream, upstream_status: null }));
+      expect(code, `${kind} (upstream=${upstream ?? 'none'}) fell through to the generic sentence`).not.toBe('unknown');
     }
+  });
+
+  it('finds a meaningful number of kinds, so the derivation cannot pass by finding none', () => {
+    // Without this, a broken regex would make the test above vacuous and silently green —
+    // which is precisely how the hand-listed version failed. 23 at the time of writing
+    // (21 derived + 2 conditional); the floor only has to be high enough that a regex
+    // returning nothing, or a recordError site disappearing, fails loudly.
+    expect(recordedKinds().length).toBeGreaterThanOrEqual(23);
+  });
+
+  it('never reports a setup gap as an outage — the Rockwood regression', () => {
+    // 2026-08-05: `qbo_rep_target_missing` is tagged upstream='ghl' (that is where the value
+    // was HEADED) and carries no HTTP status, so it fell through the GHL branch to its
+    // catch-all and produced "BuildBridge could not reach Synergy for this location, so
+    // records are not moving" — on a card that simultaneously said the last sync completed 11
+    // minutes ago. 225 occurrences. Nothing was unreachable; a dropdown was unset.
+    const s = summarizeIssue(row({ kind: 'qbo_rep_target_missing', upstream: 'ghl', upstream_status: null }));
+    expect(s.code).not.toBe('ghl_unreachable');
+    expect(s.text).not.toMatch(/could not reach/i);
+    expect(s.text).not.toMatch(/records are not moving/i);
+    // And it must say what to actually do.
+    expect(s.text).toMatch(/BuildBridge → QuickBooks/);
+
+    // Same shape, same trap, for the other setup gaps.
+    for (const kind of ['qbo_rep_field_not_found', 'qbo_rep_unmapped', 'qbo_item_mapping_missing']) {
+      const t = summarizeIssue(row({ kind, upstream: kind === 'qbo_rep_unmapped' ? 'ghl' : 'qbo' }));
+      expect(t.text, `${kind} claims unreachability`).not.toMatch(/could not reach/i);
+      expect(t.text, `${kind} gives the tenant nowhere to go`).toMatch(/BuildBridge → QuickBooks|IdeaRoom/);
+    }
+  });
+
+  it('only claims Synergy is unreachable when there is evidence of it', () => {
+    // A network claim needs a network symptom: a server-class status or a transport error.
+    expect(summarizeIssue(row({ upstream: 'ghl', upstream_status: 502 })).code).toBe('ghl_unreachable');
+    expect(summarizeIssue(row({ upstream: 'ghl', message: 'fetch failed' })).code).toBe('ghl_unreachable');
+    // No status and no symptom: say what is known and stop.
+    const vague = summarizeIssue(row({ kind: 'some_unmapped_ghl_thing', upstream: 'ghl' }));
+    expect(vague.code).toBe('ghl_other');
+    expect(vague.text).not.toMatch(/could not reach/i);
+  });
+
+  it('a generic catch-all never shadows a sentence that says more', () => {
+    // qbo_other sits after the kind-specific sentences on purpose: "that customer has not
+    // been billed" must survive, because it is the one that changes what someone does.
+    expect(summarizeIssue(row({ kind: 'milestone_invoice_failed', upstream: 'qbo' })).code).toBe('milestone_failed');
+    expect(summarizeIssue(row({ kind: 'qbo_contact_sync_failed', upstream: 'qbo' })).code).toBe('contact_skipped');
   });
 });
