@@ -146,9 +146,10 @@ if [ ! -f frontend/node_modules/.bin/vite ]; then
   exit 1
 fi
 
-# 126 unit tests across src/services/qbSyncLogic.test.js and issueClassifier.test.js —
-# 772 lines of logic that quickbooksController, qbSyncService and quickbooksService all
-# import. Pure units: no network, no D1, no wrangler, no env vars.
+# 156 unit tests across src/services/qbSyncLogic.test.js and issueClassifier.test.js —
+# logic that quickbooksController, qbSyncService and quickbooksService all import. Pure
+# units: no network, no D1, no wrangler, no env vars. (The classifier half also reads src/
+# from disk to enumerate error kinds; still hermetic, still no network.)
 check "unit tests" npm test
 
 # Syntax-check every other JS file. Blunt, but this repo has NO eslint config and NO
@@ -157,13 +158,28 @@ check "unit tests" npm test
 # before they deploy. 58 files in ~2s, run four at a time.
 check "syntax (node --check)" sh -c 'git ls-files -- src monitor scripts | grep -E "\.(js|mjs|cjs)$" | xargs -r -n1 -P4 node --check'
 
-# The frontend has no lint, no tests and no typecheck of its own, so its production build
-# is the only thing that ever resolves its import graph — 1627 modules, all 20 first-party
-# files confirmed in the bundle. This catches the unresolvable-import / syntax-error class
-# that produced the 2026-07-20 blank page.
+# The frontend build resolves its import graph — 1627 modules, all 20 first-party files
+# confirmed in the bundle. This catches the unresolvable-import / syntax-error class that
+# produced the 2026-07-20 blank page.
 # The output path is deliberate on both counts: NOT the real dist/ (--emptyOutDir would
 # wipe a deploy artifact) and NOT `mktemp -d` (that leaks a fresh directory on every push).
 check "frontend build" sh -c '( cd frontend && ./node_modules/.bin/vite build --outDir "${TMPDIR:-/tmp}/bb-pre-push-build" --emptyOutDir >/dev/null )'
+
+# …but a build never EVALUATES a component, and that blind spot shipped a page that failed on
+# 100% of loads. 2026-08-04: QuickBooks.jsx read `s` on line 649 while `const s` was declared
+# on line 802, so every render threw `Cannot access 's' before initialization` — and the build
+# above stayed green for a day, because every import still resolved fine.
+#
+# So: server-render every page under frontend/src/pages/ and require it not to throw. SSR runs
+# the render body and skips effects, which is precisely where that class of bug lives and
+# precisely what needs no browser, no backend and no fixtures. Pages are discovered, not
+# listed — the sibling lesson from the error-classifier guard, which named 6 of 23 kinds and
+# was uselessly green for weeks. ~3s.
+#
+# Proven non-vacuous the way this section demands: restoring the real pre-fix QuickBooks.jsx
+# makes it exit 1 and name the binding. It is a FLOOR, not a substitute for testing behaviour —
+# anything that only happens after mount is invisible to it.
+check "frontend pages render" sh -c '( cd frontend && node scripts/smoke-render.mjs >/dev/null )'
 
 # Deliberately NOT `npm run verify:deploy`: it fetches the LIVE deployed site to catch the
 # blank-page outage, so it asserts against production rather than against your working
