@@ -215,18 +215,39 @@ export function qbCustomerChanges(next = {}, customer = {}) {
   if (next.phone && digits(next.phone) !== digits(customer.PrimaryPhone?.FreeFormNumber)) {
     out.PrimaryPhone = { FreeFormNumber: clean(next.phone) };
   }
-  // BillAddr is whole-object even under sparse:true, so it is sent or not sent —
-  // compare only the keys we would send, and skip when every one already matches.
-  // ⚠️ KNOWN PRE-EXISTING HAZARD, not introduced here and not fixed here: because the
-  // object is replaced wholesale, sending it drops any QBO address key GHL cannot
-  // represent (Line2/Line3, and PostalCode/Country when the GHL contact has none).
-  // Change-gating it means this now fires far less often than before, but the round
-  // trip through GHL's single `address1` (Line1..Line3 comma-joined) makes a
-  // multi-line QBO address compare as different every time. See the work log.
+  // BillAddr is whole-object even under sparse:true, so it is sent or not sent.
+  // Two rules, both earned live (2026-08-12, see the work log):
+  //
+  //   1. The street compares against the SAME comma-join qbAddressToGhl used to
+  //      fill GHL's single `address1` (qbAddressLinesJoined — shared so the two
+  //      can never drift). Comparing Line1 alone called "12 Mill Creek, Suite 4"
+  //      vs "12 Mill Creek" a change on EVERY pass, and each false change
+  //      replaced the object wholesale — dropping Line2/Line3 from the client's
+  //      books, and never converging because the round trip regenerates the
+  //      joined form each time. An address that merely round-tripped from
+  //      QuickBooks now compares equal and nothing is sent.
+  //
+  //   2. On a genuine change, a PostalCode/Country that GHL supplied no value
+  //      for is carried over from the current customer — GHL having no zip must
+  //      not blank the zip in someone's ledger. Old Line2/Line3 are deliberately
+  //      NOT carried over: GHL's address1 is the complete new street, so keeping
+  //      the stale suite lines alongside it would duplicate them.
   if (next.billAddr) {
     const current = customer.BillAddr ?? {};
-    const differs = Object.entries(next.billAddr).some(([k, v]) => !sameText(v, current[k]));
-    if (differs) out.BillAddr = next.billAddr;
+    const streetChanged = next.billAddr.Line1 !== undefined
+      && !sameText(next.billAddr.Line1, qbAddressLinesJoined(current));
+    const restChanged = ['City', 'CountrySubDivisionCode', 'PostalCode', 'Country']
+      .some((k) => next.billAddr[k] !== undefined && !sameText(next.billAddr[k], current[k]));
+    if (streetChanged || restChanged) {
+      const preserved = {};
+      if (next.billAddr.PostalCode === undefined && current.PostalCode) {
+        preserved.PostalCode = current.PostalCode;
+      }
+      if (next.billAddr.Country === undefined && current.Country) {
+        preserved.Country = current.Country;
+      }
+      out.BillAddr = { ...preserved, ...next.billAddr };
+    }
   }
 
   // Pin DisplayName whenever a name COMPONENT is going over without it. Intuit's
@@ -242,6 +263,17 @@ export function qbCustomerChanges(next = {}, customer = {}) {
 }
 
 /**
+ * The street half of a structured QBO address exactly as GHL will hold it:
+ * Line1..Line3 comma-joined. Shared by qbAddressToGhl (which writes the join
+ * into GHL's single `address1`) and qbCustomerChanges (which must compare an
+ * incoming address1 against the SAME join to recognise a round-tripped address
+ * as unchanged), so the mapping and the comparison can never drift apart.
+ */
+export function qbAddressLinesJoined(addr) {
+  return [addr?.Line1, addr?.Line2, addr?.Line3].filter(Boolean).join(', ');
+}
+
+/**
  * Map a QBO address (Customer BillAddr / ShipAddr) to GHL contact address
  * fields. Handles both structured addresses (City / CountrySubDivisionCode /
  * PostalCode) and free-form ones (Line1..Line5, where Line1 is often the
@@ -254,7 +286,7 @@ export function qbAddressToGhl(addr, displayName) {
 
   const hasStructured = addr.City || addr.CountrySubDivisionCode || addr.PostalCode || addr.Country;
   if (hasStructured) {
-    const street = [addr.Line1, addr.Line2, addr.Line3].filter(Boolean).join(', ');
+    const street = qbAddressLinesJoined(addr);
     if (street) out.address1 = street;
     if (addr.City) out.city = addr.City;
     if (addr.CountrySubDivisionCode) out.state = addr.CountrySubDivisionCode;

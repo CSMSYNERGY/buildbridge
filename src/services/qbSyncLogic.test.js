@@ -15,6 +15,7 @@ import {
   nameSyncDecision,
   qbCustomerChanges,
   qbAddressToGhl,
+  qbAddressLinesJoined,
   ghlAddressToQb,
   mergeCustomFields,
   qbCustomFieldEntries,
@@ -343,6 +344,38 @@ describe('qbCustomerChanges — only write what QuickBooks does not already have
     const billAddr = { Line1: '99 New Road', City: 'Hamilton' };
     expect(qbCustomerChanges({ billAddr }, customer)).toEqual({ BillAddr: billAddr });
   });
+  it('recognises a round-tripped multi-line address as UNCHANGED — the churn case', () => {
+    // QBO holds a two-line address; qbAddressToGhl comma-joins it into GHL's single
+    // address1; ghlAddressToQb brings that join back as Line1. Comparing Line1
+    // against Line1 alone called this a change on every pass, and every false change
+    // replaced BillAddr wholesale — dropping Suite 4 from the client's books. The
+    // street must compare against the same join, and then there is nothing to send.
+    const qbCustomer = {
+      DisplayName: 'John Smith',
+      BillAddr: { Line1: '12 Mill Creek', Line2: 'Suite 4', City: 'Hamilton', CountrySubDivisionCode: 'MT', PostalCode: '59840' },
+    };
+    const roundTripped = ghlAddressToQb(qbAddressToGhl(qbCustomer.BillAddr, 'John Smith'));
+    expect(roundTripped.Line1).toBe('12 Mill Creek, Suite 4'); // the join, not Line1
+    expect(qbCustomerChanges({ billAddr: roundTripped }, qbCustomer)).toEqual({});
+  });
+  it('drops stale suite lines on a GENUINE street change — address1 is the full new street', () => {
+    const qbCustomer = {
+      BillAddr: { Line1: '12 Mill Creek', Line2: 'Suite 4', City: 'Hamilton', CountrySubDivisionCode: 'MT', PostalCode: '59840' },
+    };
+    const billAddr = { Line1: '99 New Road, Unit 2', City: 'Missoula', CountrySubDivisionCode: 'MT', PostalCode: '59801' };
+    // No Line2 in the output: GHL's address1 carries the complete new street, so
+    // keeping the old "Suite 4" alongside it would duplicate the suite line.
+    expect(qbCustomerChanges({ billAddr }, qbCustomer)).toEqual({ BillAddr: billAddr });
+  });
+  it('preserves the PostalCode and Country GHL has no value for on a genuine change', () => {
+    const qbCustomer = {
+      BillAddr: { Line1: '12 Mill Creek', City: 'Hamilton', PostalCode: '59840', Country: 'US' },
+    };
+    const billAddr = { Line1: '99 New Road', City: 'Hamilton' };
+    expect(qbCustomerChanges({ billAddr }, qbCustomer)).toEqual({
+      BillAddr: { Line1: '99 New Road', City: 'Hamilton', PostalCode: '59840', Country: 'US' },
+    });
+  });
   it('writes everything for a customer QuickBooks has nothing on', () => {
     expect(qbCustomerChanges({ name: 'New Person', firstName: 'New', email: 'new@example.com' }, {}))
       .toEqual({
@@ -381,6 +414,11 @@ describe('qbAddressToGhl — QuickBooks address → GHL fields', () => {
   it('returns {} for empty/missing address', () => {
     expect(qbAddressToGhl(null)).toEqual({});
     expect(qbAddressToGhl({})).toEqual({});
+  });
+  it('address1 IS qbAddressLinesJoined — the comparison in qbCustomerChanges shares it', () => {
+    const addr = { Line1: '12 Mill Creek', Line2: 'Suite 4', Line3: 'Rear', City: 'Hamilton' };
+    expect(qbAddressLinesJoined(addr)).toBe('12 Mill Creek, Suite 4, Rear');
+    expect(qbAddressToGhl(addr).address1).toBe(qbAddressLinesJoined(addr));
   });
 });
 
