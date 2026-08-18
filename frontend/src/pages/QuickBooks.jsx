@@ -1334,6 +1334,12 @@ export default function QuickBooks() {
                       they are <code>1</code> and <code>2</code> — so each one has to be pointed at a person once.
                       Nothing is assigned until a rep is mapped and this box is ticked.
                     </p>
+                    <p className="text-xs text-muted-foreground">
+                      <strong>New activity only.</strong> A contact is assigned when its customer record
+                      changes in QuickBooks, or when an estimate or invoice is created or edited — so
+                      ticking this box does not reassign the customers you already have. A contact that
+                      stays quiet keeps its current owner.
+                    </p>
 
                     {s.qboRepToAssignee && (
                       <>

@@ -33,6 +33,7 @@ import {
   findQbCustomField,
   describeQbCustomField,
   resolveAssignee,
+  customersWithNews,
   resolveItemRef,
   resolveSalesperson,
   salespersonCustomField,
@@ -77,6 +78,28 @@ const SYNC_PASS_BUDGET_MS = 60_000;
 // was a pass that never finished at all.
 const REP_VISITS_PER_PASS = 10;
 
+// A SEPARATE, larger budget for contacts that actually have news this pass.
+//
+// The 10 above bounds routine work — customers who merely hold a rep, re-derived
+// every pass and losing nothing by waiting. News is not like that: the cursor moves
+// on at the end of the pass, so a contact with a new estimate that queues past the
+// cap does not get assigned later, it never gets assigned. Ordering fresh contacts
+// first (see byCustomer) fixes which ten, not how many, and after any backlog there
+// are more than ten. These visits are rare in steady state — a handful of documents a
+// day — so the budget can be much larger without threatening the invocation.
+const FRESH_VISITS_PER_PASS = 25;
+
+// How stale a cursor may be and still count as evidence of new activity.
+//
+// `hasCursor` alone is not enough: a first sync drains its backlog over several
+// passes, and a deferred pass persists a cursor derived from the synthetic 30-day
+// window. From then on the row exists, so a row-existence test says "assign away"
+// while `since` is still weeks old and every document in that window looks new. Six
+// hours covers a deploy, a token blip or an outage; a backfill window does not fit
+// inside it. Withholding costs a missed assignment, which is recoverable; the
+// alternative reassigns contacts the client already owned, which is not.
+const ASSIGN_MAX_CURSOR_AGE_MS = 6 * 60 * 60 * 1000;
+
 async function getSyncSince(locationId) {
   const [state] = await db
     .select()
@@ -84,9 +107,17 @@ async function getSyncSince(locationId) {
     .where(eq(qbSyncState.locationId, locationId))
     .limit(1);
   // Normalize: the row travels through sql-exec, so lastSyncAt can arrive as a string.
-  return state?.lastSyncAt
-    ? new Date(state.lastSyncAt)
-    : new Date(Date.now() - FIRST_SYNC_WINDOW_MS);
+  //
+  // `hasCursor` says whether that Date is a real high-water mark or the synthetic
+  // 30-day first-sync window. Callers that merely READ from QuickBooks cannot tell
+  // the difference and do not need to; the rep→assigned-user route does, because a
+  // month of pre-existing history is not "new activity" and reassigning on it is the
+  // one thing the tenant asked never to happen.
+  const cursor = state?.lastSyncAt ? new Date(state.lastSyncAt) : null;
+  return {
+    since: cursor ?? new Date(Date.now() - FIRST_SYNC_WINDOW_MS),
+    hasCursor: !!cursor,
+  };
 }
 
 // QuickBooks' own last-modified stamp for a CDC record, as epoch ms. 0 when absent
@@ -140,6 +171,23 @@ async function loadLinkIndex(locationId) {
   const index = new Map();
   for (const row of rows) indexLink(index, row);
   return index;
+}
+
+// `lastSyncedAt` for every link as it stood BEFORE this pass touched anything.
+//
+// The index rows are mutated in place by touchLink, which is deliberate — the halves
+// need to see each other's writes. But one question must be asked against the
+// pre-pass value: "is this QuickBooks change just our own write echoing back?" The
+// contacts half runs first and touches the link of every contact it creates or
+// updates, so by the time the rep half asks, a customer QuickBooks created five
+// minutes ago carries a link stamped seconds ago and looks exactly like an echo.
+// That customer is the primary case for assigning a rep, not one to skip.
+function snapshotLinkTimes(index) {
+  const times = new Map();
+  for (const row of index.values()) {
+    if (row?.id && !times.has(row.id)) times.set(row.id, row.lastSyncedAt ?? null);
+  }
+  return times;
 }
 
 function lookupLink(index, entityType, { ghlId, qbId }) {
@@ -477,7 +525,7 @@ async function findContactOpportunity(locationId, contactId, pipelineId) {
 // `{id, value}`) — the two GHL endpoints genuinely differ. Nothing else about the
 // opportunity is touched: no stage, no name, no monetary value, no status.
 async function reflectDocFieldsToOpportunity(
-  locationId, contactId, values, oppFieldMaps, cfg, linkIndex, stats,
+  locationId, contactId, values, oppFieldMaps, cfg, linkIndex, stats, since,
 ) {
   const opp = await findContactOpportunity(locationId, contactId, cfg?.qboContactSyncPipelineId ?? null);
   if (!opp) {
@@ -486,6 +534,10 @@ async function reflectDocFieldsToOpportunity(
   }
   const writes = docFieldWrites(values, oppFieldMaps, opp.customFields ?? []);
   if (writes.length === 0) return;
+
+  // What Synergy said BEFORE we touched it. Read first, because the write below
+  // overwrites the only evidence of whether this deal already had an unpushed edit.
+  const updatedBefore = opp.updatedAt ?? opp.dateUpdated;
 
   await makeGhlRequest(locationId, 'PUT', `/opportunities/${opp.id}`, {
     customFields: writes.map((w) => ({ id: w.id, field_value: w.value })),
@@ -497,6 +549,27 @@ async function reflectDocFieldsToOpportunity(
   // about which row to update. The GHL→QuickBooks half consults it before pushing:
   // without it, our own write looks like a Synergy edit next pass and gets sent back
   // as an estimate update (or, for an unlinked deal, a brand-new estimate).
+  //
+  // NOT written when the deal already carried an edit newer than the cursor. The
+  // marker suppresses by timestamp, and our write and a human's edit from ten minutes
+  // ago are indistinguishable once it lands — so on a deal with genuine pending
+  // changes we stay out of the way and let the push half do its job. The cost is that
+  // our own field write also reaches QuickBooks as an estimate update, which is the
+  // documented behaviour for a changed opportunity anyway.
+  // "Newer than the cursor" alone would be true of OUR OWN write from the previous
+  // pass — which lands mid-pass, after that pass's cursor — so the marker would be
+  // skipped on every pass forever and every field write would travel back into
+  // QuickBooks as an estimate update. The existing marker answers it: a stamp at or
+  // before our last write is ours, not a pending client edit.
+  const marker = lookupLink(linkIndex, 'opportunity_field', { ghlId: opp.id });
+  const oursAlready = !!updatedBefore && isEcho(new Date(updatedBefore), marker ?? {});
+  const hadPendingEdit = since && updatedBefore
+    && new Date(updatedBefore) > new Date(since)
+    && !oursAlready;
+  if (hadPendingEdit) {
+    stats.qbOppEchoMarkerSkipped += 1;
+    return;
+  }
   await upsertLink(linkIndex, locationId, 'opportunity_field', opp.id, opp.id);
 }
 
@@ -504,7 +577,10 @@ async function reflectDocFieldsToOpportunity(
 // Highest status reached wins so we never downgrade (e.g. a re-sent estimate
 // after invoicing won't overwrite "Invoiced"). Status/rank logic lives in
 // qbSyncLogic.js (pure + unit-tested).
-async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex, deadlineAt) {
+async function reflectSalesDocStatus(
+  locationId, estimates, invoices, stats, cfg, linkIndex, deadlineAt,
+  { since = null, changedCustomers = [], canAssign = false, linkTimes = new Map() } = {},
+) {
   const targetField = cfg?.qboStatusGhlField ?? null;
   // Salesperson/rep, carried off the TRANSACTION. Carolyn, 2026-07-31: "it's hidden
   // on the invoice and the estimate, but they're using it for tracking. So we would
@@ -537,6 +613,11 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // Rep option id → the name the client calls that person. Used for the `repName`
   // field AND for the rep custom field below, which otherwise writes "2".
   const repLabelMaps = qbMappers.filter((m) => m.mapperType === 'qb_rep_label');
+  // Synergy fields already spoken for by the QuickBooks-customer field mappings
+  // (the "Field mappings" card). A document field must not write into one of those.
+  const customerFieldTargets = qbMappers
+    .filter((m) => m.mapperType === 'custom_field' && m.ghlValue)
+    .map((m) => m.ghlValue);
   const wantDocFields = docFieldMaps.length > 0 || oppFieldMaps.length > 0;
   // Resolved whenever a SOURCE is named, even with no target yet — the result is the
   // diagnostic below, and it answers the one question nobody can answer from outside:
@@ -559,7 +640,9 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   if (repSource || wantDocFields) {
     try {
       repDocs = await getRecentSalesDocs(locationId, 50, {
-        links: docFieldMaps.some((m) => m.externalKey === 'pdfLink'),
+        // Both destinations count — a link mapped only to an opportunity field is
+        // still a link somebody asked for.
+        links: [...docFieldMaps, ...oppFieldMaps].some((m) => m.externalKey === 'pdfLink'),
       });
       if (repSource) reps = repByCustomer(repDocs.estimates, repDocs.invoices, repSource);
     } catch (err) {
@@ -713,6 +796,59 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       });
     }
   }
+  // Who has news this pass. ONLY these contacts can have their assigned user
+  // changed — see customersWithNews. A quiet contact keeps its owner forever, which
+  // is the difference between "route new work to the rep" and "reassign the client's
+  // whole customer list the moment someone ticks a box".
+  //
+  // Two filters on top of the raw answer, each closing a way a quiet contact could
+  // still be reassigned:
+  //
+  //   canAssign — a pass with no stored cursor is NOT evidence of new activity.
+  //   getSyncSince defaults a missing cursor to 30 days back, so the first completed
+  //   pass would otherwise call a month of history "new" and reassign everyone in it.
+  //
+  //   isEcho — our OWN write to QuickBooks bumps that customer's LastUpdatedTime and
+  //   comes back through Change Data Capture next pass looking exactly like a client
+  //   edit. On a two-way tenant that means: someone reassigns a lead by hand in
+  //   Synergy, BuildBridge mirrors some unrelated field change to QuickBooks, and the
+  //   echo hands ownership straight back to the mapped rep. The contact half has
+  //   suppressed this since it was written; the assignee route has to as well.
+  const rawNews = canAssign
+    ? customersWithNews({
+      changedCustomers,
+      changedEstimates: estimates,
+      changedInvoices: invoices,
+      recentDocs: repDocs,
+      since,
+    })
+    : new Map();
+  const freshCustomers = new Set();
+  for (const [qbCustomerId, news] of rawNews) {
+    // Compared against the PRE-PASS stamp (see snapshotLinkTimes): the contacts half
+    // has already run and touched the link of everything it wrote, so the live value
+    // would call a customer QuickBooks created minutes ago "our own echo" and skip
+    // the very assignment this feature exists to make.
+    const prePass = (link) => (link ? (linkTimes.get(link.id) ?? null) : null);
+    const contactBaseline = prePass(lookupLink(linkIndex, 'contact', { qbId: qbCustomerId }));
+    // The DOCUMENT's own link, too. BuildBridge pushes Synergy opportunities into
+    // QuickBooks as estimates, and that write bumps the estimate's LastUpdatedTime —
+    // which arrives next pass as a changed document indistinguishable from one the
+    // client edited. Watching only the customer link misses it entirely, so a lead
+    // somebody deliberately reassigned gets handed back to the mapped rep.
+    const docBaseline = news.docId
+      ? prePass(lookupLink(linkIndex, 'estimate', { qbId: news.docId }))
+      : null;
+    const isOurs = (baseline) => baseline && isEcho(new Date(news.when), { lastSyncedAt: baseline });
+    // A stamp of 0 means the entity carried no usable timestamp, so we cannot tell an
+    // echo from real activity. The answer that never reassigns wins.
+    if (!news.when || isOurs(contactBaseline) || isOurs(docBaseline)) {
+      stats.qbRepAssignSkippedEcho += 1;
+      continue;
+    }
+    freshCustomers.add(qbCustomerId);
+  }
+
   // ── Estimate / invoice fields → the Synergy fields the tenant picked ──────────
   // One document per customer — the newest, same rule as the rep. This is what the
   // GHL code node did per webhook; polling means the latest document wins instead of
@@ -743,7 +879,23 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   if (!targetField && !repHasDestination && docValues.size === 0) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
+  //
+  // ORDER MATTERS AS MUCH AS MEMBERSHIP. This loop visits at most
+  // REP_VISITS_PER_PASS contacts and the cursor advances regardless, so a customer
+  // that queues behind ten quiet ones does not get "done next time" — its news is
+  // past the cursor by then and it is never assigned at all. The map is therefore
+  // seeded with the customers who HAVE news, before anyone else: the rep window is
+  // ordered by document recency across estimates and invoices separately, which puts
+  // every invoice-only customer behind up to fifty estimate customers.
+  // Precisely the customers an assignment could fire for: news this pass, a rep on
+  // their latest document, and the route switched on. Anyone else is ordinary work
+  // and can wait for a later pass without losing anything.
   const byCustomer = new Map();
+  if (toAssignee && repUserMaps.length > 0) {
+    for (const customerId of reps.keys()) {
+      if (freshCustomers.has(customerId)) byCustomer.set(customerId, null);
+    }
+  }
   const consider = (customerId, status) => {
     if (!customerId) return;
     if (shouldUpgradeStatus(byCustomer.get(customerId), status)) {
@@ -764,7 +916,8 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
   }
 
-  let visited = 0;
+  let visited = 0;      // routine work — bounded by REP_VISITS_PER_PASS
+  let freshVisited = 0; // contacts with news — bounded by FRESH_VISITS_PER_PASS
   for (const [customerId, status] of byCustomer) {
     // ── Budget guard ──────────────────────────────────────────────────────────
     // This loop had NO guard, which was survivable while it only ran for the
@@ -794,8 +947,20 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
     // invocation always reaches setSyncState. The remainder is picked up next tick —
     // safe here because every value is re-derived from the current QuickBooks documents
     // and written only on change.
-    if (visited >= REP_VISITS_PER_PASS || (deadlineAt && visited > 0 && Date.now() >= deadlineAt)) {
+    //
+    // A contact WITH NEWS draws on its own, larger budget (FRESH_VISITS_PER_PASS).
+    // The paragraph above is true of routine work and false of news: "picked up next
+    // tick" assumes the value is re-derived, and by next tick the cursor has moved
+    // past the document that made this customer fresh, so a deferred assignment is a
+    // lost one. Two budgets rather than one big one, because the reason to bound
+    // routine visits has not changed.
+    const isFresh = freshCustomers.has(String(customerId));
+    const overBudget = isFresh
+      ? freshVisited >= FRESH_VISITS_PER_PASS
+      : visited >= REP_VISITS_PER_PASS;
+    if (overBudget || (deadlineAt && visited + freshVisited > 0 && Date.now() >= deadlineAt)) {
       stats.qbRepDeferred = (stats.qbRepDeferred ?? 0) + 1;
+      if (isFresh) stats.qbRepFreshDeferred += 1;
       continue; // count the rest rather than break, so the stat is the true remainder
     }
     // Same per-record isolation as the contact loop above. The GET below was already
@@ -811,10 +976,32 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
         continue;
       }
 
-      visited += 1;
+      if (isFresh) freshVisited += 1; else visited += 1;
       // Don't downgrade: read the contact's current status value first.
-      const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
+      let existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
         .catch(() => null);
+      // One retry, and only for a contact with news. A rate-limited read costs this
+      // contact its assignment for good (the cursor moves past the document that made
+      // it fresh), so one extra request is cheap insurance against a 429 that the
+      // routine path can simply shrug off and redo next pass.
+      if (!existing && isFresh) {
+        existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
+          .catch(() => null);
+      }
+      // A failed read is NOT an empty contact. Every decision below is a comparison
+      // against what Synergy currently holds — don't downgrade the status, don't
+      // rewrite the rep, only fill an EMPTY phone, skip a custom field that already
+      // matches — and a null `existing` answers all four with "it holds nothing".
+      // A rate-limited GET would then reassign an owner, overwrite a phone someone
+      // corrected, and PUT a customFields array built from no baseline. Skipping
+      // costs one pass; the contact is re-derived from the same documents next tick.
+      // Keyed on the REQUEST failing (the catch above is the only thing that makes
+      // this null), not on the body's shape — a 200 with an unexpected shape keeps
+      // the behaviour it has always had rather than gaining a new way to stall.
+      if (!existing) {
+        stats.qbContactReadFailed += 1;
+        continue;
+      }
       const readField = (id) => {
         const f = (existing?.contact?.customFields ?? []).find(
           (x) => x.id === id || x.fieldKey === id,
@@ -841,12 +1028,26 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       // The mapped estimate/invoice fields. Added last and never over a target one of
       // the settings above already claimed: those are explicit single-purpose
       // settings, and two writers on one field would flip its value every pass.
+      // Excluded against the CONFIGURED targets, not against the writes this pass
+      // happened to produce: the status write only appears when the status climbed
+      // and the rep write only when the value changed, so comparing against `writes`
+      // would let a document field take over the status field on every quiet pass
+      // and fight it on the noisy ones.
+      // Every OTHER writer into this contact's custom fields: the two single-purpose
+      // settings, and the "Field mappings" card, which copies QuickBooks CUSTOMER
+      // fields into Synergy on a different schedule. Two writers on one field do not
+      // merge, they alternate — whichever ran last wins, every fifteen minutes.
+      const claimed = new Set([
+        targetField,
+        repTarget,
+        ...customerFieldTargets,
+      ].filter(Boolean));
       const docWrites = docValues.has(customerId)
         ? docFieldWrites(
           docValues.get(customerId),
           docFieldMaps,
           existing?.contact?.customFields ?? [],
-        ).filter((w) => !writes.some((x) => x.id === w.id))
+        ).filter((w) => !claimed.has(w.id) && !writes.some((x) => x.id === w.id))
         : [];
       writes.push(...docWrites);
       // The assignee route: the rep's mapped Synergy user becomes the contact's owner.
@@ -854,8 +1055,15 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       // not harmless here the way a repeated field write would be.
       let assignTo = null;
       if (toAssignee && rep) {
-        const mapped = resolveAssignee(repUserMaps, rep);
-        if (mapped && String(existing?.contact?.assignedTo ?? '') !== mapped) assignTo = mapped;
+        if (!freshCustomers.has(String(customerId))) {
+          // Quiet contact: the rep is known, the mapping exists, and we still leave
+          // the owner alone. Counted rather than silent so "why was this one not
+          // assigned" has an answer that is not "read the source".
+          stats.qbRepAssignSkippedQuiet += 1;
+        } else {
+          const mapped = resolveAssignee(repUserMaps, rep);
+          if (mapped && String(existing?.contact?.assignedTo ?? '') !== mapped) assignTo = mapped;
+        }
       }
 
       // The contact's own phone field, from the QuickBooks customer record.
@@ -903,6 +1111,7 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
         try {
           await reflectDocFieldsToOpportunity(
             locationId, link.ghlId, docValues.get(customerId), oppFieldMaps, cfg, linkIndex, stats,
+            since,
           );
         } catch (err) {
           stats.qbOppFieldsFailed += 1;
@@ -1454,7 +1663,7 @@ export async function syncLocation(locationId, settings) {
   const direction = cfg.qboSyncDirection ?? 'off';
   const { pullFromQb, pushToQb } = syncFlags(direction);
 
-  const since = await getSyncSince(locationId);
+  const { since, hasCursor } = await getSyncSince(locationId);
   const runStartedAt = new Date();
   const passDeadline = Date.now() + SYNC_PASS_BUDGET_MS;
 
@@ -1494,6 +1703,23 @@ export async function syncLocation(locationId, settings) {
     // BuildBridge does not create deals.
     qbOppNotFound: 0,
     qbOppFieldsFailed: 0,
+    // Contacts whose rep is known and mapped but who had no news this pass, so their
+    // Synergy owner was deliberately left alone. Expected to be large on the first
+    // passes after the toggle goes on — that is the backfill NOT happening.
+    qbRepAssignSkippedQuiet: 0,
+    // Contacts WITH news that still ran out of budget. Unlike the routine deferral
+    // above this one loses work: the cursor moves past the document that made them
+    // fresh. Non-zero means FRESH_VISITS_PER_PASS is too small for this tenant.
+    qbRepFreshDeferred: 0,
+    // News that turned out to be our own write to QuickBooks coming back through
+    // Change Data Capture. Non-zero is healthy on a two-way tenant.
+    qbRepAssignSkippedEcho: 0,
+    // Contacts skipped because Synergy would not tell us what they currently hold.
+    // Every write in this loop is a comparison, so a failed read is not a blank slate.
+    qbContactReadFailed: 0,
+    // Opportunity writes made without leaving an echo marker, because the deal
+    // already carried a Synergy edit the push half still needs to see.
+    qbOppEchoMarkerSkipped: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,
     // Linked contacts whose GHL side changed but whose QuickBooks customer already
@@ -1529,6 +1755,9 @@ export async function syncLocation(locationId, settings) {
   // All of this location's links, once. Every loop below reads from this index
   // instead of paying one DB round-trip (= one subrequest) per record.
   const linkIndex = await loadLinkIndex(locationId);
+  // Taken before either half runs — the rep→assignee echo check needs to know what
+  // the links said BEFORE this pass started writing to them.
+  const linkTimes = snapshotLinkTimes(linkIndex);
 
   // QB → GHL (Change Data Capture). Skipped entirely for a push-only tenant so
   // we don't even read QuickBooks needlessly. Reads only — never writes QBO.
@@ -1559,7 +1788,20 @@ export async function syncLocation(locationId, settings) {
         ? new Date(Math.max(pull.processedThrough, since.getTime()))
         : since;
     } else {
-      await reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg, linkIndex, passDeadline);
+      await reflectSalesDocStatus(
+        locationId, estimates, invoices, stats, cfg, linkIndex, passDeadline,
+        // The cursor and the changed customers, so the assignee route can tell a
+        // contact with news from one that has simply always had a rep. `canAssign`
+        // withholds the route entirely on a pass with no real cursor, where "since"
+        // is a 30-day backfill window rather than evidence of anything.
+        {
+          since,
+          changedCustomers: customers,
+          // A real cursor AND a recent one — see ASSIGN_MAX_CURSOR_AGE_MS.
+          canAssign: hasCursor && (Date.now() - since.getTime()) <= ASSIGN_MAX_CURSOR_AGE_MS,
+          linkTimes,
+        },
+      );
     }
   }
 

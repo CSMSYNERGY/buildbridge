@@ -10,6 +10,7 @@ import {
   collectTxnCustomFieldNames,
   collectRepValues,
   resolveAssignee,
+  customersWithNews,
   repByCustomer,
   deriveContactName,
   nameSyncDecision,
@@ -937,5 +938,162 @@ describe('milestoneIsDue — when a scheduled milestone gets invoiced', () => {
   it('treats a missing invoiceLeadDays as zero rather than NaN (which would never be due)', () => {
     expect(milestoneIsDue({ awaitsDate: true, milestoneDate: days(-1) }, NOW)).toBe(true);
     expect(milestoneIsDue({ awaitsDate: true, milestoneDate: days(1) }, NOW)).toBe(false);
+  });
+});
+
+describe('customersWithNews — who may have their Synergy owner changed', () => {
+  const CURSOR = new Date('2026-08-18T12:00:00Z');
+  const doc = (customerId, updated) => ({
+    CustomerRef: { value: customerId },
+    MetaData: { LastUpdatedTime: updated },
+  });
+
+  it('counts a customer whose QuickBooks record changed this pass', () => {
+    const fresh = customersWithNews({ changedCustomers: [{ Id: '412' }], since: CURSOR });
+    expect([...fresh.keys()]).toEqual(['412']);
+  });
+
+  it('counts a customer whose estimate or invoice changed this pass', () => {
+    const fresh = customersWithNews({
+      changedEstimates: [doc('100', '2026-08-18T13:00:00Z')],
+      changedInvoices: [doc('200', '2026-08-18T13:05:00Z')],
+      since: CURSOR,
+    });
+    expect([...fresh.keys()].sort()).toEqual(['100', '200']);
+  });
+
+  it('counts a recent document newer than the cursor even when CDC missed it', () => {
+    const fresh = customersWithNews({
+      recentDocs: { estimates: [doc('300', '2026-08-18T12:30:00Z')], invoices: [] },
+      since: CURSOR,
+    });
+    expect([...fresh.keys()]).toEqual(['300']);
+  });
+
+  it('does NOT count a customer whose newest document predates the cursor', () => {
+    // The whole point: 55 quiet Rockwood customers hold a rep, and none of them
+    // should have their owner reassigned when the toggle goes on.
+    const fresh = customersWithNews({
+      recentDocs: {
+        estimates: [doc('400', '2026-07-01T09:00:00Z')],
+        invoices: [doc('401', '2026-06-15T09:00:00Z')],
+      },
+      since: CURSOR,
+    });
+    expect(fresh.size).toBe(0);
+  });
+
+  it('treats a missing cursor as "cannot tell", never as "everything is fresh"', () => {
+    const fresh = customersWithNews({
+      recentDocs: { estimates: [doc('500', '2026-08-18T13:00:00Z')], invoices: [] },
+      since: null,
+    });
+    expect(fresh.size).toBe(0);
+  });
+
+  it('still counts CDC changes without a cursor — those are changes by definition', () => {
+    const fresh = customersWithNews({ changedCustomers: [{ Id: '600' }], since: null });
+    expect([...fresh.keys()]).toEqual(['600']);
+  });
+
+  it('falls back to TxnDate when a document carries no LastUpdatedTime', () => {
+    const fresh = customersWithNews({
+      recentDocs: { estimates: [{ CustomerRef: { value: '700' }, TxnDate: '2026-08-19' }], invoices: [] },
+      since: CURSOR,
+    });
+    expect([...fresh.keys()]).toEqual(['700']);
+  });
+
+  it('ignores documents and customers with no id, and empty input', () => {
+    expect(customersWithNews().size).toBe(0);
+    expect(customersWithNews({
+      changedCustomers: [{}],
+      changedEstimates: [{ MetaData: { LastUpdatedTime: '2026-08-19T00:00:00Z' } }],
+      since: CURSOR,
+    }).size).toBe(0);
+  });
+
+  it('de-duplicates a customer that appears in more than one window', () => {
+    const fresh = customersWithNews({
+      changedCustomers: [{ Id: '412' }],
+      changedEstimates: [doc('412', '2026-08-18T13:00:00Z')],
+      recentDocs: { estimates: [doc('412', '2026-08-18T13:00:00Z')], invoices: [] },
+      since: CURSOR,
+    });
+    expect([...fresh.keys()]).toEqual(['412']);
+  });
+
+  it('compares ids as strings, so a numeric CDC id matches a string CustomerRef', () => {
+    const fresh = customersWithNews({ changedCustomers: [{ Id: 412 }], since: CURSOR });
+    expect(fresh.has('412')).toBe(true);
+  });
+});
+
+describe('customersWithNews — timestamps, for the echo check the caller runs', () => {
+  const CURSOR = new Date('2026-08-18T12:00:00Z');
+
+  it('reports WHEN the news is stamped, so our own write can be recognised', () => {
+    const fresh = customersWithNews({
+      changedCustomers: [{ Id: '412', MetaData: { LastUpdatedTime: '2026-08-18T13:00:00Z' } }],
+      since: CURSOR,
+    });
+    expect(fresh.get('412').when).toBe(Date.parse('2026-08-18T13:00:00Z'));
+  });
+
+  it('keeps the NEWEST stamp when a customer has news from several sources', () => {
+    const fresh = customersWithNews({
+      changedCustomers: [{ Id: '412', MetaData: { LastUpdatedTime: '2026-08-18T12:30:00Z' } }],
+      changedInvoices: [{
+        CustomerRef: { value: '412' },
+        MetaData: { LastUpdatedTime: '2026-08-18T14:00:00Z' },
+      }],
+      since: CURSOR,
+    });
+    expect(fresh.get('412').when).toBe(Date.parse('2026-08-18T14:00:00Z'));
+  });
+
+  it('records 0 for news with no usable timestamp rather than dropping the customer', () => {
+    const fresh = customersWithNews({ changedCustomers: [{ Id: '999' }], since: CURSOR });
+    expect(fresh.has('999')).toBe(true);
+    expect(fresh.get('999').when).toBe(0);
+  });
+});
+
+describe('customersWithNews — which document produced the news', () => {
+  const CURSOR = new Date('2026-08-18T12:00:00Z');
+
+  it('names the document, so the caller can ask whether WE wrote it', () => {
+    const fresh = customersWithNews({
+      changedEstimates: [{
+        Id: '18008',
+        CustomerRef: { value: '412' },
+        MetaData: { LastUpdatedTime: '2026-08-18T13:00:00Z' },
+      }],
+      since: CURSOR,
+    });
+    expect(fresh.get('412')).toEqual({ when: Date.parse('2026-08-18T13:00:00Z'), docId: '18008' });
+  });
+
+  it('reports no document when the news is the customer record itself', () => {
+    const fresh = customersWithNews({
+      changedCustomers: [{ Id: '412', MetaData: { LastUpdatedTime: '2026-08-18T13:00:00Z' } }],
+      since: CURSOR,
+    });
+    expect(fresh.get('412').docId).toBeNull();
+  });
+
+  it('keeps the document of the NEWEST piece of news, not the first seen', () => {
+    const fresh = customersWithNews({
+      changedEstimates: [{
+        Id: 'old', CustomerRef: { value: '412' },
+        MetaData: { LastUpdatedTime: '2026-08-18T12:30:00Z' },
+      }],
+      changedInvoices: [{
+        Id: 'new', CustomerRef: { value: '412' },
+        MetaData: { LastUpdatedTime: '2026-08-18T14:00:00Z' },
+      }],
+      since: CURSOR,
+    });
+    expect(fresh.get('412').docId).toBe('new');
   });
 });

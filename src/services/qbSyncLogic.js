@@ -483,6 +483,69 @@ export function repByCustomer(estimates = [], invoices = [], fieldName) {
 }
 
 /**
+ * QuickBooks customers with NEWS this pass — a changed customer record, or a sales
+ * document created/updated since the sync cursor.
+ *
+ * This is what separates "assign the rep on new work" from "reassign everybody".
+ * Ahsan, 2026-08-19: "I don't care about the old contacts, but what I want is
+ * whenever I create or update a new contact that should update the assigned user in
+ * Synergy." Without this gate, turning the assignee route on hands every contact
+ * holding a rep — 55 on Rockwood, most of them quiet for months — a new owner, and
+ * reassignment in Synergy is not a silent write: it moves the lead and notifies
+ * someone. Ownership changes on activity, or it does not change at all.
+ *
+ * Two sources because the rep is read from two different windows. Change Data
+ * Capture says WHAT changed (but cannot carry enhanced custom fields, so it is not
+ * where the rep value comes from), and the recent-documents fetch carries the rep
+ * (but returns the latest 50 regardless of whether they changed). A customer is
+ * fresh if either window says so.
+ *
+ * @param {object}  w
+ * @param {Array}   w.changedCustomers  CDC Customer entities this pass.
+ * @param {Array}   w.changedEstimates  CDC Estimate entities this pass.
+ * @param {Array}   w.changedInvoices   CDC Invoice entities this pass.
+ * @param {object} [w.recentDocs]       { estimates, invoices } from the enhanced read.
+ * @param {?Date}  [w.since]            The sync cursor. Without it the recent-docs
+ *                                      half is skipped — never treated as "all fresh".
+ * @returns {Map<string, {when: number, docId: ?string}>} QuickBooks customer id →
+ *          when that news is stamped (epoch ms, 0 when the entity carried no usable
+ *          timestamp) and WHICH document produced it (null when the news is the
+ *          customer record itself). Both halves exist for one question the caller has
+ *          to be able to ask: "is this news actually OURS, echoing back?" — a
+ *          timestamp alone cannot answer it, because our own estimate push bumps a
+ *          document we then read back as if the client had changed it.
+ */
+export function customersWithNews({
+  changedCustomers = [], changedEstimates = [], changedInvoices = [], recentDocs = null, since = null,
+} = {}) {
+  const fresh = new Map();
+  const stamp = (e) => Date.parse(e?.MetaData?.LastUpdatedTime ?? e?.TxnDate ?? '') || 0;
+  // Newest stamp wins: a customer with several pieces of news is as fresh as the
+  // latest of them, and the echo comparison must be made against THAT one.
+  const note = (id, when, docId = null) => {
+    if (id == null) return;
+    const key = String(id);
+    const prev = fresh.get(key);
+    if (!prev || when > prev.when) fresh.set(key, { when, docId: docId == null ? null : String(docId) });
+  };
+  for (const c of changedCustomers ?? []) note(c?.Id, stamp(c));
+  for (const txn of [...(changedEstimates ?? []), ...(changedInvoices ?? [])]) {
+    note(txn?.CustomerRef?.value, stamp(txn), txn?.Id);
+  }
+  // A document the CDC window missed but whose own stamp is newer than the cursor.
+  // Guarded on `since`: a missing cursor must mean "cannot tell", not "everything
+  // counts" — the whole point is that a quiet contact is never touched.
+  const cutoff = since ? new Date(since).getTime() : null;
+  if (cutoff) {
+    for (const txn of [...(recentDocs?.estimates ?? []), ...(recentDocs?.invoices ?? [])]) {
+      const when = stamp(txn);
+      if (when > cutoff) note(txn?.CustomerRef?.value, when, txn?.Id);
+    }
+  }
+  return fresh;
+}
+
+/**
  * Which Synergy USER to assign for a given QuickBooks rep value.
  *
  * Deliberately a lookup and nothing else — no name matching, no fuzzy fallback.
