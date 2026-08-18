@@ -621,7 +621,7 @@ export async function getCustomFieldDefinitions(locationId) {
  *
  * @returns {Promise<Array<{name:string, definitionId:string|null, seenOn:string[]}>>}
  */
-export async function getRecentSalesDocs(locationId, sample = 50) {
+export async function getRecentSalesDocs(locationId, sample = 50, { links = false } = {}) {
   assertConfigured();
   const n = Math.min(Math.max(Number(sample) || 50, 1), 100);
   // `include=enhancedAllCustomFields` is the whole ballgame. Without it the response
@@ -633,20 +633,39 @@ export async function getRecentSalesDocs(locationId, sample = 50) {
   // List/dropdown ones, which legacy slots cannot even represent.
   // Ref: Intuit docs, "API response not showing existing custom field".
   //
-  // Newest first, because the rep we want is whatever the latest document says.
-  const q = (entity) =>
+  // `include=invoiceLink` adds the shareable document URL — the "pdfLink" the GHL
+  // code node hands to Rockwood's workflows. It is asked for only when a tenant has
+  // actually mapped that field, and a company or minor version that rejects the
+  // combined include must not cost us the custom fields as well: a failed attempt
+  // retries WITHOUT the link before giving up, so the worst case is a missing link,
+  // never a rep that stops arriving.
+  const query = (entity) =>
+    `select * from ${entity} orderby MetaData.LastUpdatedTime desc maxresults ${n}`;
+  const fetchDocs = (entity, include) =>
     makeQuickBooksRequest(
       locationId,
       'GET',
-      `/query?minorversion=75&include=enhancedAllCustomFields&query=${encodeURIComponent(
-        `select * from ${entity} orderby MetaData.LastUpdatedTime desc maxresults ${n}`,
-      )}`,
-    )
-      .then((d) => d?.QueryResponse?.[entity] ?? [])
-      .catch((err) => {
-        console.error(`[quickbooksService] ${entity} enhanced-field read failed:`, err?.message);
-        return [];
-      });
+      `/query?minorversion=75&include=${include}&query=${encodeURIComponent(query(entity))}`,
+    ).then((d) => d?.QueryResponse?.[entity] ?? []);
+
+  // Newest first, because the rep we want is whatever the latest document says.
+  const q = async (entity) => {
+    if (links) {
+      try {
+        return await fetchDocs(entity, 'enhancedAllCustomFields,invoiceLink');
+      } catch (err) {
+        console.warn(
+          `[quickbooksService] ${entity} read with invoiceLink failed (${err?.message}); retrying without it`,
+        );
+      }
+    }
+    try {
+      return await fetchDocs(entity, 'enhancedAllCustomFields');
+    } catch (err) {
+      console.error(`[quickbooksService] ${entity} enhanced-field read failed:`, err?.message);
+      return [];
+    }
+  };
 
   const [estimates, invoices] = await Promise.all([q('Estimate'), q('Invoice')]);
   return { estimates, invoices };
@@ -854,6 +873,39 @@ export async function listItems(locationId) {
 function qboEscape(value) {
   // Escape backslashes first (so the escape char itself is neutralized), then quotes.
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/**
+ * Fetch QBO Customers by id, in ONE query.
+ *
+ * For the estimate/invoice field mapping: a sales document carries the customer's
+ * name and billing email but never a phone number, so the phone (and the name
+ * fallbacks) come from the customer record. One request for the whole batch, because
+ * this runs inside a scheduled pass where every request is a subrequest.
+ *
+ * Ids are filtered to digits — they come from `CustomerRef.value`, but a query
+ * literal built from upstream data is exactly where an injection would land, and
+ * QuickBooks ids are always numeric.
+ *
+ * @returns {Map<string, object>} customer id → Customer. Empty on any failure; the
+ *          caller degrades to document-only values rather than failing the pass.
+ */
+export async function getCustomersByIds(locationId, ids = []) {
+  const clean = [...new Set((ids ?? []).map((v) => String(v ?? '').trim()))]
+    .filter((v) => /^\d+$/.test(v))
+    .slice(0, 100);
+  if (clean.length === 0) return new Map();
+
+  try {
+    const q = await queryQuickBooks(
+      locationId,
+      `SELECT * FROM Customer WHERE Id IN (${clean.map((v) => `'${v}'`).join(',')}) MAXRESULTS ${clean.length}`,
+    );
+    return new Map((q.Customer ?? []).map((c) => [String(c.Id), c]));
+  } catch (err) {
+    console.warn(`[quickbooksService] customer batch read failed: ${err?.message}`);
+    return new Map();
+  }
 }
 
 /**

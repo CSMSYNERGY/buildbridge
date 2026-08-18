@@ -164,6 +164,32 @@ Add and wire into `src/core/env.js` (envalid schema) and the fail-fast checks in
    milestone invoices bill). ⚠️ `milestone_amount` / `milestone_date` are **gone** — milestones
    are now per-client rows in `qb_milestone_definitions` (migration 0007), not mappers; see the
    superseded note in §5.8.
+6. ✅ **Estimate/invoice field mapping (2026-08-19)** — two more mapper types, both self-serve
+   from BuildBridge → QuickBooks, no migration (the generic `mappers` table already fits):
+   **`qb_doc_field`** (`externalKey` = a key from `DOC_FIELD_CATALOG` in
+   `src/services/qbDocFields.js`, `ghlValue` = the Synergy field id) and **`qb_rep_label`**
+   (`externalKey` = the rep value QuickBooks sends, `ghlValue` = the name that company uses).
+   This is the port of the code node that ran inside Rockwood's GHL workflows behind the three
+   Zapier Zaps — same 19 values (document number/id, doc type, estimate vs invoice ids, subtotal,
+   first line description, document link, customer name/email/phone, the three shipping parts,
+   rep raw and rep name). Applied by `reflectSalesDocStatus` on the customer's newest document;
+   a value the document does not carry is skipped, never written as a blank. `GET
+   /api/quickbooks/doc-fields` returns the catalog with a live sample per field so the mapping UI
+   shows the tenant's own data beside each choice.
+   A third type, **`qb_doc_field_opp`**, aims the same catalog at the contact's **existing**
+   opportunity (the "Update opportunity" step of the workflow this replaces). **Update-only —
+   BuildBridge never creates an opportunity from QuickBooks.** The chosen deal is the contact's
+   most recent one, preferring the configured contact-sync pipeline and an open status; only
+   custom fields are written (no stage, name, monetary value or status). Each such write records
+   an `opportunity_field` marker row in `qb_sync_links` (`ghlId === qbId === the opportunity id`
+   — an echo marker, not an identity mapping) and `syncGhlOpportunitiesToQb` consults it with
+   `isEcho` before pushing. Without that, our own write reads as a Synergy edit on the next pass
+   and goes back to QuickBooks as an estimate update — or as a *new* estimate for an unlinked deal.
+   **Phone (2026-08-19):** `qbCustomerToGhlContact` now falls back PrimaryPhone → Mobile →
+   AlternatePhone (reading only the primary is why customers reached Synergy with no number at
+   all), the document-field pass batch-reads the QBO Customer records because a sales document
+   never carries a phone, and a contact holding no phone is backfilled from QuickBooks —
+   fill-only, never over a number already in Synergy.
 
 Remaining before go-live: validate against an Intuit **sandbox** company and a real GHL sub-account
 (webhook payload shapes, GHL endpoint filters), configure the Intuit app (client id/secret,

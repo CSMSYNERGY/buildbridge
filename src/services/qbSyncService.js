@@ -9,6 +9,7 @@ import {
   makeQuickBooksRequest,
   upsertEstimate,
   getRecentSalesDocs,
+  getCustomersByIds,
   listItems,
 } from './quickbooksService.js';
 import { getMappings, listMappers } from './mapperService.js';
@@ -37,6 +38,12 @@ import {
   salespersonCustomField,
   mergeQboCustomFields,
 } from './qbSyncLogic.js';
+import {
+  latestDocByCustomer,
+  extractDocFields,
+  docFieldWrites,
+  repDisplayName,
+} from './qbDocFields.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
 const FIRST_SYNC_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -216,7 +223,14 @@ function qbCustomerToGhlContact(customer) {
     name: customer.DisplayName ?? undefined,
     ...(customer.CompanyName ? { companyName: customer.CompanyName } : {}),
     email: customer.PrimaryEmailAddr?.Address ?? undefined,
-    phone: customer.PrimaryPhone?.FreeFormNumber ?? undefined,
+    // All three phone slots, not just the primary. QuickBooks puts a number wherever
+    // the person entering it clicked, and reading only PrimaryPhone is why customers
+    // with a mobile on file reached Synergy with no phone at all — a contact nobody
+    // can call, and (for a customer with no email either) one we refuse to create.
+    phone: customer.PrimaryPhone?.FreeFormNumber
+      ?? customer.Mobile?.FreeFormNumber
+      ?? customer.AlternatePhone?.FreeFormNumber
+      ?? undefined,
     // Address (billing preferred, else shipping) → GHL address fields.
     ...qbAddressToGhl(addr, customer.DisplayName),
   };
@@ -427,6 +441,65 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
   if (!adopted) stats.qbToGhlContactsCreated++;
 }
 
+// The opportunity to reflect a QuickBooks document onto — an EXISTING one only.
+//
+// Ahsan, 2026-08-19: "just the opportunity fields, no create". The GHL workflow this
+// replaces had a Create Opportunity branch; BuildBridge deliberately does not. A deal
+// that does not exist in Synergy is not a deal, and creating one here would also hand
+// the GHL→QuickBooks half a brand-new "changed" opportunity to push straight back into
+// the client's books as a second estimate.
+//
+// Preference order: the configured contact-sync pipeline, then an open deal, then the
+// most recently updated. Returns null when the contact has no opportunity at all.
+async function findContactOpportunity(locationId, contactId, pipelineId) {
+  const data = await makeGhlRequest(
+    locationId,
+    'GET',
+    `/opportunities/search?location_id=${encodeURIComponent(locationId)}`
+      + `&contact_id=${encodeURIComponent(contactId)}&limit=20`,
+  ).catch(() => null);
+  // Filtered again on our side. If GHL ever ignores `contact_id` this returns the
+  // location's first 20 opportunities, and writing this customer's estimate onto
+  // somebody else's deal is not a failure mode worth risking on a query parameter.
+  const list = (data?.opportunities ?? []).filter(
+    (o) => o?.id && String(o?.contactId ?? '') === String(contactId),
+  );
+  if (list.length === 0) return null;
+  const updated = (o) => Date.parse(o?.updatedAt ?? o?.dateUpdated ?? '') || 0;
+  const score = (o) => (pipelineId && String(o.pipelineId ?? '') === String(pipelineId) ? 4 : 0)
+    + (String(o.status ?? '').toLowerCase() === 'open' ? 2 : 0);
+  return [...list].sort((a, b) => score(b) - score(a) || updated(b) - updated(a))[0];
+}
+
+// Write the mapped document values onto that opportunity's custom fields.
+//
+// Opportunity custom fields take `{id, field_value}` on the way in (contacts take
+// `{id, value}`) — the two GHL endpoints genuinely differ. Nothing else about the
+// opportunity is touched: no stage, no name, no monetary value, no status.
+async function reflectDocFieldsToOpportunity(
+  locationId, contactId, values, oppFieldMaps, cfg, linkIndex, stats,
+) {
+  const opp = await findContactOpportunity(locationId, contactId, cfg?.qboContactSyncPipelineId ?? null);
+  if (!opp) {
+    stats.qbOppNotFound += 1;
+    return;
+  }
+  const writes = docFieldWrites(values, oppFieldMaps, opp.customFields ?? []);
+  if (writes.length === 0) return;
+
+  await makeGhlRequest(locationId, 'PUT', `/opportunities/${opp.id}`, {
+    customFields: writes.map((w) => ({ id: w.id, field_value: w.value })),
+  });
+  stats.qbOppFieldsUpdated += writes.length;
+
+  // Echo marker, not an identity mapping — hence ghlId === qbId === the opportunity
+  // id, which also means the two unique indexes on this table can never disagree
+  // about which row to update. The GHL→QuickBooks half consults it before pushing:
+  // without it, our own write looks like a Synergy edit next pass and gets sent back
+  // as an estimate update (or, for an unlinked deal, a brand-new estimate).
+  await upsertLink(linkIndex, locationId, 'opportunity_field', opp.id, opp.id);
+}
+
 // QuickBooks sales-doc status → a GHL contact custom field (read-only QB→GHL).
 // Highest status reached wins so we never downgrade (e.g. a re-sent estimate
 // after invoicing won't overwrite "Invoiced"). Status/rank logic lives in
@@ -445,9 +518,26 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // the client's CRM. Mappings are read only when the toggle is on, so adding rows
   // to look around cannot start reassigning anyone's leads.
   const toAssignee = !!cfg?.qboRepToAssignee;
+  // ONE read for every mapper this pass might consult, filtered in memory. Three
+  // separate queries would be three subrequests, and this function already runs
+  // inside the budget the 07-31 subrequest exhaustion taught us to respect.
+  const qbMappers = await listMappers(locationId, 'quickbooks');
+  // Still gated on the toggle, deliberately: reading these rows is what starts
+  // reassigning leads, so adding a row to look around must stay harmless.
   const repUserMaps = toAssignee && repSource
-    ? await listMappers(locationId, 'quickbooks', 'qb_rep_user')
+    ? qbMappers.filter((m) => m.mapperType === 'qb_rep_user')
     : [];
+  // Estimate/invoice fields the tenant chose to copy into Synergy — the BuildBridge
+  // replacement for the code node behind Rockwood's Zapier webhooks. Empty list =
+  // nothing configured = none of the work below happens.
+  const docFieldMaps = qbMappers.filter((m) => m.mapperType === 'qb_doc_field');
+  // The same catalog, aimed at the linked OPPORTUNITY instead of the contact — the
+  // "Update opportunity" step of the GHL workflow this replaces. Update-only.
+  const oppFieldMaps = qbMappers.filter((m) => m.mapperType === 'qb_doc_field_opp');
+  // Rep option id → the name the client calls that person. Used for the `repName`
+  // field AND for the rep custom field below, which otherwise writes "2".
+  const repLabelMaps = qbMappers.filter((m) => m.mapperType === 'qb_rep_label');
+  const wantDocFields = docFieldMaps.length > 0 || oppFieldMaps.length > 0;
   // Resolved whenever a SOURCE is named, even with no target yet — the result is the
   // diagnostic below, and it answers the one question nobody can answer from outside:
   // does this QuickBooks company actually expose that field through REST? If the four
@@ -462,10 +552,16 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // customer" is the right window anyway.
   let reps = new Map();
   let repDocs = null;
-  if (repSource) {
+  // The same fetch feeds the document-field mapping, so it also runs when a tenant
+  // has mapped fields but configured no rep. `links` asks QuickBooks for the
+  // shareable document URL and is requested ONLY when someone mapped it — see
+  // getRecentSalesDocs for why that include is treated as optional.
+  if (repSource || wantDocFields) {
     try {
-      repDocs = await getRecentSalesDocs(locationId);
-      reps = repByCustomer(repDocs.estimates, repDocs.invoices, repSource);
+      repDocs = await getRecentSalesDocs(locationId, 50, {
+        links: docFieldMaps.some((m) => m.externalKey === 'pdfLink'),
+      });
+      if (repSource) reps = repByCustomer(repDocs.estimates, repDocs.invoices, repSource);
     } catch (err) {
       console.warn(`[rockwood] enhanced custom-field read failed: ${err.message}`);
     }
@@ -617,11 +713,34 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
       });
     }
   }
+  // ── Estimate / invoice fields → the Synergy fields the tenant picked ──────────
+  // One document per customer — the newest, same rule as the rep. This is what the
+  // GHL code node did per webhook; polling means the latest document wins instead of
+  // every document firing, which is the behaviour a CRM field wants anyway (the
+  // contact shows their current estimate, not a history).
+  const docValues = new Map(); // qb customer id → extracted values
+  if (wantDocFields && repDocs) {
+    const latest = latestDocByCustomer(repDocs.estimates, repDocs.invoices);
+    // The customer RECORDS for this batch, in ONE query. A sales document carries the
+    // name and the billing email but never a PHONE, so without this the phone field
+    // is permanently blank — the gap Ahsan hit on 2026-08-19 ("i want the phone number
+    // in the estimates too"). One request per pass, only when fields are mapped.
+    const customers = await getCustomersByIds(locationId, [...latest.keys()]);
+    for (const [customerId, { doc, type }] of latest) {
+      docValues.set(customerId, extractDocFields(doc, {
+        type,
+        repField: repSource,
+        repLabels: repLabelMaps,
+        customer: customers.get(customerId),
+      }));
+    }
+  }
+
   // Nothing to write ⇒ stop here. The rep half needs a resolved value AND a
   // destination — either a custom field or the assignee route; the diagnostics above
   // have already explained whichever is missing.
   const repHasDestination = (repTarget || (toAssignee && repUserMaps.length > 0)) && reps.size > 0;
-  if (!targetField && !repHasDestination) return;
+  if (!targetField && !repHasDestination && docValues.size === 0) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
   const byCustomer = new Map();
@@ -639,6 +758,10 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
   // somewhere to put it. Without a destination these would be pointless GHL reads.
   if (repHasDestination) {
     for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+  }
+  // Same for a customer whose only news is a mapped document field.
+  for (const customerId of docValues.keys()) {
+    if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
   }
 
   let visited = 0;
@@ -708,9 +831,24 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
         writes.push({ id: targetField, value: status });
       }
       const rep = reps.get(customerId);
-      if (repTarget && rep && String(readField(repTarget) ?? '') !== rep) {
-        writes.push({ id: repTarget, value: rep });
+      // Written as the NAME when the tenant has told us what the option id means.
+      // Without a rep-name row this is the raw value exactly as before — a dropdown
+      // sends "2", and "2" in a Synergy field is what the rep-name list exists to fix.
+      const repOut = rep ? repDisplayName(repLabelMaps, rep) : null;
+      if (repTarget && repOut && String(readField(repTarget) ?? '') !== repOut) {
+        writes.push({ id: repTarget, value: repOut });
       }
+      // The mapped estimate/invoice fields. Added last and never over a target one of
+      // the settings above already claimed: those are explicit single-purpose
+      // settings, and two writers on one field would flip its value every pass.
+      const docWrites = docValues.has(customerId)
+        ? docFieldWrites(
+          docValues.get(customerId),
+          docFieldMaps,
+          existing?.contact?.customFields ?? [],
+        ).filter((w) => !writes.some((x) => x.id === w.id))
+        : [];
+      writes.push(...docWrites);
       // The assignee route: the rep's mapped Synergy user becomes the contact's owner.
       // Only when it CHANGES — reassigning re-fires notifications, so a no-op write is
       // not harmless here the way a repeated field write would be.
@@ -720,23 +858,65 @@ async function reflectSalesDocStatus(locationId, estimates, invoices, stats, cfg
         if (mapped && String(existing?.contact?.assignedTo ?? '') !== mapped) assignTo = mapped;
       }
 
+      // The contact's own phone field, from the QuickBooks customer record.
+      // FILL-ONLY: written when Synergy holds no phone, never over one it has. The
+      // customer sync is what keeps a phone up to date (digit-compared, so formatting
+      // is not churned); this is the backfill for contacts that were created before
+      // the number existed in QuickBooks, or whose number sits in a slot the old
+      // reader ignored. A contact nobody can call is the thing being fixed — quietly
+      // replacing a number someone corrected in Synergy is not.
+      const qbPhone = docValues.get(customerId)?.customerPhone ?? null;
+      const phoneWrite = qbPhone && !String(existing?.contact?.phone ?? '').trim() ? qbPhone : null;
+
       // Nothing changed ⇒ no PUT. Skipping the request also skips touchLink, which is
       // correct: an unchanged contact should not have its echo cursor moved.
-      if (writes.length === 0 && !assignTo) continue;
+      if (writes.length || assignTo || phoneWrite) {
+        // Merge into existing custom fields so a write never wipes the other's field.
+        let customFields = existing?.contact?.customFields;
+        for (const w of writes) customFields = mergeCustomFields(customFields, w);
+        await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
+          ...(writes.length ? { customFields } : {}),
+          ...(assignTo ? { assignedTo: assignTo } : {}),
+          ...(phoneWrite ? { phone: phoneWrite } : {}),
+        });
+        if (phoneWrite) stats.qbPhoneBackfilled += 1;
+        if (assignTo) stats.qbRepAssigned = (stats.qbRepAssigned ?? 0) + 1;
+        if (writes.some((w) => w.id === repTarget)) stats.qbRepUpdated = (stats.qbRepUpdated ?? 0) + 1;
+        if (docWrites.length) {
+          stats.qbDocFieldsUpdated += docWrites.length;
+          stats.qbDocFieldContacts += 1;
+        }
+        // Advance the link cursor so this GHL write isn't re-detected as a
+        // GHL-origin change and pushed back to QBO next cycle (echo suppression).
+        await touchLink(link);
+        if (writes.some((w) => w.id === targetField)) stats.qbStatusUpdated++;
+      }
 
-      // Merge into existing custom fields so a write never wipes the other's field.
-      let customFields = existing?.contact?.customFields;
-      for (const w of writes) customFields = mergeCustomFields(customFields, w);
-      await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
-        ...(writes.length ? { customFields } : {}),
-        ...(assignTo ? { assignedTo: assignTo } : {}),
-      });
-      if (assignTo) stats.qbRepAssigned = (stats.qbRepAssigned ?? 0) + 1;
-      if (writes.some((w) => w.id === repTarget)) stats.qbRepUpdated = (stats.qbRepUpdated ?? 0) + 1;
-      // Advance the link cursor so this GHL write isn't re-detected as a
-      // GHL-origin change and pushed back to QBO next cycle (echo suppression).
-      await touchLink(link);
-      if (writes.some((w) => w.id === targetField)) stats.qbStatusUpdated++;
+      // The opportunity half, gated on someone having mapped a field to one. Its own
+      // request, after the contact write rather than instead of it: the two are
+      // different records in Synergy and a client can map to either or both.
+      if (oppFieldMaps.length && docValues.has(customerId)) {
+        // Isolated from the contact write above so a rejection here is reported as
+        // itself. GHL takes opportunity custom fields in a different shape from
+        // contact ones, and "opportunity update refused" must not surface as a status
+        // failure on a contact that in fact updated cleanly.
+        try {
+          await reflectDocFieldsToOpportunity(
+            locationId, link.ghlId, docValues.get(customerId), oppFieldMaps, cfg, linkIndex, stats,
+          );
+        } catch (err) {
+          stats.qbOppFieldsFailed += 1;
+          console.error(`[rockwood] opportunity field write failed for contact ${link.ghlId}:`, err.message);
+          await recordThrown(err, {
+            source: 'cron',
+            kind: 'qbo_opportunity_field_write_failed',
+            appSlug: 'quickbooks',
+            locationId,
+            upstream: 'ghl',
+            context: { job: 'rockwood-quickbooks-sync', ghlContactId: String(link.ghlId ?? '') },
+          });
+        }
+      }
     } catch (err) {
       stats.qbStatusFailed++;
       console.error(`[rockwood] status reflect failed for QB customer ${customerId}:`, err.message);
@@ -1068,6 +1248,17 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
       handled++; // already covered by the cursor — not deferred work
       continue;
     }
+    // Echo suppression for the QuickBooks→Synergy opportunity write (2026-08-19).
+    // That write bumps the opportunity's updatedAt, which this loop would otherwise
+    // read as a Synergy edit and push back — rewriting the QuickBooks estimate the
+    // values came FROM, or creating a second one for a deal that has no link. The
+    // marker row is written only by that half, so this suppresses our own writes and
+    // nothing else: a real Synergy edit after it is newer and still pushes.
+    const oppEchoLink = lookupLink(linkIndex, 'opportunity_field', { ghlId: opp.id });
+    if (oppEchoLink && isEcho(ghlUpdatedAt, oppEchoLink)) {
+      handled++;
+      continue;
+    }
 
     // Budget guard — see syncQbCustomersToGhl. This loop was the one half with no
     // deadline: each opportunity costs a link lookup (~2.5s through DB_WORKER), so
@@ -1286,6 +1477,23 @@ export async function syncLocation(locationId, settings) {
     qbToGhlContactsDeferred: 0,
     qbStatusUpdated: 0,
     qbStatusFailed: 0,
+    // Estimate/invoice values copied into the Synergy fields the tenant mapped, and
+    // how many contacts they landed on. Zero with mappings configured means every
+    // contact already held the current values — a quiet pass, not a broken one.
+    qbDocFieldsUpdated: 0,
+    qbDocFieldContacts: 0,
+    // Contacts that had no phone in Synergy and got the one QuickBooks holds.
+    qbPhoneBackfilled: 0,
+    // Existing opportunities updated with mapped estimate/invoice values. BuildBridge
+    // never CREATES one from QuickBooks (Ahsan, 2026-08-19) — a deal that does not
+    // exist in Synergy is not a deal, and creating one would also hand the GHL→QB half
+    // a brand-new "changed" opportunity to push straight back.
+    qbOppFieldsUpdated: 0,
+    // Customers whose QuickBooks document had mapped opportunity fields but whose
+    // Synergy contact has no opportunity to put them on. Expected, not an error —
+    // BuildBridge does not create deals.
+    qbOppNotFound: 0,
+    qbOppFieldsFailed: 0,
     ghlToQbContactsCreated: 0,
     ghlToQbContactsUpdated: 0,
     // Linked contacts whose GHL side changed but whose QuickBooks customer already

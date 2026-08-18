@@ -15,6 +15,7 @@ import {
   getCustomFieldDefinitions,
   getTransactionCustomFieldNames,
   getRecentSalesDocs,
+  getCustomersByIds,
   enableLegacySalesCustomField,
   listItems,
   getCompanyName,
@@ -22,6 +23,8 @@ import {
 } from '../services/quickbooksService.js';
 import { listOpenIssues } from '../services/errorLogService.js';
 import { collectRepValues } from '../services/qbSyncLogic.js';
+import { DOC_FIELD_CATALOG, extractDocFields } from '../services/qbDocFields.js';
+import { listMappers } from '../services/mapperService.js';
 import {
   listMilestoneDefinitions,
   serializeDefinition,
@@ -234,6 +237,87 @@ export async function getQuickBooksRepValues(req, res, next) {
 
     const { estimates, invoices } = await getRecentSalesDocs(locationId);
     res.json({ field, values: collectRepValues(estimates, invoices, field) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/quickbooks/doc-fields
+ *
+ * The estimate/invoice fields a tenant can map, each with a value read from their
+ * OWN most recent documents. The sample is the point: "Shipping street" means
+ * nothing next to a dropdown, while "4821 Township Road 118" tells the person
+ * mapping it immediately whether that is the field they want — and it proves the
+ * value is actually reaching BuildBridge before anyone wires a workflow to it.
+ *
+ * The preview reads the newest estimate AND the newest invoice and shows whichever
+ * carries each field, so estimate-only and invoice-only rows are both filled. A real
+ * sync always takes every value from ONE document (the customer's latest).
+ *
+ * Returns { fields: [{ key, label, description, sample }], sampledFrom, repField,
+ * unavailable }. Empty samples — never an error — when QuickBooks is unreachable.
+ */
+export async function getQuickBooksDocFields(req, res, next) {
+  try {
+    const { locationId } = req.user;
+    const catalog = DOC_FIELD_CATALOG.map((f) => ({ ...f, sample: null }));
+
+    const creds = await getCredentialsOrNull(locationId);
+    if (!creds) return res.json({ fields: catalog, sampledFrom: null, repField: null });
+
+    const settings = await getLocationSettings(locationId);
+    const repField = settings?.qboAssignedUserField ?? null;
+
+    let estimates = [];
+    let invoices = [];
+    try {
+      ({ estimates, invoices } = await getRecentSalesDocs(locationId, 5, { links: true }));
+    } catch (err) {
+      console.warn(`[quickbooks] doc-field preview read failed: ${err?.message}`);
+      return res.json({ fields: catalog, sampledFrom: null, repField, unavailable: true });
+    }
+
+    // The query returns newest-first, so [0] is the latest of each kind.
+    const newestEstimate = estimates[0] ?? null;
+    const newestInvoice = invoices[0] ?? null;
+    if (!newestEstimate && !newestInvoice) {
+      return res.json({ fields: catalog, sampledFrom: null, repField });
+    }
+
+    const repLabels = await listMappers(locationId, 'quickbooks', 'qb_rep_label');
+    // One customer read for the phone (and the name fallbacks) — the same gap the
+    // sync fills, so the preview does not promise a value the sync cannot produce.
+    const customers = await getCustomersByIds(
+      locationId,
+      [newestEstimate?.CustomerRef?.value, newestInvoice?.CustomerRef?.value].filter(Boolean),
+    );
+    const valuesFor = (doc, type) => (doc
+      ? extractDocFields(doc, {
+        type,
+        repField,
+        repLabels,
+        customer: customers.get(String(doc?.CustomerRef?.value ?? '')),
+      })
+      : {});
+
+    const estValues = valuesFor(newestEstimate, 'estimate');
+    const invValues = valuesFor(newestInvoice, 'invoice');
+    // Invoice first so the shared fields (customer, shipping, subtotal) show the more
+    // recent kind of document a client is likely looking at; estimate fills the gaps.
+    const merged = {};
+    for (const f of DOC_FIELD_CATALOG) {
+      merged[f.key] = invValues[f.key] ?? estValues[f.key] ?? null;
+    }
+
+    res.json({
+      fields: DOC_FIELD_CATALOG.map((f) => ({ ...f, sample: merged[f.key] })),
+      sampledFrom: {
+        estimateNumber: estValues.documentNumber ?? null,
+        invoiceNumber: invValues.documentNumber ?? null,
+      },
+      repField,
+    });
   } catch (err) {
     next(err);
   }

@@ -36,6 +36,7 @@ import {
   getQuickBooksSettings,
   saveQuickBooksSettings,
   getQuickBooksFields,
+  getQuickBooksDocFields,
   getQuickBooksRepValues,
   getQuickBooksItems,
   createSalespersonField,
@@ -146,6 +147,9 @@ router.get('/quickbooks/settings', getQuickBooksSettings);
 router.put('/quickbooks/settings', actionLimiter, saveQuickBooksSettings);
 // QuickBooks company custom fields (for the field-mapper dropdown)
 router.get('/quickbooks/fields', getQuickBooksFields);
+// Estimate/invoice fields the tenant can map, each with a value taken from their own
+// most recent documents (replaces the code node behind the Zapier→GHL webhooks)
+router.get('/quickbooks/doc-fields', getQuickBooksDocFields);
 // Distinct rep values on the company's own documents — the left dropdown of the
 // rep → Synergy-user mapping. Frequently option IDs ("1", "2"), which is why the
 // mapping exists at all.

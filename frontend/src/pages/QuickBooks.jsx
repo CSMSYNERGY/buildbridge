@@ -10,6 +10,11 @@ import { Badge } from '../components/ui/badge.jsx';
 import { Select } from '../components/ui/select.jsx';
 import { CheckCircle2, XCircle, AlertTriangle, HelpCircle, LogOut, Link2, RefreshCw, Receipt, X, Plus, Zap, ArrowRight, ArrowLeftRight, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
 
+// One estimate/invoice field maps to ONE destination, but that destination can be a
+// contact field or an opportunity field — different GHL endpoints, so different mapper
+// types. The dropdown offers both lists and the type follows the field you pick.
+const DOC_MAPPER_TYPES = ['qb_doc_field', 'qb_doc_field_opp'];
+
 // The "what actually makes this happen" line under a component's title.
 //
 // Exists because of the specific critique that produced this layout: the page described
@@ -136,6 +141,24 @@ export default function QuickBooks() {
   const [repDraft, setRepDraft] = useState({ rep: '', user: '' });
   const [savingRepMap, setSavingRepMap] = useState(false);
 
+  // Estimate/invoice fields → Synergy fields (`qb_doc_field` mapper rows). This is
+  // the self-serve version of the code node that ran inside the GHL workflows behind
+  // the Zapier webhooks: same values, chosen here instead of edited in JavaScript.
+  // `docFields` carries a live sample per field, read from the company's own latest
+  // documents — the difference between mapping a name and mapping a known value.
+  const [docFields, setDocFields] = useState([]);
+  const [docSampledFrom, setDocSampledFrom] = useState(null);
+  const [docFieldsUnavailable, setDocFieldsUnavailable] = useState(false);
+  const [docMaps, setDocMaps] = useState([]);
+  const [savingDocField, setSavingDocField] = useState(null); // the key being saved
+
+  // Rep option id → the name the client calls that person (`qb_rep_label` rows).
+  // QuickBooks sends "2"; only they know that is Cody. Replaces the hardcoded
+  // REP_NAMES object in the old code node.
+  const [repLabelMaps, setRepLabelMaps] = useState([]);
+  const [repLabelDraft, setRepLabelDraft] = useState({}); // rep value → typed name
+  const [savingRepLabel, setSavingRepLabel] = useState(null);
+
   // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
   // when a token dies, the tenant's saved mappings and sync config are still valid and
   // must stay visible and editable. Hiding them would turn a token problem into apparent
@@ -245,8 +268,23 @@ export default function QuickBooks() {
           setItemMaps(all.filter((m) => m.mapperType === 'qb_item'));
           setSpMaps(all.filter((m) => m.mapperType === 'qb_salesperson'));
           setRepUserMaps(all.filter((m) => m.mapperType === 'qb_rep_user'));
+          setDocMaps(all.filter((m) => DOC_MAPPER_TYPES.includes(m.mapperType)));
+          const labels = all.filter((m) => m.mapperType === 'qb_rep_label');
+          setRepLabelMaps(labels);
+          setRepLabelDraft(Object.fromEntries(labels.map((m) => [m.externalKey, m.ghlValue])));
         })
         .catch(() => {}),
+      // Non-fatal: without the catalog the estimate/invoice card says so and the rest
+      // of the page still loads. The samples come from QuickBooks, so a dead token
+      // shows up here as empty samples rather than a missing card.
+      fetchWithAuth('/api/quickbooks/doc-fields')
+        .then((r) => (r.ok ? r.json() : { fields: [], unavailable: true }))
+        .then((d) => {
+          setDocFields(d.fields ?? []);
+          setDocSampledFrom(d.sampledFrom ?? null);
+          setDocFieldsUnavailable(!!d.unavailable);
+        })
+        .catch(() => setDocFieldsUnavailable(true)),
       // Non-fatal: without the rep values the mapping row falls back to free text.
       fetchWithAuth('/api/quickbooks/rep-values')
         .then((r) => (r.ok ? r.json() : { values: [] }))
@@ -644,6 +682,97 @@ export default function QuickBooks() {
       setRepUserMaps((prev) => prev.filter((m) => m.id !== id));
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
+
+  // ── Estimate / invoice fields → Synergy fields ─────────────────────────────
+  // One row per field, saved the moment the dropdown changes. Deliberately not an
+  // "add a mapping" form like the cards above: there are 19 fixed fields and the
+  // question for each is only "which Synergy field, if any", so a form that made you
+  // pick the left side too would just be a slower way to answer the same question.
+  const docTargets = new Set(docMaps.map((m) => m.ghlValue));
+  const docMapFor = (key) => docMaps.find((m) => m.externalKey === key) ?? null;
+
+  async function setDocFieldMapping(key, ghlFieldId) {
+    const existing = docMapFor(key);
+    setSavingDocField(key);
+    try {
+      // Cleared ⇒ remove the row. Leaving it with an empty target would be a row that
+      // silently writes nowhere, and the sync would keep reading it every pass.
+      if (!ghlFieldId) {
+        if (existing) {
+          const res = await fetchWithAuth(`/api/mappers/${existing.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to remove mapping');
+          setDocMaps((prev) => prev.filter((m) => m.id !== existing.id));
+        }
+        return;
+      }
+      // Contact field or opportunity field — the destination decides the mapper type.
+      const target = ghlFields.find((g) => (g.id ?? g.key) === ghlFieldId);
+      const mapperType = target?.model === 'opportunity' ? 'qb_doc_field_opp' : 'qb_doc_field';
+      // Switching a field from a contact target to an opportunity one (or back) means
+      // a DIFFERENT row: the unique key includes the type, so the POST below would
+      // create the new row and leave the old one writing to the old place forever.
+      if (existing && existing.mapperType !== mapperType) {
+        const del = await fetchWithAuth(`/api/mappers/${existing.id}`, { method: 'DELETE' });
+        if (!del.ok) throw new Error('Failed to move the mapping');
+        setDocMaps((prev) => prev.filter((m) => m.id !== existing.id));
+      }
+      // The mapper's unique key is (location, app, type, externalKey), so re-posting a
+      // field updates where it points instead of creating a second row.
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType,
+          externalKey: key,
+          ghlValue: ghlFieldId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save mapping');
+      setDocMaps((prev) => [...prev.filter((m) => m.externalKey !== key), data.mapper]);
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingDocField(null);
+    }
+  }
+
+  // ── Rep names (QuickBooks option id → the name they use) ───────────────────
+  const repLabelFor = (value) => repLabelMaps.find((m) => m.externalKey === value) ?? null;
+
+  async function saveRepLabel(value) {
+    const typed = (repLabelDraft[value] ?? '').trim();
+    const existing = repLabelFor(value);
+    if (typed === (existing?.ghlValue ?? '')) return;
+    setSavingRepLabel(value);
+    try {
+      if (!typed) {
+        if (existing) {
+          const res = await fetchWithAuth(`/api/mappers/${existing.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to remove the name');
+          setRepLabelMaps((prev) => prev.filter((m) => m.id !== existing.id));
+        }
+        return;
+      }
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType: 'qb_rep_label',
+          externalKey: value, // the rep exactly as QuickBooks sends it
+          ghlValue: typed,    // what this company calls that person
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save the name');
+      setRepLabelMaps((prev) => [...prev.filter((m) => m.externalKey !== value), data.mapper]);
+      toast({ title: `Rep "${value}" is ${typed}` });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingRepLabel(null);
     }
   }
 
@@ -1142,6 +1271,52 @@ export default function QuickBooks() {
                     </p>
                   </div>
 
+                  {/* Rep names. The id→name table that used to be hardcoded in the GHL
+                      code node ({"1":"Jon","2":"Cody",…}) — nobody but us could edit it,
+                      and a new rep in QuickBooks meant a code change. Typed here, it feeds
+                      both the Synergy field above and the "Rep name" mapping below. */}
+                  {s.qboAssignedUserField && (
+                    <div className="space-y-2">
+                      <Label>Rep names</Label>
+                      <p className="text-xs text-muted-foreground">
+                        QuickBooks sends the rep as the dropdown's <strong>internal value</strong> — on this
+                        company <code>1</code>, <code>2</code>, and so on. Type who each one is and Synergy
+                        gets the name instead of the number. An unnamed rep still syncs, as the raw value.
+                      </p>
+                      {repValues.length === 0 && repLabelMaps.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          No rep values found on recent estimates or invoices yet. Once documents carry the
+                          field above, each value appears here.
+                        </p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {[
+                            ...repValues.map((r) => r.value),
+                            // A saved name whose value is not on any recent document still
+                            // shows, so a rep who has gone quiet can be seen and cleared.
+                            ...repLabelMaps
+                              .map((m) => m.externalKey)
+                              .filter((v) => !repValues.some((r) => r.value === v)),
+                          ].map((value) => (
+                            <li key={value} className="flex items-center gap-2">
+                              <code className="shrink-0 rounded border px-2 py-1 text-xs">{value}</code>
+                              <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                              <Input
+                                value={repLabelDraft[value] ?? ''}
+                                placeholder="Name in QuickBooks (e.g. Cody)"
+                                onChange={(e) => setRepLabelDraft((d) => ({ ...d, [value]: e.target.value }))}
+                                onBlur={() => saveRepLabel(value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                disabled={savingRepLabel === value}
+                                className="h-8"
+                              />
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+
                   {/* Rep → assigned user. Ahsan, 2026-08-01: "I should be able to click a
                       drop down for assigned users in Synergy and select Cody in there."
                       Needs no new field in the client's CRM, which is the whole point. */}
@@ -1526,6 +1701,99 @@ export default function QuickBooks() {
                     : 'No QuickBooks custom fields found yet. Make sure custom fields are set up in the QuickBooks company, then reload to populate this list.'}
                 </p>
               )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Estimate & invoice fields — the self-serve replacement for the code node that
+            ran inside the GHL workflows behind the Zapier webhooks. Same values, chosen
+            here instead of edited in JavaScript nobody else can reach. */}
+        {isConnected && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base" style={{ color: '#3d3672' }}>
+                Estimate &amp; invoice fields
+              </CardTitle>
+              <CardDescription>
+                Copy values off a customer's latest QuickBooks estimate or invoice into whichever
+                Synergy fields you choose. The sample beside each one is read from this company's
+                own recent documents{docSampledFrom?.estimateNumber || docSampledFrom?.invoiceNumber
+                  ? ` (estimate ${docSampledFrom.estimateNumber ?? '—'}, invoice ${docSampledFrom.invoiceNumber ?? '—'})`
+                  : ''} — so you can see the actual value before you point a workflow at it.
+              </CardDescription>
+              <TriggerNote>
+                The same sync as the cards above — <strong>every 15 minutes</strong>. Each customer's
+                <strong> newest</strong> document wins, and a field that document doesn't carry is left
+                alone rather than blanked: an invoice never wipes the estimate number.
+              </TriggerNote>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {docFieldsUnavailable && (
+                <p className="text-xs text-muted-foreground">
+                  BuildBridge could not read recent documents from QuickBooks, so the samples below are
+                  empty for that reason — not because the documents are. Fix the connection at the top of
+                  this page, then reload. Mapping still saves and still works.
+                </p>
+              )}
+              {docFields.map((f) => {
+                const current = docMapFor(f.key);
+                return (
+                  <div
+                    key={f.key}
+                    className="grid grid-cols-1 gap-2 rounded-md border px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,16rem)] sm:items-center"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate" style={{ color: '#3d3672' }}>{f.label}</p>
+                      <p className="text-xs text-muted-foreground">{f.description}</p>
+                      <p className="mt-0.5 text-xs truncate">
+                        <span className="text-muted-foreground">Sample: </span>
+                        {f.sample
+                          ? <span style={{ color: '#1b7895' }}>{f.sample}</span>
+                          : <span className="text-muted-foreground">— none on recent documents —</span>}
+                      </p>
+                    </div>
+                    <ArrowRight className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />
+                    <Select
+                      aria-label={`Synergy field for ${f.label}`}
+                      value={current?.ghlValue ?? ''}
+                      disabled={savingDocField === f.key}
+                      onChange={(e) => setDocFieldMapping(f.key, e.target.value)}
+                    >
+                      <option value="">Don't copy</option>
+                      {/* Contact fields and opportunity fields in one list — the
+                          latter already carry an "(opportunity)" suffix from the API.
+                          Picking one decides which record the value lands on. */}
+                      {ghlFields.map((g) => {
+                        const id = g.id ?? g.key;
+                        // One Synergy field can only hold one of these, so a field already
+                        // claimed by another row is greyed out — two writers on one field
+                        // would flip its value every pass.
+                        const taken = docTargets.has(id) && current?.ghlValue !== id;
+                        return (
+                          <option key={id} value={id} disabled={taken}>
+                            {g.label}{taken ? ' (in use)' : ''}
+                          </option>
+                        );
+                      })}
+                    </Select>
+                  </div>
+                );
+              })}
+              {docFields.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  The field list could not be loaded. Reload the page.
+                </p>
+              )}
+              <p className="pt-1 text-xs text-muted-foreground">
+                Nothing is copied until you pick a Synergy field, and clearing one back to
+                "Don't copy" stops it — the value already written stays where it is.
+                <strong> Rep name</strong> uses the rep list in the sync card above.
+                Pick a contact field and the value lands on the contact; pick one marked
+                <em> (opportunity)</em> and it lands on that contact's opportunity —
+                an <strong>existing</strong> one, the most recent open deal. BuildBridge never
+                creates an opportunity, so a customer with no deal in Synergy simply gets the
+                contact fields.
+              </p>
             </CardContent>
           </Card>
         )}
