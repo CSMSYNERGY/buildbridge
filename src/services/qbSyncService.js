@@ -1121,16 +1121,33 @@ async function reflectSalesDocStatus(
       // The assignee route: the rep's mapped Synergy user becomes the contact's owner.
       // Only when it CHANGES — reassigning re-fires notifications, so a no-op write is
       // not harmless here the way a repeated field write would be.
+      // Every way this can decline to assign is now counted, because "it did not
+      // assign" had four possible causes and the stats could not tell them apart —
+      // a contact was visited on real news and nothing happened, and answering why
+      // meant reading source and guessing. Each branch below is a different fix.
       let assignTo = null;
-      if (toAssignee && rep) {
-        if (!freshCustomers.has(String(customerId))) {
+      if (toAssignee) {
+        if (!rep) {
+          // The customer's newest document carries no value in the salesperson
+          // field. Nothing to map — the fix is in QuickBooks, not here.
+          stats.qbRepNoValue += 1;
+        } else if (!freshCustomers.has(String(customerId))) {
           // Quiet contact: the rep is known, the mapping exists, and we still leave
-          // the owner alone. Counted rather than silent so "why was this one not
-          // assigned" has an answer that is not "read the source".
+          // the owner alone. Working as intended.
           stats.qbRepAssignSkippedQuiet += 1;
         } else {
           const mapped = resolveAssignee(repUserMaps, rep);
-          if (mapped && String(existing?.contact?.assignedTo ?? '') !== mapped) assignTo = mapped;
+          if (!mapped) {
+            // A rep value nobody has pointed at a Synergy user — the fix is a row in
+            // the rep mapping.
+            stats.qbRepUnmapped += 1;
+          } else if (String(existing?.contact?.assignedTo ?? '') === mapped) {
+            // Already owned by the right person. Nothing to do, and NOT a failure —
+            // this is what a working assignment looks like on the second pass.
+            stats.qbRepAlreadyAssigned += 1;
+          } else {
+            assignTo = mapped;
+          }
         }
       }
 
@@ -1808,6 +1825,12 @@ export async function syncLocation(locationId, settings) {
     // Synergy owner was deliberately left alone. Expected to be large on the first
     // passes after the toggle goes on — that is the backfill NOT happening.
     qbRepAssignSkippedQuiet: 0,
+    // The salesperson field is empty on this customer's newest document.
+    qbRepNoValue: 0,
+    // A rep value with no Synergy user mapped to it.
+    qbRepUnmapped: 0,
+    // Already owned by the mapped user — a working assignment, seen again.
+    qbRepAlreadyAssigned: 0,
     // Contacts WITH news that still ran out of budget. Unlike the routine deferral
     // above this one loses work: the cursor moves past the document that made them
     // fresh. Non-zero means FRESH_VISITS_PER_PASS is too small for this tenant.
