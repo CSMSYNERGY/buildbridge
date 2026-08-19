@@ -777,7 +777,7 @@ export default function QuickBooks() {
     for (const f of fieldOptions) {
       byField.set(f.field.toLowerCase(), {
         field: f.field,
-        values: f.values.map((v) => ({ value: v.value, seen: true })),
+        values: f.values.map((v) => ({ value: v.value, seen: true, count: v.count ?? 0 })),
       });
     }
     for (const m of repLabelMaps) {
@@ -1461,7 +1461,7 @@ export default function QuickBooks() {
                             Naming the options of <strong>{f.field}</strong>
                           </p>
                           <ul className="space-y-2">
-                            {f.values.map(({ value, seen }) => {
+                            {f.values.map(({ value, seen, count }) => {
                               const key = optionKey(f.field, value);
                               return (
                                 <li key={value} className="flex items-center gap-2">
@@ -1476,9 +1476,14 @@ export default function QuickBooks() {
                                     disabled={savingRepLabel === key}
                                     className="h-8"
                                   />
-                                  {!seen && (
-                                    <span className="shrink-0 text-xs text-muted-foreground">not seen yet</span>
-                                  )}
+                                  {/* Evidence, not a guess. An option's NUMBER is not its position
+                                      in the dropdown — QuickBooks keeps the original number when an
+                                      option is deleted, so the list can read 1, 2, 4, 5. Showing how
+                                      many recent documents carry each value is what lets someone tell
+                                      which is which. */}
+                                  <span className="shrink-0 text-xs text-muted-foreground">
+                                    {seen ? `on ${count} recent doc${count === 1 ? '' : 's'}` : 'not seen yet'}
+                                  </span>
                                 </li>
                               );
                             })}
@@ -1506,10 +1511,14 @@ export default function QuickBooks() {
                               >
                                 {savingRepLabel === `paste:${f.field}` ? 'Naming…' : 'Name them in order'}
                               </Button>
-                              <p className="text-xs text-muted-foreground">
+                              <p className="text-xs" style={{ color: '#a15c00' }}>
                                 Line 1 becomes option <code>1</code>, line 2 becomes <code>2</code>, and so
-                                on — the order QuickBooks shows in "Edit custom field". Check one against a
-                                real estimate afterwards.
+                                on — <strong>an assumption, not a rule</strong>. QuickBooks keeps an
+                                option's original number when one is deleted, so a dropdown showing four
+                                names can be numbered 1, 2, 4, 5. Rockwood's "Jadon" turned out to be
+                                <code> 4</code>, not <code>3</code>. <strong>Check one against a real
+                                estimate</strong>: set the Rep on a document, then see which number
+                                appears here on the next sync.
                               </p>
                             </div>
                           </details>
