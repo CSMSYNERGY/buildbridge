@@ -15,6 +15,7 @@ import {
   deriveContactName,
   nameSyncDecision,
   qbCustomerChanges,
+  samePhone,
   qbAddressToGhl,
   qbAddressLinesJoined,
   ghlAddressToQb,
@@ -1095,5 +1096,34 @@ describe('customersWithNews — which document produced the news', () => {
       since: CURSOR,
     });
     expect(fresh.get('412').docId).toBe('new');
+  });
+});
+
+describe('samePhone — one comparison for both directions', () => {
+  it('treats formatting differences as the same number', () => {
+    expect(samePhone('(330) 555-0142', '+13305550142')).toBe(true);
+    expect(samePhone('330-555-0142', '3305550142')).toBe(true);
+    expect(samePhone(' 330.555.0142 ', '(330) 555 0142')).toBe(true);
+  });
+
+  it('treats a genuinely different number as different', () => {
+    expect(samePhone('3305550142', '3305550199')).toBe(false);
+  });
+
+  it('handles a missing side without claiming a match', () => {
+    expect(samePhone('3305550142', null)).toBe(false);
+    expect(samePhone(null, '3305550142')).toBe(false);
+  });
+
+  it('says two blanks are the same, so an empty QuickBooks phone writes nothing', () => {
+    expect(samePhone(null, undefined)).toBe(true);
+    expect(samePhone('', '   ')).toBe(true);
+  });
+
+  it('only strips a leading 1 from an 11-digit NANP number', () => {
+    expect(samePhone('13305550142', '3305550142')).toBe(true);
+    // Not a NANP 11-digit string: 44 is a country code, and dropping a leading
+    // digit from an arbitrary international number would merge two real numbers.
+    expect(samePhone('443305550142', '3305550142')).toBe(false);
   });
 });

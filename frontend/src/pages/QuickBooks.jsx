@@ -1339,10 +1339,12 @@ export default function QuickBooks() {
                   {/* Stated because it happens without being configured, and because
                       "where did this phone number come from" is a fair question. */}
                   <p className="text-xs text-muted-foreground">
-                    <strong>Phone numbers.</strong> A contact with no phone in Synergy gets the one
-                    QuickBooks holds for that customer — read from the customer record, since estimates
-                    and invoices do not carry a phone at all. A number already in Synergy is never
-                    overwritten by this; the ordinary contact sync keeps it up to date.
+                    <strong>Phone numbers.</strong> QuickBooks is the source: whatever the customer
+                    record holds is what Synergy gets, including over a different number already there.
+                    It comes from the customer record because estimates and invoices carry no phone at
+                    all. <strong>No number in QuickBooks changes nothing</strong> — Synergy keeps what it
+                    has rather than being blanked. A number edited in Synergy more recently than the
+                    QuickBooks record still wins, and syncs the other way instead.
                   </p>
                   {/* Salesperson: QB custom field → Synergy custom field */}
                   <div className="space-y-1.5">

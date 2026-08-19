@@ -181,6 +181,27 @@ export function nameSyncDecision(derived, lastPushedName) {
  * @param {object} next      { name, firstName, lastName, email, phone, billAddr }
  * @param {object} customer  the QBO Customer as it stands right now
  */
+/**
+ * Are these the same phone number?
+ *
+ * Compared by DIGITS, not byte-for-byte. QuickBooks holds "(406) 555-0100"; GHL
+ * normalises the same number to "+14065550100", so a byte comparison reports a
+ * change on every single pass and each "fix" overwrites the formatting somebody
+ * typed into their own records — a real incident, on PrimaryPhone. An 11-digit
+ * string starting with 1 is the same phone as its 10-digit form. NANP only: general
+ * libphonenumber-style parsing would be guessing at a country for every client.
+ *
+ * Shared by both directions, so QuickBooks→Synergy and Synergy→QuickBooks can never
+ * disagree about whether a number changed and write over each other forever.
+ */
+export function samePhone(a, b) {
+  const digits = (v) => {
+    const d = String(v ?? '').trim().replace(/\D/g, '');
+    return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  };
+  return digits(a) === digits(b);
+}
+
 export function qbCustomerChanges(next = {}, customer = {}) {
   const out = {};
   const clean = (v) => (v == null ? '' : String(v).trim());
@@ -204,15 +225,7 @@ export function qbCustomerChanges(next = {}, customer = {}) {
   // reports a change on every single pass and overwrites the formatting the client
   // typed into their own ledger — the reported incident, on PrimaryPhone. Same digits
   // ⇒ same phone ⇒ nothing to say. A genuinely different number still syncs.
-  const digits = (v) => {
-    const d = clean(v).replace(/\D/g, '');
-    // GHL stores a US number in E.164 ("+14065550100") while QuickBooks keeps it as
-    // typed ("(406) 555-0100"), so an 11-digit string starting with 1 is the SAME phone
-    // as its 10-digit form. NANP only — deliberately no general libphonenumber-style
-    // parsing, which would be guessing at a country for every client we have.
-    return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
-  };
-  if (next.phone && digits(next.phone) !== digits(customer.PrimaryPhone?.FreeFormNumber)) {
+  if (next.phone && !samePhone(next.phone, customer.PrimaryPhone?.FreeFormNumber)) {
     out.PrimaryPhone = { FreeFormNumber: clean(next.phone) };
   }
   // BillAddr is whole-object even under sparse:true, so it is sent or not sent.

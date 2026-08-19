@@ -33,6 +33,7 @@ import {
   findQbCustomField,
   describeQbCustomField,
   resolveAssignee,
+  samePhone,
   customersWithNews,
   resolveItemRef,
   resolveSalesperson,
@@ -1023,19 +1024,16 @@ async function reflectSalesDocStatus(
         return f?.value ?? f?.fieldValue;
       };
 
-      // ── Phone, resolved before anything is written ────────────────────────────
-      // QuickBooks is the source: the customer record, since no sales document
-      // carries a phone. When that record has none, the MAPPED "Customer phone"
-      // field falls back to the number Synergy already holds — no lookup needed,
-      // this loop is holding that contact. Two distinct uses, deliberately not
-      // merged: `qbPhone` is what QuickBooks knows and is the only thing allowed to
-      // fill the contact's own phone field, while the mapped field may show either.
+      // QuickBooks is the source of truth for the phone, full stop. Ahsan,
+      // 2026-08-19: "we are not using synergy for number because all the leads come
+      // from quickbooks… if there is no number in quickbooks then we leave them, but
+      // if the contact have a phone then we update it in synergy."
+      //
+      // So this is an UPDATE, not the fill-only backfill it started as: a number in
+      // QuickBooks replaces a different number in Synergy. No phone in QuickBooks
+      // leaves Synergy exactly as it is — we never invent one from the CRM side, and
+      // the mapped "Customer phone" field shows QuickBooks or nothing.
       const qbPhone = docValues.get(customerId)?.customerPhone ?? null;
-      if (!qbPhone) {
-        const ghlPhone = String(existing?.contact?.phone ?? '').trim();
-        const values = docValues.get(customerId);
-        if (values && ghlPhone) values.customerPhone = ghlPhone;
-      }
 
       // Two independent writes into one PUT. Each decides for itself whether it has
       // anything to say, because they move on different rules: status only ever
@@ -1101,7 +1099,24 @@ async function reflectSalesDocStatus(
       // the number existed in QuickBooks, or whose number sits in a slot the old
       // reader ignored. A contact nobody can call is the thing being fixed — quietly
       // replacing a number someone corrected in Synergy is not.
-      const phoneWrite = qbPhone && !String(existing?.contact?.phone ?? '').trim() ? qbPhone : null;
+      // Digit comparison and nothing else. QuickBooks' "(330) 555-0142" and Synergy's
+      // "+13305550142" are the same number, and a byte comparison would trade them
+      // back and forth forever, one write per pass each.
+      //
+      // NO last-write-wins here, deliberately, and this is the second attempt at this
+      // line. The first added the same `targetIsNewer` guard the contact half uses —
+      // which reads correctly and is wrong here, because the two paths are fed
+      // differently. The contact half runs on Change Data Capture, so its QuickBooks
+      // timestamp is fresh by construction and the guard only ever settles a genuine
+      // race. This path is driven by recent DOCUMENTS, so the customer record's stamp
+      // can be months old while the Synergy contact's moves on any activity at all —
+      // a tag, an inbound text, our own write earlier in this pass. The comparison
+      // therefore said "Synergy is newer" permanently, the update never fired, and the
+      // push half then sent the stale CRM number into QuickBooks: the client's rule,
+      // exactly inverted. QuickBooks is the source; when it has a number, it wins.
+      const phoneWrite = qbPhone && !samePhone(qbPhone, existing?.contact?.phone)
+        ? qbPhone
+        : null;
 
       // Nothing changed ⇒ no PUT. Skipping the request also skips touchLink, which is
       // correct: an unchanged contact should not have its echo cursor moved.
@@ -1318,7 +1333,19 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
             firstName,
             lastName,
             email: contact.email,
-            phone: contact.phone,
+            // PHONE IS DELIBERATELY NOT SENT on an update. Ahsan, 2026-08-19:
+            // "we are not using synergy for number… we use quickbooks as our primary
+            // source". Sending it made Synergy the winner in practice, not in theory:
+            // a QuickBooks customer record edited months ago always loses the
+            // last-write-wins comparison to a contact that Synergy touched yesterday
+            // for any reason at all, so the stale CRM number was pushed into the
+            // ledger and the ledger's correct one was overwritten. A number typed in
+            // Synergy now stays in Synergy until QuickBooks says otherwise.
+            //
+            // Creating a customer is different and still sends it (findOrCreateCustomer
+            // below): a brand-new customer has no number for QuickBooks to be right
+            // about, and a contact QuickBooks has never seen is not QuickBooks
+            // disagreeing — it is QuickBooks not knowing.
             billAddr,
           },
           customer,
