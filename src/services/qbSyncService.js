@@ -895,6 +895,7 @@ async function reflectSalesDocStatus(
   // first Synergy call, and that call is where Rockwood's pass died on 2026-08-19,
   // every fifteen minutes, for three and a half hours.
   const docValues = new Map(); // qb customer id → extracted values
+  const newsCustomers = new Map(); // qb customer id → the QuickBooks Customer record
   if ((wantDocFields || repSource) && repDocs) {
     const latest = latestDocByCustomer(repDocs.estimates, repDocs.invoices);
     const newsIds = [...latest.keys()].filter(hasNews);
@@ -908,6 +909,9 @@ async function reflectSalesDocStatus(
       // the name and the billing email but never a PHONE, so without this the phone
       // is permanently blank.
       const customers = await getCustomersByIds(locationId, newsIds);
+      // Kept for the visit loop: a customer with news but no linked contact can be
+      // adopted there, and adoption needs the record itself.
+      for (const [id, c] of customers) newsCustomers.set(String(id), c);
       for (const customerId of newsIds) {
         const { doc, type } = latest.get(customerId);
         docValues.set(customerId, extractDocFields(doc, {
@@ -1040,10 +1044,33 @@ async function reflectSalesDocStatus(
     // pass — after the contacts had synced and before setSyncState, which is the worst
     // possible place to die: work done, cursor not advanced, so it all runs again.
     try {
-      const link = lookupLink(linkIndex, 'contact', { qbId: customerId });
+      let link = lookupLink(linkIndex, 'contact', { qbId: customerId });
+      if (!link && newsCustomers.has(String(customerId))) {
+        // ADOPT, don't skip. Links are only ever written by the customer half, which
+        // runs off Change Data Capture on the CUSTOMER record — so a customer whose
+        // ESTIMATE changed while their record sat untouched has no link, and never
+        // gets one, and therefore never receives a status, a rep, a phone or a
+        // document field. Not an edge case: it is every established customer, which
+        // is exactly what QuickBooks customer 2390 turned out to be when Ahsan's test
+        // estimate reported `skipped: 1` and no assignment on 2026-08-19.
+        //
+        // Only for customers with news (their record is in hand), and it goes through
+        // the same create-or-adopt path the customer half uses, so the duplicate
+        // handling and the phone-only rules are not reimplemented here.
+        try {
+          await syncOneQbCustomerToGhl(locationId, newsCustomers.get(String(customerId)), stats, {
+            contactCustomFields: () => [],
+            linkIndex,
+          });
+          link = lookupLink(linkIndex, 'contact', { qbId: customerId });
+          if (link) stats.qbContactsAdoptedForNews += 1;
+        } catch (err) {
+          console.warn(`[rockwood] could not link QB customer ${customerId} to a contact: ${err.message}`);
+        }
+      }
       if (!link) {
-        // No GHL contact linked yet (contacts sync in the same pass may create it
-        // next run); nothing to update this round.
+        // Still nothing to write to: no email and no phone to match on, or GHL
+        // refused. Counted, and picked up again on the customer's next change.
         stats.skipped++;
         continue;
       }
@@ -1846,6 +1873,9 @@ export async function syncLocation(locationId, settings) {
     qbRepUnmapped: 0,
     // Already owned by the mapped user — a working assignment, seen again.
     qbRepAlreadyAssigned: 0,
+    // Contacts linked on the spot because a document changed for a customer the
+    // customer half had never seen change. Without this they are invisible forever.
+    qbContactsAdoptedForNews: 0,
     // Contacts WITH news that still ran out of budget. Unlike the routine deferral
     // above this one loses work: the cursor moves past the document that made them
     // fresh. Non-zero means FRESH_VISITS_PER_PASS is too small for this tenant.
