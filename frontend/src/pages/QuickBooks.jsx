@@ -810,7 +810,11 @@ export default function QuickBooks() {
       .filter(([field]) => field === repField)
       .map(([, value]) => value);
     return [...repValues.map((r) => r.value), ...named, ...extraRepValues]
-      .filter((v, i, all) => v && all.indexOf(v) === i);
+      .filter((v, i, all) => v && all.indexOf(v) === i)
+      // In the dropdown's own order. The seen-values list arrives sorted by how
+      // OFTEN each value appears (which is right for a diagnostic and wrong for a
+      // picker — it printed 2, 1, 3, 4), and the named ones were simply appended.
+      .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
   })();
 
   async function saveRepLabel(field, value, typedRaw) {
