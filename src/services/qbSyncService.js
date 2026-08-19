@@ -865,31 +865,36 @@ async function reflectSalesDocStatus(
   // every document firing, which is the behaviour a CRM field wants anyway (the
   // contact shows their current estimate, not a history).
   //
-  // Also computed for a tenant who configured only the REP and mapped no fields at
-  // all, because the phone backfill below lives on these values and a missing phone
-  // is worth filling whether or not anyone mapped an estimate number. The documents
-  // are already in hand at this point; the only extra cost is one customer query.
+  // ONLY for customers with news. The window holds up to a hundred documents and
+  // sixty-odd customers; the ones that matter on any given pass are the handful whose
+  // documents just changed. Reading all of them was not merely wasteful — the
+  // 64-customer QuickBooks query and the parse behind it sat directly in front of the
+  // first Synergy call, and that call is where Rockwood's pass died on 2026-08-19,
+  // every fifteen minutes, for three and a half hours.
   const docValues = new Map(); // qb customer id → extracted values
   if ((wantDocFields || repSource) && repDocs) {
     const latest = latestDocByCustomer(repDocs.estimates, repDocs.invoices);
-    // Only the company's own custom fields that someone actually mapped — reading
-    // the rest off every document would be work nobody asked for.
-    const mappedCustomFields = [...docFieldMaps, ...oppFieldMaps]
-      .map((m) => customFieldName(m.externalKey))
-      .filter(Boolean);
-    // The customer RECORDS for this batch, in ONE query. A sales document carries the
-    // name and the billing email but never a PHONE, so without this the phone field
-    // is permanently blank — the gap Ahsan hit on 2026-08-19 ("i want the phone number
-    // in the estimates too"). One request per pass, only when fields are mapped.
-    const customers = await getCustomersByIds(locationId, [...latest.keys()]);
-    for (const [customerId, { doc, type }] of latest) {
-      docValues.set(customerId, extractDocFields(doc, {
-        type,
-        repField: repSource,
-        optionLabels: optionLabelMaps,
-        customFieldNames: mappedCustomFields,
-        customer: customers.get(customerId),
-      }));
+    const newsIds = [...latest.keys()].filter(hasNews);
+    if (newsIds.length) {
+      // Only the company's own custom fields that someone actually mapped — reading
+      // the rest off every document would be work nobody asked for.
+      const mappedCustomFields = [...docFieldMaps, ...oppFieldMaps]
+        .map((m) => customFieldName(m.externalKey))
+        .filter(Boolean);
+      // The customer RECORDS, in ONE query, for those few. A sales document carries
+      // the name and the billing email but never a PHONE, so without this the phone
+      // is permanently blank.
+      const customers = await getCustomersByIds(locationId, newsIds);
+      for (const customerId of newsIds) {
+        const { doc, type } = latest.get(customerId);
+        docValues.set(customerId, extractDocFields(doc, {
+          type,
+          repField: repSource,
+          optionLabels: optionLabelMaps,
+          customFieldNames: mappedCustomFields,
+          customer: customers.get(customerId),
+        }));
+      }
     }
   }
 
@@ -1983,7 +1988,15 @@ export async function syncAllLocations() {
       await syncLocation(locationId, settings);
       ran++;
     } catch (err) {
-      console.error(`[rockwood] sync failed for ${locationId}:`, err.message);
+      // `err.message` on a database failure is the SQL, not the reason — drizzle
+      // wraps the driver error and the useful half hides in `cause`. Three and a half
+      // hours of the 2026-08-19 outage went into inferring what one line of this
+      // would have said outright, so both halves are logged now.
+      console.error(
+        `[rockwood] sync failed for ${locationId}:`, err.message,
+        '| cause:', err?.cause?.message ?? err?.cause ?? '(none)',
+        '| code:', err?.cause?.code ?? err?.code ?? '(none)',
+      );
       // Durable record — this loop previously failed silently every 15 min (the
       // only trace was an open `wrangler tail`). See errorLogService.
       await recordThrown(err, {
