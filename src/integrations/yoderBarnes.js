@@ -16,12 +16,16 @@ registerGhlHandler('opportunity.stage_change', handleOpportunityWon);
 // Also accept an explicit Won event for workflows triggered only on Won.
 registerGhlHandler('opportunity.won', handleOpportunityWon);
 
+// Their own cron trigger, offset from Rockwood's, so the two clients do not share
+// one invocation's subrequest budget (see runDueJobs).
+const YODER_CRON = '5-59/15 * * * *';
+
 // Poll GHL for won opportunities every 15 minutes — a webhook-free path so
 // reseller clients don't each have to wire up a GHL workflow. Idempotent and
 // gated on the per-tenant milestone-invoicing toggle.
-registerJob('yoder-poll-won', 15 * 60 * 1000, pollWonOpportunities);
+registerJob('yoder-poll-won', 15 * 60 * 1000, pollWonOpportunities, YODER_CRON);
 
 // Check for due milestones every 15 minutes.
-registerJob('yoder-invoice-due-milestones', 15 * 60 * 1000, invoiceDueMilestones);
+registerJob('yoder-invoice-due-milestones', 15 * 60 * 1000, invoiceDueMilestones, YODER_CRON);
 
 console.log('[yoder] Yoder Barnes QuickBooks integration registered');

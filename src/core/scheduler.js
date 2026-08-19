@@ -10,8 +10,10 @@ let started = false;
  * Register a recurring job. Call before startScheduler().
  * fn is awaited; errors are logged and do not stop the schedule.
  */
-export function registerJob(name, intervalMs, fn) {
-  jobs.push({ name, intervalMs, fn, timer: null });
+export function registerJob(name, intervalMs, fn, cron = null) {
+  jobs.push({
+    name, intervalMs, fn, timer: null, cron,
+  });
   if (started) startJob(jobs[jobs.length - 1]);
 }
 
@@ -46,13 +48,30 @@ export function startScheduler() {
  * interval (currently every 15 min for all jobs). Errors are logged per job and
  * never abort the batch; jobs are already required to be idempotent.
  */
-export async function runDueJobs() {
+export async function runDueJobs(cron = null) {
   if (jobs.length === 0) {
     console.log('[scheduler] cron tick: no jobs registered');
     return;
   }
-  console.log(`[scheduler] cron tick: running ${jobs.length} job(s):`, jobs.map((j) => j.name).join(', '));
-  for (const job of jobs) {
+  // ONE JOB PER INVOCATION, when the job says which trigger it belongs to.
+  //
+  // A Worker invocation has a fixed subrequest budget and every job in the tick
+  // spends from the same one — so the last job to run inherits whatever the earlier
+  // ones left, and on 2026-08-19 that was nothing: Rockwood's sync died on its first
+  // Synergy call with "Too many subrequests by single Worker invocation", every
+  // fifteen minutes for three and a half hours, while the jobs ahead of it finished
+  // normally. Separate cron expressions mean separate invocations and therefore
+  // separate budgets, so one client's backlog can no longer starve another's sync.
+  //
+  // A job with no cron of its own still runs on every tick — that is the local and
+  // single-process behaviour, where there is no invocation budget to divide.
+  const due = cron ? jobs.filter((j) => !j.cron || j.cron === cron) : jobs;
+  if (due.length === 0) {
+    console.log(`[scheduler] cron tick (${cron}): no jobs for this trigger`);
+    return;
+  }
+  console.log(`[scheduler] cron tick${cron ? ` (${cron})` : ''}: running ${due.length} job(s):`, due.map((j) => j.name).join(', '));
+  for (const job of due) {
     try {
       await job.fn();
     } catch (err) {

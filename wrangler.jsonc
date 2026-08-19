@@ -30,8 +30,19 @@
   // A 2-min DB warm-up cron was tried and REMOVED: when the Hyperdrive path is
   // degraded, a failing warm-up every 2 min continually re-poisons the origin pool
   // (each destroyed mid-connect socket parks a dirty origin connection).
+  // TWO triggers, and the split is load-bearing: a Worker invocation has a fixed
+  // subrequest budget shared by everything running in it, so jobs batched into one
+  // tick spend from the same pot and the last one gets whatever is left. On
+  // 2026-08-19 that was nothing — Rockwood's sync failed on its first Synergy call
+  // with "Too many subrequests by single Worker invocation" for three and a half
+  // hours while the jobs ahead of it finished fine. Each job now names its own cron
+  // (see registerJob / runDueJobs) and gets its own invocation and its own budget.
+  // The offset keeps them from landing on the same minute.
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": [
+      "*/15 * * * *",    // rockwood-quickbooks-sync    — :00 :15 :30 :45
+      "5-59/15 * * * *"  // yoder poll-won + milestones — :05 :20 :35 :50
+    ]
   },
 
   // React SPA. Asset-first routing serves /buildbridge/index.html and

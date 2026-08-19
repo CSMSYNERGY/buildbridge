@@ -65,7 +65,7 @@ export default {
       dbContext.run(store, async () => {
         try {
           if (env.ENABLE_SCHEDULER) {
-            await runDueJobs();
+            await runDueJobs(event.cron);
           } else {
             console.log('[worker] scheduler disabled (ENABLE_SCHEDULER=false) — skipping cron jobs');
           }
