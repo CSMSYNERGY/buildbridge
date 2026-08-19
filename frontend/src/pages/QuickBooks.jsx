@@ -167,6 +167,9 @@ export default function QuickBooks() {
   // discovered from its documents: [{ field, values: [{ value, label, count }] }].
   const [fieldOptions, setFieldOptions] = useState([]);
   const [pasteDraft, setPasteDraft] = useState({}); // field → pasted option list
+  // Which field's options are being named right now. Null until someone chooses,
+  // which resolves to the salesperson field — the one every tenant configures first.
+  const [optionField, setOptionField] = useState(null);
 
   // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
   // when a token dies, the tenant's saved mappings and sync config are still valid and
@@ -802,6 +805,14 @@ export default function QuickBooks() {
     }));
   })();
 
+  // The field whose options are on screen: whatever was picked, else the salesperson
+  // field, else the first one discovered. Falls back rather than showing nothing when
+  // a saved choice no longer appears on any document.
+  const activeOptionField = namedFields.find((f) => f.field === optionField)
+    ?? namedFields.find((f) => f.field === s?.qboAssignedUserField)
+    ?? namedFields[0]
+    ?? null;
+
   // Rep values for the rep → Synergy user picker: seen on a document, or named.
   const knownRepValues = (() => {
     const repField = String(s?.qboAssignedUserField ?? '').toLowerCase();
@@ -1422,15 +1433,32 @@ export default function QuickBooks() {
                           works either way.
                         </p>
                       )}
-                      {namedFields.map((f) => (
+                      {/* One field at a time. Stacking every dropdown made the page a wall
+                          of numbered boxes, and naming options is a per-field job anyway —
+                          you are reading one QuickBooks dropdown while you type. */}
+                      <div className="flex flex-wrap gap-x-4 gap-y-2">
+                        {namedFields.map((f) => (
+                          <label key={f.field} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                            <input
+                              type="radio"
+                              name="optionLabelField"
+                              value={f.field}
+                              checked={activeOptionField?.field === f.field}
+                              onChange={() => setOptionField(f.field)}
+                            />
+                            <span style={{ color: activeOptionField?.field === f.field ? '#3d3672' : undefined }}>
+                              {f.field}
+                            </span>
+                            {f.field === s.qboAssignedUserField && (
+                              <span className="text-xs text-muted-foreground">(salesperson)</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                      {activeOptionField && [activeOptionField].map((f) => (
                         <div key={f.field} className="rounded-md border px-3 py-2 space-y-2">
                           <p className="text-sm font-medium" style={{ color: '#3d3672' }}>
-                            {f.field}
-                            {f.field === s.qboAssignedUserField && (
-                              <span className="ml-2 text-xs font-normal text-muted-foreground">
-                                (the salesperson field)
-                              </span>
-                            )}
+                            Naming the options of <strong>{f.field}</strong>
                           </p>
                           <ul className="space-y-2">
                             {f.values.map(({ value, seen }) => {
