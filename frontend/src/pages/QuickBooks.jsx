@@ -158,6 +158,11 @@ export default function QuickBooks() {
   const [repLabelMaps, setRepLabelMaps] = useState([]);
   const [repLabelDraft, setRepLabelDraft] = useState({}); // rep value → typed name
   const [savingRepLabel, setSavingRepLabel] = useState(null);
+  // Rep values typed in by hand because no recent document carries them yet. Held in
+  // memory only — a value becomes durable once it is given a name, which writes a
+  // qb_rep_label row and brings it back on the next load.
+  const [extraRepValues, setExtraRepValues] = useState([]);
+  const [newRepValue, setNewRepValue] = useState('');
 
   // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
   // when a token dies, the tenant's saved mappings and sync config are still valid and
@@ -742,6 +747,19 @@ export default function QuickBooks() {
   // ── Rep names (QuickBooks option id → the name they use) ───────────────────
   const repLabelFor = (value) => repLabelMaps.find((m) => m.externalKey === value) ?? null;
 
+  // Every rep value this page knows about, from three sources — because no single one
+  // is complete. `repValues` is what QuickBooks documents have actually carried
+  // (Rockwood's dropdown has four reps and only two have sold recently, so two are
+  // invisible); saved names cover a rep who has since gone quiet; and `extraRepValues`
+  // is what someone typed in by hand. The API cannot enumerate a dropdown's options —
+  // that needs the tier-gated App Foundations scope — so hand entry is the only way to
+  // configure a rep before their first document arrives.
+  const knownRepValues = [
+    ...repValues.map((r) => r.value),
+    ...repLabelMaps.map((m) => m.externalKey),
+    ...extraRepValues,
+  ].filter((v, i, all) => v && all.indexOf(v) === i);
+
   async function saveRepLabel(value) {
     const typed = (repLabelDraft[value] ?? '').trim();
     const existing = repLabelFor(value);
@@ -1283,21 +1301,14 @@ export default function QuickBooks() {
                         company <code>1</code>, <code>2</code>, and so on. Type who each one is and Synergy
                         gets the name instead of the number. An unnamed rep still syncs, as the raw value.
                       </p>
-                      {repValues.length === 0 && repLabelMaps.length === 0 ? (
+                      {knownRepValues.length === 0 ? (
                         <p className="text-xs text-muted-foreground">
-                          No rep values found on recent estimates or invoices yet. Once documents carry the
-                          field above, each value appears here.
+                          No rep values seen on recent estimates or invoices yet — add them below in the
+                          order they appear in the QuickBooks dropdown.
                         </p>
                       ) : (
                         <ul className="space-y-2">
-                          {[
-                            ...repValues.map((r) => r.value),
-                            // A saved name whose value is not on any recent document still
-                            // shows, so a rep who has gone quiet can be seen and cleared.
-                            ...repLabelMaps
-                              .map((m) => m.externalKey)
-                              .filter((v) => !repValues.some((r) => r.value === v)),
-                          ].map((value) => (
+                          {knownRepValues.map((value) => (
                             <li key={value} className="flex items-center gap-2">
                               <code className="shrink-0 rounded border px-2 py-1 text-xs">{value}</code>
                               <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1310,10 +1321,45 @@ export default function QuickBooks() {
                                 disabled={savingRepLabel === value}
                                 className="h-8"
                               />
+                              {!repValues.some((r) => r.value === value) && (
+                                <span className="shrink-0 text-xs text-muted-foreground">not seen yet</span>
+                              )}
                             </li>
                           ))}
                         </ul>
                       )}
+
+                      {/* Add a rep the documents have not carried yet.
+                          The list above can only offer values BuildBridge has actually seen on
+                          the newest 50 estimates and invoices, and QuickBooks does not expose a
+                          dropdown's options to the API without the tier-gated App Foundations
+                          scope. So a rep who has not sold recently is invisible — Rockwood's
+                          dropdown has four and only two have appeared. Values are the dropdown's
+                          positions, 1, 2, 3, 4 in the order they are listed in QuickBooks. */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <Input
+                          value={newRepValue}
+                          placeholder="Value (e.g. 3)"
+                          onChange={(e) => setNewRepValue(e.target.value)}
+                          className="h-8 w-28 shrink-0"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={!newRepValue.trim() || knownRepValues.includes(newRepValue.trim())}
+                          onClick={() => {
+                            const v = newRepValue.trim();
+                            setExtraRepValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
+                            setNewRepValue('');
+                          }}
+                        >
+                          Add rep value
+                        </Button>
+                        <span className="text-xs text-muted-foreground">
+                          Not in the list? Add its position from the QuickBooks dropdown, then name it.
+                        </span>
+                      </div>
                     </div>
                   )}
 
@@ -1373,11 +1419,23 @@ export default function QuickBooks() {
                             onChange={(e) => setRepDraft((d) => ({ ...d, rep: e.target.value }))}
                           >
                             <option value="">QuickBooks rep…</option>
-                            {repValues.map((r) => (
-                              <option key={r.value} value={r.value} disabled={usedReps.has(r.value)}>
-                                {r.label === r.value ? r.value : `${r.label} (${r.value})`}
-                              </option>
-                            ))}
+                            {/* Every rep the page knows about, not only the ones seen on a
+                                recent document — otherwise a rep who has not sold lately
+                                cannot be pointed at a person until they do, which is the
+                                wrong order: the mapping should be ready BEFORE their first
+                                estimate arrives. Named reps show their name. */}
+                            {knownRepValues.map((value) => {
+                              const named = repLabelFor(value)?.ghlValue;
+                              const seen = repValues.find((r) => r.value === value);
+                              const label = named
+                                ? `${named} (${value})`
+                                : (seen && seen.label !== seen.value ? `${seen.label} (${value})` : value);
+                              return (
+                                <option key={value} value={value} disabled={usedReps.has(value)}>
+                                  {label}{usedReps.has(value) ? ' (mapped)' : ''}
+                                </option>
+                              );
+                            })}
                           </Select>
                           <Select
                             value={repDraft.user}
@@ -1400,10 +1458,10 @@ export default function QuickBooks() {
                             {savingRepMap ? 'Adding…' : 'Add'}
                           </Button>
                         </div>
-                        {repValues.length === 0 && (
+                        {knownRepValues.length === 0 && (
                           <p className="text-xs text-muted-foreground">
                             No rep values found on recent estimates or invoices yet. Pick the QuickBooks field above
-                            first, then reload.
+                            first, then reload — or add each rep's dropdown position under "Rep names".
                           </p>
                         )}
                       </>
