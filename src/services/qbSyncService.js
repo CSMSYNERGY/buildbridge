@@ -82,6 +82,12 @@ const SYNC_PASS_BUDGET_MS = 60_000;
 // was a pass that never finished at all.
 const REP_VISITS_PER_PASS = 10;
 
+// A location needs roughly this much of the invocation's budget left to be worth
+// starting: the cursor read, the change feed, the two document queries and a write
+// or two. Below it, the location is deferred whole rather than started and killed
+// part-way — which leaves no cursor advance and a credential write half-done.
+const MIN_BUDGET_TO_START_LOCATION = 6;
+
 // A SEPARATE, larger budget for contacts that actually have news this pass.
 //
 // The 10 above bounds routine work — customers who merely hold a rep, re-derived
@@ -938,7 +944,16 @@ async function reflectSalesDocStatus(
   // A customer whose only news is a rep still needs visiting — but only when there is
   // somewhere to put it. Without a destination these would be pointless GHL reads.
   if (repHasDestination) {
-    for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+    for (const customerId of reps.keys()) {
+      // A quiet customer is only worth a visit when there is a FIELD to write. The
+      // assignee route acts on news alone, so queueing everyone who merely HOLDS a
+      // rep spends a Synergy read per contact to discover there is nothing to do —
+      // 8 visits and 44 deferrals on Rockwood's first healthy pass, all of them
+      // "skipped: quiet", while the budget they consumed left the next location
+      // failing mid-flight.
+      if (!repTarget && !freshCustomers.has(customerId)) continue;
+      if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+    }
   }
   // Same for a customer whose only news is a MAPPED document field.
   //
@@ -1991,7 +2006,11 @@ export async function syncAllLocations() {
       // cursors; the rest are untouched and go first-ish next tick. Continuing would
       // not sync them, it would fail every call they make — including the writes that
       // record what happened, which is how this failure mode stays invisible.
-      if (budgetExhausted()) {
+      // A RESERVE, not just "not yet exhausted". Starting a location with two calls
+      // left does not sync it — it gets far enough to refresh a token and then dies
+      // on the write, which is what happened to the second location on 2026-08-19
+      // while the first was still draining its backlog. Better to defer it whole.
+      if (budgetExhausted() || subrequestsUsed() > MIN_BUDGET_TO_START_LOCATION) {
         console.warn(`[rockwood] subrequest budget spent (${subrequestsUsed()}) — ${locationId} deferred to the next tick`);
         continue;
       }
