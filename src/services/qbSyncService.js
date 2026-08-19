@@ -15,6 +15,8 @@ import {
 import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
+// Invocation-level spend guard — see core/subrequestBudget.js.
+import { beginBudget, endBudget, budgetExhausted, subrequestsUsed } from '../core/subrequestBudget.js';
 import { recordThrown, recordError } from './errorLogService.js';
 import {
   syncFlags,
@@ -328,8 +330,8 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineA
     // advance past its own value) or skip it (the cursor moves past unhandled
     // work). Drain the tie, then break.
     if (
-      deadlineAt &&
-      Date.now() >= deadlineAt &&
+      (budgetExhausted() || (deadlineAt && Date.now() >= deadlineAt)) &&
+
       processedThrough &&
       qbUpdatedMs(customer) !== processedThrough
     ) {
@@ -998,7 +1000,7 @@ async function reflectSalesDocStatus(
     const overBudget = isFresh
       ? freshVisited >= FRESH_VISITS_PER_PASS
       : visited >= REP_VISITS_PER_PASS;
-    if (overBudget || (deadlineAt && visited + freshVisited > 0 && Date.now() >= deadlineAt)) {
+    if (overBudget || budgetExhausted() || (deadlineAt && visited + freshVisited > 0 && Date.now() >= deadlineAt)) {
       stats.qbRepDeferred = (stats.qbRepDeferred ?? 0) + 1;
       if (isFresh) stats.qbRepFreshDeferred += 1;
       continue; // count the rest rather than break, so the stat is the true remainder
@@ -1301,8 +1303,8 @@ async function syncGhlContactsToQb(locationId, since, stats, settings, deadlineA
     // first sync: with a 30-day window every contact on the page clears the date
     // filter, and each one costs a link lookup plus two QuickBooks round-trips.
     if (
-      deadlineAt &&
-      Date.now() >= deadlineAt &&
+      (budgetExhausted() || (deadlineAt && Date.now() >= deadlineAt)) &&
+
       processedThrough &&
       ghlUpdatedMs(contact) !== processedThrough
     ) {
@@ -1559,8 +1561,8 @@ async function syncGhlOpportunitiesToQb(locationId, since, stats, deadlineAt, li
     // AFTER the contact halves — cursor never written, nothing recorded (the
     // 07-31 stuck-cursor incident, same mechanism as 07-30's).
     if (
-      deadlineAt &&
-      Date.now() >= deadlineAt &&
+      (budgetExhausted() || (deadlineAt && Date.now() >= deadlineAt)) &&
+
       processedThrough &&
       ghlUpdatedMs(opp) !== processedThrough
     ) {
@@ -1978,9 +1980,21 @@ export async function syncAllLocations() {
     .from(integrationCredentials)
     .where(eq(integrationCredentials.appSlug, 'quickbooks'));
 
+  // Armed ONCE for the whole run: the ceiling belongs to the invocation, and every
+  // location in this loop spends from the same one. See core/subrequestBudget.js.
+  beginBudget();
+
   let ran = 0;
   for (const { locationId } of rows) {
     try {
+      // Out of budget ⇒ stop starting locations. The ones already synced wrote their
+      // cursors; the rest are untouched and go first-ish next tick. Continuing would
+      // not sync them, it would fail every call they make — including the writes that
+      // record what happened, which is how this failure mode stays invisible.
+      if (budgetExhausted()) {
+        console.warn(`[rockwood] subrequest budget spent (${subrequestsUsed()}) — ${locationId} deferred to the next tick`);
+        continue;
+      }
       if (!(await hasAccess(locationId, 'quickbooks'))) continue;
       const settings = await getLocationSettings(locationId);
       const direction = settings.qboSyncDirection ?? 'off';
@@ -2008,5 +2022,9 @@ export async function syncAllLocations() {
       });
     }
   }
+  // Disarm: web traffic shares this isolate, and a budget left armed would make
+  // ordinary requests trip a guard meant for a scheduled run.
+  console.log(`[rockwood] run complete — ${ran} location(s), ${subrequestsUsed()} outbound call(s)`);
+  endBudget();
   return ran;
 }

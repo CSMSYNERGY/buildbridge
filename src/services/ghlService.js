@@ -146,6 +146,10 @@ function duplicateContactIdFrom(rawBody) {
  * Automatically refreshes the access token if it is expired.
  */
 export async function makeGhlRequest(locationId, method, path, body = undefined) {
+  // Counted before anything is sent, because the pair below — this credential read
+  // and the fetch that follows — is what a scheduled run actually spends its
+  // subrequest ceiling on. See core/subrequestBudget.js.
+  spendSubrequest();
   const [loc] = await db
     .select({
       ghlAccessToken: locations.ghlAccessToken,

@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
+import { spendSubrequest } from '../core/subrequestBudget.js';
 import { ensureLocation } from './locationService.js';
 import { summarizeQboFault, collectTxnCustomFieldNames } from './qbSyncLogic.js';
 
@@ -752,6 +753,9 @@ export async function enableLegacySalesCustomField(locationId, fieldName, slot =
  */
 export async function makeQuickBooksRequest(locationId, method, path, body = undefined) {
   assertConfigured();
+  // See core/subrequestBudget.js — this call and the credential read behind it are
+  // what a scheduled run spends its invocation ceiling on.
+  spendSubrequest();
   const { creds, needsHealthWrite } = await getFreshCredentials(locationId);
 
   const url = `${apiBase()}/v3/company/${creds.realmId}${path}`;
