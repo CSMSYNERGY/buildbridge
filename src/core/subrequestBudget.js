@@ -25,7 +25,21 @@
 // binding and therefore also a subrequest, so the real spend is roughly twice what is
 // counted here. The default limit is set with that doubling in mind.
 
-const DEFAULT_LIMIT = 250;
+// MEASURED, not guessed. On 2026-08-19 a run logged "20 outbound call(s)" and then
+// hit the ceiling — which puts the real limit at 50 subrequests per invocation, the
+// Workers FREE tier, not the 1000 a paid plan gets. The factor between the two
+// numbers is the credential read every request drags behind it, plus the link and
+// settings reads around them: each counted call is worth roughly two and a half
+// subrequests, and the pass spends a dozen more on its own bookkeeping.
+//
+// Twelve leaves real headroom under fifty. It is deliberately conservative, because
+// the cost of guessing high is not a slow pass — it is a pass that dies without
+// writing its cursor, which is what put this client's sync out for most of a day.
+//
+// ⚠️ This number is a workaround for a plan limit, not a design. On Workers Paid the
+// ceiling is 1000 and this can go back to a couple of hundred, which is the
+// difference between draining a backlog in three passes and thirty.
+const DEFAULT_LIMIT = 12;
 
 let used = 0;
 let limit = Infinity;
