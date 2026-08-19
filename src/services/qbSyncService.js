@@ -840,6 +840,23 @@ async function reflectSalesDocStatus(
     since,
   });
   const hasNews = (customerId) => allNews.has(String(customerId));
+
+  // What the salesperson field ACTUALLY contains on the documents that just changed.
+  //
+  // A dropdown sends an option NUMBER and QuickBooks exposes no way to ask which name
+  // that number belongs to — and the numbers are not positions: an option deleted
+  // years ago keeps its number, so four visible names can be 1, 2, 4, 5. Rockwood's
+  // "Jadon" turned out not to be 3. The only way to learn a number is to set the field
+  // on a document and see what arrives, so this prints exactly that, per customer, and
+  // makes what was an afternoon of inference a single line in the log.
+  //
+  // Ids and option numbers only — no names, nothing about the customer.
+  if (repSource && allNews.size) {
+    const seen = [...allNews.keys()].filter((id) => reps.has(id)).map((id) => `${id}:${reps.get(id)}`);
+    if (seen.length) {
+      console.log(`[rockwood] "${repSource}" on documents with news (qbCustomer:value) — ${seen.join(', ')}`);
+    }
+  }
   const rawNews = canAssign ? allNews : new Map();
   const freshCustomers = new Set();
   for (const [qbCustomerId, news] of rawNews) {
