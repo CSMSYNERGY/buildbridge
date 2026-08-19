@@ -780,7 +780,12 @@ export default function QuickBooks() {
     for (const m of repLabelMaps) {
       const [field, value] = String(m.externalKey ?? '').split('::');
       if (!field || !value) continue;
-      const hit = byField.get(field) ?? { field, values: [] };
+      // The key is lower-cased, so a field known ONLY from saved rows would be
+      // titled "rep" where QuickBooks calls it "Rep". Prefer the configured spelling.
+      const display = String(s?.qboAssignedUserField ?? '').toLowerCase() === field
+        ? s.qboAssignedUserField
+        : field;
+      const hit = byField.get(field) ?? { field: display, values: [] };
       if (!hit.values.some((v) => v.value.toLowerCase() === value)) {
         hit.values.push({ value, seen: false });
       }
@@ -813,6 +818,12 @@ export default function QuickBooks() {
     const typed = (typedRaw ?? repLabelDraft[key] ?? '').trim();
     const existing = repLabelFor(field, value);
     if (typed === (existing?.ghlValue ?? '')) return;
+    // An empty box only DELETES when the box was actually showing something. Without
+    // this, any path that saves a name without also filling the input turns the next
+    // blur into a delete — which is exactly what happened on 2026-08-19: a paste
+    // stored four names, left four empty boxes on screen, and clicking through them
+    // erased the rows one by one.
+    if (!typed && repLabelDraft[key] === undefined) return;
     setSavingRepLabel(key);
     try {
       if (!typed) {
@@ -821,6 +832,7 @@ export default function QuickBooks() {
           if (!res.ok) throw new Error('Failed to remove the name');
           setRepLabelMaps((prev) => prev.filter((m) => m.id !== existing.id));
         }
+        setRepLabelDraft((d) => ({ ...d, [key]: '' }));
         return;
       }
       const res = await fetchWithAuth('/api/mappers', {
@@ -835,6 +847,9 @@ export default function QuickBooks() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to save the name');
       setRepLabelMaps((prev) => [...prev.filter((m) => m.externalKey !== key), data.mapper]);
+      // The box must show what was stored. Skipping this is what made a paste look
+      // like it had failed and then quietly undo itself.
+      setRepLabelDraft((d) => ({ ...d, [key]: typed }));
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     } finally {
@@ -851,6 +866,14 @@ export default function QuickBooks() {
     const names = String(text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (names.length === 0) return;
     setSavingRepLabel(`paste:${field}`);
+    // Fill the boxes FIRST, in one update. They are what the user sees, and an empty
+    // box beside a saved row is not just confusing — a blur on it used to delete the
+    // row (see saveRepLabel).
+    setRepLabelDraft((d) => {
+      const next = { ...d };
+      names.forEach((name, i) => { next[optionKey(field, String(i + 1))] = name; });
+      return next;
+    });
     try {
       for (let i = 0; i < names.length; i += 1) {
         // eslint-disable-next-line no-await-in-loop -- a handful of rows, and the
@@ -1377,6 +1400,14 @@ export default function QuickBooks() {
                         Synergy gets the name everywhere: the rep field, the "Rep name" mapping, and any
                         custom field you map above. An unnamed option still syncs, as the number.
                       </p>
+                      {(docFieldsUnavailable || fieldOptions.length === 0) && (
+                        <p className="text-xs" style={{ color: '#a15c00' }}>
+                          BuildBridge could not read this company's recent estimates and invoices just now,
+                          so the options below are only the ones already named — not everything QuickBooks
+                          has sent. <strong>Reload the page</strong> to see the full list. Naming still
+                          works either way.
+                        </p>
+                      )}
                       {namedFields.map((f) => (
                         <div key={f.field} className="rounded-md border px-3 py-2 space-y-2">
                           <p className="text-sm font-medium" style={{ color: '#3d3672' }}>
