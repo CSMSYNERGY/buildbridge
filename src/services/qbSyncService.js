@@ -891,7 +891,7 @@ async function reflectSalesDocStatus(
   // destination — either a custom field or the assignee route; the diagnostics above
   // have already explained whichever is missing.
   const repHasDestination = (repTarget || (toAssignee && repUserMaps.length > 0)) && reps.size > 0;
-  if (!targetField && !repHasDestination && docValues.size === 0) return;
+  if (!targetField && !repHasDestination && !(wantDocFields && docValues.size > 0)) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
   //
@@ -926,9 +926,22 @@ async function reflectSalesDocStatus(
   if (repHasDestination) {
     for (const customerId of reps.keys()) if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
   }
-  // Same for a customer whose only news is a mapped document field.
-  for (const customerId of docValues.keys()) {
-    if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+  // Same for a customer whose only news is a MAPPED document field.
+  //
+  // Gated on there being a mapping, and that gate is load-bearing. `docValues` is now
+  // populated for any tenant with a rep source, so without it every customer in the
+  // 50-document window joined the visit queue on every pass — for Rockwood that took
+  // a pass which had been returning immediately (nothing mapped, no rep destination)
+  // and gave it a contact-by-contact loop plus both downstream halves. The pass
+  // stopped reaching setSyncState at 08:31 UTC on 2026-08-19 and the cursor sat for
+  // two and a half hours: the same silent-termination signature as 07-30 and 08-03,
+  // where the work is done and the invocation dies before the cursor write.
+  //
+  // The phone still reaches a contact this loop visits for any other reason.
+  if (wantDocFields) {
+    for (const customerId of docValues.keys()) {
+      if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+    }
   }
 
   let visited = 0;      // routine work — bounded by REP_VISITS_PER_PASS
