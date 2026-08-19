@@ -11,6 +11,11 @@ import { summarizeQboFault, collectTxnCustomFieldNames } from './qbSyncLogic.js'
 
 const QUICKBOOKS_SLUG = 'quickbooks';
 
+// Credentials already loaded in this isolate: locationId → { creds }. Same reason as
+// ghlService's token cache — reading the row is a subrequest, and an invocation only
+// gets fifty. Invalidated wherever the stored credential changes or is disowned.
+const credentialCache = new Map();
+
 // Intuit OAuth2 endpoints are the same for sandbox and production; only the
 // API base URL differs by environment.
 const AUTHORIZE_URL = 'https://appcenter.intuit.com/connect/oauth2';
@@ -214,6 +219,9 @@ export async function saveCredentials(
   { accessToken, refreshToken, realmId, expiresAt },
   { verified = false, clearError = true } = {},
 ) {
+  // A stored credential is about to change, so any copy held in memory is wrong.
+  credentialCache.delete(locationId);
+
   const payload = JSON.stringify({
     accessToken,
     refreshToken,
@@ -477,6 +485,8 @@ export async function refreshAccessToken(locationId) {
  * Best-effort revoke of the stored refresh token at Intuit. Non-fatal.
  */
 export async function revokeToken(locationId) {
+  // Disconnecting: never serve this credential from memory again.
+  credentialCache.delete(locationId);
   const creds = await getCredentialsOrNull(locationId);
   if (!creds?.refreshToken) return;
 
@@ -502,6 +512,19 @@ export async function revokeToken(locationId) {
  * success path can decide whether health needs updating without a second query.
  */
 async function getFreshCredentials(locationId) {
+  // Reuse a credential already loaded in this isolate. Reading the row is a database
+  // call and the database is a service binding, so it is a subrequest — one per
+  // QuickBooks request, on a ceiling of fifty. Bypassed inside the same 60-second
+  // expiry buffer used below, so a refresh still happens exactly when it should, and
+  // cleared on the failure paths that mark a credential broken.
+  const cached = credentialCache.get(locationId);
+  const cachedExpiry = cached?.creds?.expiresAt ? new Date(cached.creds.expiresAt).getTime() : 0;
+  if (cached && cachedExpiry - Date.now() >= 60 * 1000) {
+    // `needsHealthWrite` is false on purpose: that write is worth one round trip per
+    // run, not one per request, and the uncached path above still performs it.
+    return { creds: cached.creds, needsHealthWrite: false };
+  }
+
   const record = await getCredentialRecord(locationId);
   if (!record) throw createError(400, 'QuickBooks is not connected for this location');
   let creds = record.creds;
@@ -513,6 +536,7 @@ async function getFreshCredentials(locationId) {
   if (!expiresAt || expiresAt.getTime() - Date.now() < bufferMs) {
     creds = await refreshAccessToken(locationId);
   }
+  credentialCache.set(locationId, { creds });
   return { creds, needsHealthWrite };
 }
 

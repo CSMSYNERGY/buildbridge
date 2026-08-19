@@ -9,6 +9,15 @@ import { spendSubrequest } from '../core/subrequestBudget.js';
 const GHL_BASE = env.GHL_BASE_URL;
 const API_VERSION = env.GHL_DEFAULT_API_VERSION;
 
+// Access tokens already loaded in this isolate: locationId → { accessToken, expiresAt }.
+//
+// Not a performance nicety. Reading this row is a database call, the database is a
+// service binding, and a service binding is a subrequest — so before this cache every
+// GoHighLevel request cost two of the fifty an invocation gets. Held in memory only,
+// keyed per location, and never consulted inside the same 60-second expiry buffer the
+// database path uses, so a token still refreshes exactly when it would have.
+const tokenCache = new Map();
+
 /**
  * Exchange an OAuth authorization code for access + refresh tokens.
  * Returns the raw token response from GHL.
@@ -92,6 +101,10 @@ export async function refreshAccessToken(locationId) {
     })
     .where(eq(locations.id, locationId));
 
+  // Write through, so the next call in this run reuses the fresh token instead of
+  // going back to the database for the row we just wrote.
+  tokenCache.set(locationId, { accessToken: data.access_token, expiresAt: expiresAt.getTime() });
+
   return data.access_token;
 }
 
@@ -147,30 +160,49 @@ function duplicateContactIdFrom(rawBody) {
  * Automatically refreshes the access token if it is expired.
  */
 export async function makeGhlRequest(locationId, method, path, body = undefined) {
-  // Counted before anything is sent, because the pair below — this credential read
-  // and the fetch that follows — is what a scheduled run actually spends its
-  // subrequest ceiling on. See core/subrequestBudget.js.
+  // Counted before anything is sent. See core/subrequestBudget.js.
   spendSubrequest();
-  const [loc] = await db
-    .select({
-      ghlAccessToken: locations.ghlAccessToken,
-      ghlTokenExpiresAt: locations.ghlTokenExpiresAt,
-    })
-    .from(locations)
-    .where(eq(locations.id, locationId))
-    .limit(1);
 
-  if (!loc?.ghlAccessToken) {
-    throw createError(400, `No access token found for location ${locationId}`);
-  }
-
-  // Refresh if expired or within 60 seconds of expiry
-  let accessToken;
+  // Reuse a token already loaded in this isolate rather than re-reading it.
+  //
+  // This read was a DATABASE round trip on EVERY call, and the database is a service
+  // binding, so it is a subrequest of its own — meaning every GoHighLevel request
+  // cost two, and an invocation capped at fifty could make twenty-five calls at best.
+  // Caching it halves that: the same ceiling now buys twice the work.
+  //
+  // Safe because the cache stores the same expiry the row does and is bypassed inside
+  // the same 60-second buffer, so an expiring token still refreshes exactly when it
+  // would have; a refresh writes through (see refreshAccessToken); and a 401 clears it
+  // below, which covers a token rotated out from under us by anything else.
+  let accessToken = null;
+  const cached = tokenCache.get(locationId);
   const bufferMs = 60 * 1000;
-  if (!loc.ghlTokenExpiresAt || loc.ghlTokenExpiresAt.getTime() - Date.now() < bufferMs) {
-    accessToken = await refreshAccessToken(locationId);
+  if (cached && cached.expiresAt - Date.now() >= bufferMs) {
+    accessToken = cached.accessToken;
   } else {
-    accessToken = decrypt(loc.ghlAccessToken);
+    const [loc] = await db
+      .select({
+        ghlAccessToken: locations.ghlAccessToken,
+        ghlTokenExpiresAt: locations.ghlTokenExpiresAt,
+      })
+      .from(locations)
+      .where(eq(locations.id, locationId))
+      .limit(1);
+
+    if (!loc?.ghlAccessToken) {
+      throw createError(400, `No access token found for location ${locationId}`);
+    }
+
+    // Refresh if expired or within 60 seconds of expiry
+    if (!loc.ghlTokenExpiresAt || loc.ghlTokenExpiresAt.getTime() - Date.now() < bufferMs) {
+      accessToken = await refreshAccessToken(locationId);
+    } else {
+      accessToken = decrypt(loc.ghlAccessToken);
+      tokenCache.set(locationId, {
+        accessToken,
+        expiresAt: loc.ghlTokenExpiresAt.getTime(),
+      });
+    }
   }
 
   const url = `${GHL_BASE}${path}`;
@@ -188,6 +220,8 @@ export async function makeGhlRequest(locationId, method, path, body = undefined)
 
   // A 401 can mean the token was revoked/rotated out-of-band — refresh once and retry.
   if (res.status === 401) {
+    // Whatever we were holding is wrong; never serve it again from memory.
+    tokenCache.delete(locationId);
     const newToken = await refreshAccessToken(locationId).catch(() => null);
     if (newToken) {
       res = await fetch(url, {
