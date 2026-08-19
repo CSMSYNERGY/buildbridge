@@ -858,9 +858,24 @@ async function reflectSalesDocStatus(
       ? prePass(lookupLink(linkIndex, 'estimate', { qbId: news.docId }))
       : null;
     const isOurs = (baseline) => baseline && isEcho(new Date(news.when), { lastSyncedAt: baseline });
+
+    // MATCH THE LINK TO WHAT CHANGED. A document that changed is only ever our own
+    // echo if WE wrote that document, so it is judged against the document's link.
+    // Judging it against the CONTACT's link was wrong in a way that looked careful:
+    // that link is touched by every write we make INTO Synergy — a status, a phone,
+    // an opportunity field — none of which can change anything in QuickBooks. So a
+    // contact we had just written to made the client's next genuine estimate edit
+    // read as our echo, and the assignment they were testing never fired.
+    // Observed 2026-08-19: estimate 1743 edited, Rep set to Jadon, and the pass
+    // reported `qbRepAssignSkippedEcho: 2` instead of assigning anyone.
+    //
+    // News from the CUSTOMER RECORD still uses the contact link, and there the
+    // reasoning holds: pushing a Synergy contact into QuickBooks is exactly what
+    // bumps that record, and it touches that link as it goes.
+    const echoed = news.docId ? isOurs(docBaseline) : isOurs(contactBaseline);
     // A stamp of 0 means the entity carried no usable timestamp, so we cannot tell an
     // echo from real activity. The answer that never reassigns wins.
-    if (!news.when || isOurs(contactBaseline) || isOurs(docBaseline)) {
+    if (!news.when || echoed) {
       stats.qbRepAssignSkippedEcho += 1;
       continue;
     }
