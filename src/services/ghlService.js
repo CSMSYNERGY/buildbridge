@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { encrypt, decrypt } from '../core/middleware/encrypt.js';
 import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
+import { spendSubrequest } from '../core/subrequestBudget.js';
 
 const GHL_BASE = env.GHL_BASE_URL;
 const API_VERSION = env.GHL_DEFAULT_API_VERSION;
