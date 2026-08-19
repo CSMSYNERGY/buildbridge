@@ -1023,6 +1023,20 @@ async function reflectSalesDocStatus(
         return f?.value ?? f?.fieldValue;
       };
 
+      // ── Phone, resolved before anything is written ────────────────────────────
+      // QuickBooks is the source: the customer record, since no sales document
+      // carries a phone. When that record has none, the MAPPED "Customer phone"
+      // field falls back to the number Synergy already holds — no lookup needed,
+      // this loop is holding that contact. Two distinct uses, deliberately not
+      // merged: `qbPhone` is what QuickBooks knows and is the only thing allowed to
+      // fill the contact's own phone field, while the mapped field may show either.
+      const qbPhone = docValues.get(customerId)?.customerPhone ?? null;
+      if (!qbPhone) {
+        const ghlPhone = String(existing?.contact?.phone ?? '').trim();
+        const values = docValues.get(customerId);
+        if (values && ghlPhone) values.customerPhone = ghlPhone;
+      }
+
       // Two independent writes into one PUT. Each decides for itself whether it has
       // anything to say, because they move on different rules: status only ever
       // climbs, while the rep is simply the latest value and may legitimately change
@@ -1087,7 +1101,6 @@ async function reflectSalesDocStatus(
       // the number existed in QuickBooks, or whose number sits in a slot the old
       // reader ignored. A contact nobody can call is the thing being fixed — quietly
       // replacing a number someone corrected in Synergy is not.
-      const qbPhone = docValues.get(customerId)?.customerPhone ?? null;
       const phoneWrite = qbPhone && !String(existing?.contact?.phone ?? '').trim() ? qbPhone : null;
 
       // Nothing changed ⇒ no PUT. Skipping the request also skips touchLink, which is
