@@ -818,15 +818,21 @@ async function reflectSalesDocStatus(
   //   Synergy, BuildBridge mirrors some unrelated field change to QuickBooks, and the
   //   echo hands ownership straight back to the mapped rep. The contact half has
   //   suppressed this since it was written; the assignee route has to as well.
-  const rawNews = canAssign
-    ? customersWithNews({
-      changedCustomers,
-      changedEstimates: estimates,
-      changedInvoices: invoices,
-      recentDocs: repDocs,
-      since,
-    })
-    : new Map();
+  // Who has news this pass, before any assignment-specific filtering. Pure and
+  // cheap, and it is what makes the document work EVENT-DRIVEN: a customer whose
+  // documents have not changed cannot have different field values, so visiting them
+  // is a contact read, an opportunity search and a link touch spent to discover that
+  // nothing happened. Rockwood has ~64 customers in the document window and a handful
+  // of documents a day; the difference is the whole pass budget.
+  const allNews = customersWithNews({
+    changedCustomers,
+    changedEstimates: estimates,
+    changedInvoices: invoices,
+    recentDocs: repDocs,
+    since,
+  });
+  const hasNews = (customerId) => allNews.has(String(customerId));
+  const rawNews = canAssign ? allNews : new Map();
   const freshCustomers = new Set();
   for (const [qbCustomerId, news] of rawNews) {
     // Compared against the PRE-PASS stamp (see snapshotLinkTimes): the contacts half
@@ -891,7 +897,8 @@ async function reflectSalesDocStatus(
   // destination — either a custom field or the assignee route; the diagnostics above
   // have already explained whichever is missing.
   const repHasDestination = (repTarget || (toAssignee && repUserMaps.length > 0)) && reps.size > 0;
-  if (!targetField && !repHasDestination && !(wantDocFields && docValues.size > 0)) return;
+  const docHasWork = wantDocFields && [...docValues.keys()].some(hasNews);
+  if (!targetField && !repHasDestination && !docHasWork) return;
 
   // Best status per QB customer this run (invoices outrank estimates).
   //
@@ -940,7 +947,7 @@ async function reflectSalesDocStatus(
   // The phone still reaches a contact this loop visits for any other reason.
   if (wantDocFields) {
     for (const customerId of docValues.keys()) {
-      if (!byCustomer.has(customerId)) byCustomer.set(customerId, null);
+      if (hasNews(customerId) && !byCustomer.has(customerId)) byCustomer.set(customerId, null);
     }
   }
 
@@ -1158,7 +1165,12 @@ async function reflectSalesDocStatus(
       // The opportunity half, gated on someone having mapped a field to one. Its own
       // request, after the contact write rather than instead of it: the two are
       // different records in Synergy and a client can map to either or both.
-      if (oppFieldMaps.length && docValues.has(customerId)) {
+      // Only for a customer with news. Each call is an opportunity SEARCH plus, on a
+      // change, a PUT and a link write — and every one of those carries a database
+      // read for the Synergy token. Running it for every customer in the document
+      // window is what exhausted the invocation's subrequests on 2026-08-19: the
+      // pass died mid-flight, silently, and the cursor stopped moving for hours.
+      if (oppFieldMaps.length && docValues.has(customerId) && hasNews(customerId)) {
         // Isolated from the contact write above so a rejection here is reported as
         // itself. GHL takes opportunity custom fields in a different shape from
         // contact ones, and "opportunity update refused" must not surface as a status
