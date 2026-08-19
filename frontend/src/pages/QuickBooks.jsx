@@ -1336,6 +1336,14 @@ export default function QuickBooks() {
               {/* What to reflect FROM QuickBooks into GHL (QB→GHL directions) */}
               {(s.qboSyncDirection === 'qb_to_ghl' || s.qboSyncDirection === 'two_way') && (
                 <div className="space-y-4 pl-6">
+                  {/* Stated because it happens without being configured, and because
+                      "where did this phone number come from" is a fair question. */}
+                  <p className="text-xs text-muted-foreground">
+                    <strong>Phone numbers.</strong> A contact with no phone in Synergy gets the one
+                    QuickBooks holds for that customer — read from the customer record, since estimates
+                    and invoices do not carry a phone at all. A number already in Synergy is never
+                    overwritten by this; the ordinary contact sync keeps it up to date.
+                  </p>
                   {/* Salesperson: QB custom field → Synergy custom field */}
                   <div className="space-y-1.5">
                     <Label htmlFor="assignedField">Salesperson — QuickBooks field</Label>

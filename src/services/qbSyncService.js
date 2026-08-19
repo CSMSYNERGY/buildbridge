@@ -857,8 +857,13 @@ async function reflectSalesDocStatus(
   // GHL code node did per webhook; polling means the latest document wins instead of
   // every document firing, which is the behaviour a CRM field wants anyway (the
   // contact shows their current estimate, not a history).
+  //
+  // Also computed for a tenant who configured only the REP and mapped no fields at
+  // all, because the phone backfill below lives on these values and a missing phone
+  // is worth filling whether or not anyone mapped an estimate number. The documents
+  // are already in hand at this point; the only extra cost is one customer query.
   const docValues = new Map(); // qb customer id → extracted values
-  if (wantDocFields && repDocs) {
+  if ((wantDocFields || repSource) && repDocs) {
     const latest = latestDocByCustomer(repDocs.estimates, repDocs.invoices);
     // Only the company's own custom fields that someone actually mapped — reading
     // the rest off every document would be work nobody asked for.
