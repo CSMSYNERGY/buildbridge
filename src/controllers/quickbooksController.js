@@ -23,7 +23,11 @@ import {
 } from '../services/quickbooksService.js';
 import { listOpenIssues } from '../services/errorLogService.js';
 import { collectRepValues } from '../services/qbSyncLogic.js';
-import { DOC_FIELD_CATALOG, extractDocFields } from '../services/qbDocFields.js';
+import {
+  docFieldCatalog,
+  extractDocFields,
+  optionsByField,
+} from '../services/qbDocFields.js';
 import { listMappers } from '../services/mapperService.js';
 import {
   listMilestoneDefinitions,
@@ -261,10 +265,13 @@ export async function getQuickBooksRepValues(req, res, next) {
 export async function getQuickBooksDocFields(req, res, next) {
   try {
     const { locationId } = req.user;
-    const catalog = DOC_FIELD_CATALOG.map((f) => ({ ...f, sample: null }));
+    // The built-ins alone, for every early return below: without documents we cannot
+    // know which custom fields this company uses, and inventing some would be worse
+    // than showing the fields that are true of every QuickBooks company.
+    const catalog = docFieldCatalog().map((f) => ({ ...f, sample: null }));
 
     const creds = await getCredentialsOrNull(locationId);
-    if (!creds) return res.json({ fields: catalog, sampledFrom: null, repField: null });
+    if (!creds) return res.json({ fields: catalog, options: [], sampledFrom: null, repField: null });
 
     const settings = await getLocationSettings(locationId);
     const repField = settings?.qboAssignedUserField ?? null;
@@ -275,17 +282,25 @@ export async function getQuickBooksDocFields(req, res, next) {
       ({ estimates, invoices } = await getRecentSalesDocs(locationId, 5, { links: true }));
     } catch (err) {
       console.warn(`[quickbooks] doc-field preview read failed: ${err?.message}`);
-      return res.json({ fields: catalog, sampledFrom: null, repField, unavailable: true });
+      return res.json({ fields: catalog, options: [], sampledFrom: null, repField, unavailable: true });
     }
 
     // The query returns newest-first, so [0] is the latest of each kind.
     const newestEstimate = estimates[0] ?? null;
     const newestInvoice = invoices[0] ?? null;
     if (!newestEstimate && !newestInvoice) {
-      return res.json({ fields: catalog, sampledFrom: null, repField });
+      return res.json({ fields: catalog, options: [], sampledFrom: null, repField });
     }
 
-    const repLabels = await listMappers(locationId, 'quickbooks', 'qb_rep_label');
+    const optionLabels = await listMappers(locationId, 'quickbooks', 'qb_option_label');
+    // The company's OWN custom fields, discovered from its documents — this is what
+    // makes the mapping universal rather than a fixed list that happens to suit one
+    // client. `options` is every distinct value each of those fields has carried,
+    // which is what the "name your dropdown values" editor is built from.
+    const options = optionsByField(estimates, invoices, optionLabels);
+    const fullCatalog = docFieldCatalog(options.map((o) => o.field));
+    const customFieldNames = options.map((o) => o.field);
+
     // One customer read for the phone (and the name fallbacks) — the same gap the
     // sync fills, so the preview does not promise a value the sync cannot produce.
     const customers = await getCustomersByIds(
@@ -296,7 +311,8 @@ export async function getQuickBooksDocFields(req, res, next) {
       ? extractDocFields(doc, {
         type,
         repField,
-        repLabels,
+        optionLabels,
+        customFieldNames,
         customer: customers.get(String(doc?.CustomerRef?.value ?? '')),
       })
       : {});
@@ -306,12 +322,13 @@ export async function getQuickBooksDocFields(req, res, next) {
     // Invoice first so the shared fields (customer, shipping, subtotal) show the more
     // recent kind of document a client is likely looking at; estimate fills the gaps.
     const merged = {};
-    for (const f of DOC_FIELD_CATALOG) {
+    for (const f of fullCatalog) {
       merged[f.key] = invValues[f.key] ?? estValues[f.key] ?? null;
     }
 
     res.json({
-      fields: DOC_FIELD_CATALOG.map((f) => ({ ...f, sample: merged[f.key] })),
+      fields: fullCatalog.map((f) => ({ ...f, sample: merged[f.key] })),
+      options,
       sampledFrom: {
         estimateNumber: estValues.documentNumber ?? null,
         invoiceNumber: invValues.documentNumber ?? null,

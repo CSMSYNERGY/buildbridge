@@ -5,6 +5,11 @@ import {
   extractDocFields,
   shippingParts,
   repDisplayName,
+  optionLabel,
+  optionLabelKey,
+  docFieldCatalog,
+  optionsByField,
+  customFieldKey,
   latestDocByCustomer,
   docFieldWrites,
 } from './qbDocFields.js';
@@ -58,10 +63,10 @@ const INVOICE = {
 };
 
 const REP_LABELS = [
-  { externalKey: '1', ghlValue: 'Jon' },
-  { externalKey: '2', ghlValue: 'Cody' },
-  { externalKey: '3', ghlValue: 'Jadon' },
-  { externalKey: '4', ghlValue: 'Jason' },
+  { externalKey: 'rep::1', ghlValue: 'Jon' },
+  { externalKey: 'rep::2', ghlValue: 'Cody' },
+  { externalKey: 'rep::3', ghlValue: 'Jadon' },
+  { externalKey: 'rep::4', ghlValue: 'Jason' },
 ];
 
 describe('extractDocFields — estimates', () => {
@@ -258,7 +263,7 @@ describe('repDisplayName', () => {
   });
 
   it('matches case-insensitively and ignores surrounding space', () => {
-    expect(repDisplayName([{ externalKey: 'cody', ghlValue: 'Cody Miller' }], ' Cody '))
+    expect(repDisplayName([{ externalKey: 'rep::cody', ghlValue: 'Cody Miller' }], ' Cody ', 'Rep'))
       .toBe('Cody Miller');
   });
 
@@ -380,5 +385,93 @@ describe('DOC_FIELD_CATALOG', () => {
       expect(f.label).toBeTruthy();
       expect(f.description).toBeTruthy();
     }
+  });
+});
+
+describe('universal option labels — any dropdown field, any client', () => {
+  const LABELS = [
+    { externalKey: 'rep::2', ghlValue: 'Cody' },
+    { externalKey: 'siding color::4', ghlValue: 'Barn Red' },
+  ];
+
+  it('scopes names by FIELD, so option 2 can mean different things on two fields', () => {
+    const labels = [
+      { externalKey: 'rep::2', ghlValue: 'Cody' },
+      { externalKey: 'trim color::2', ghlValue: 'White' },
+    ];
+    expect(optionLabel(labels, 'Rep', '2')).toBe('Cody');
+    expect(optionLabel(labels, 'Trim Color', '2')).toBe('White');
+  });
+
+  it('falls back to the raw option number when nobody has named it', () => {
+    expect(optionLabel(LABELS, 'Roofing Color', '7')).toBe('7');
+  });
+
+  it('builds its key case-insensitively from field and value', () => {
+    expect(optionLabelKey(' Siding Color ', ' 4 ')).toBe('siding color::4');
+  });
+
+  it('adds the company OWN custom fields to the catalog, after the built-ins', () => {
+    const catalog = docFieldCatalog(['Rep', 'Siding Color']);
+    expect(catalog.length).toBe(DOC_FIELD_CATALOG.length + 2);
+    const custom = catalog.filter((f) => f.custom);
+    expect(custom.map((f) => f.key)).toEqual(['custom:Rep', 'custom:Siding Color']);
+    expect(custom[1].label).toBe('Siding Color');
+  });
+
+  it('de-duplicates discovered field names and ignores blanks', () => {
+    const catalog = docFieldCatalog(['Rep', 'rep', '  ', null]);
+    expect(catalog.filter((f) => f.custom).length).toBe(1);
+  });
+
+  it('extracts a mapped custom field, named where a name exists', () => {
+    const values = extractDocFields(ESTIMATE, {
+      optionLabels: LABELS,
+      customFieldNames: ['Rep', 'Siding Color'],
+    });
+    expect(values[customFieldKey('Rep')]).toBe('Cody');
+    expect(values[customFieldKey('Siding Color')]).toBe('Barn Red');
+  });
+
+  it('gives an unnamed custom field its raw value rather than nothing', () => {
+    const values = extractDocFields(ESTIMATE, { customFieldNames: ['Siding Color'] });
+    expect(values[customFieldKey('Siding Color')]).toBe('4');
+  });
+
+  it('reports null for a custom field this document does not carry', () => {
+    const values = extractDocFields(ESTIMATE, { customFieldNames: ['Roofing Color'] });
+    expect(values[customFieldKey('Roofing Color')]).toBeNull();
+  });
+
+  it('a mapped custom field writes like any other catalog field', () => {
+    const values = extractDocFields(ESTIMATE, {
+      optionLabels: LABELS, customFieldNames: ['Siding Color'],
+    });
+    expect(docFieldWrites(values, [{ externalKey: 'custom:Siding Color', ghlValue: 'cf_siding' }]))
+      .toEqual([{ id: 'cf_siding', value: 'Barn Red' }]);
+  });
+});
+
+describe('optionsByField — what needs naming, discovered from the documents', () => {
+  it('lists every field with its distinct values, most used first', () => {
+    const second = {
+      ...ESTIMATE,
+      Id: '18009',
+      CustomField: [
+        { Name: 'Rep', StringValue: '2' },
+        { Name: 'Siding Color', StringValue: '9' },
+      ],
+    };
+    const out = optionsByField([ESTIMATE, second], [], [{ externalKey: 'rep::2', ghlValue: 'Cody' }]);
+    const rep = out.find((f) => f.field === 'Rep');
+    expect(rep.values).toEqual([{ value: '2', label: 'Cody', count: 2 }]);
+    const siding = out.find((f) => f.field === 'Siding Color');
+    expect(siding.values.map((v) => v.value).sort()).toEqual(['4', '9']);
+    // Unnamed options report label null, which is what the editor shows as empty.
+    expect(siding.values.every((v) => v.label === null)).toBe(true);
+  });
+
+  it('is empty when no document carries a custom field', () => {
+    expect(optionsByField([{ Id: '1' }], [])).toEqual([]);
   });
 });

@@ -163,6 +163,10 @@ export default function QuickBooks() {
   // qb_rep_label row and brings it back on the next load.
   const [extraRepValues, setExtraRepValues] = useState([]);
   const [newRepValue, setNewRepValue] = useState('');
+  // Every dropdown value each of the company's OWN custom fields has carried,
+  // discovered from its documents: [{ field, values: [{ value, label, count }] }].
+  const [fieldOptions, setFieldOptions] = useState([]);
+  const [pasteDraft, setPasteDraft] = useState({}); // field → pasted option list
 
   // A credential EXISTS. Deliberately still the gate for the settings + mapping cards:
   // when a token dies, the tenant's saved mappings and sync config are still valid and
@@ -274,7 +278,7 @@ export default function QuickBooks() {
           setSpMaps(all.filter((m) => m.mapperType === 'qb_salesperson'));
           setRepUserMaps(all.filter((m) => m.mapperType === 'qb_rep_user'));
           setDocMaps(all.filter((m) => DOC_MAPPER_TYPES.includes(m.mapperType)));
-          const labels = all.filter((m) => m.mapperType === 'qb_rep_label');
+          const labels = all.filter((m) => m.mapperType === 'qb_option_label');
           setRepLabelMaps(labels);
           setRepLabelDraft(Object.fromEntries(labels.map((m) => [m.externalKey, m.ghlValue])));
         })
@@ -286,6 +290,7 @@ export default function QuickBooks() {
         .then((r) => (r.ok ? r.json() : { fields: [], unavailable: true }))
         .then((d) => {
           setDocFields(d.fields ?? []);
+          setFieldOptions(d.options ?? []);
           setDocSampledFrom(d.sampledFrom ?? null);
           setDocFieldsUnavailable(!!d.unavailable);
         })
@@ -744,8 +749,15 @@ export default function QuickBooks() {
     }
   }
 
-  // ── Rep names (QuickBooks option id → the name they use) ───────────────────
-  const repLabelFor = (value) => repLabelMaps.find((m) => m.externalKey === value) ?? null;
+  // ── Dropdown value names (any custom field, any client) ────────────────────
+  // QuickBooks sends a dropdown's OPTION NUMBER on the document, never its text,
+  // and Intuit exposes no way to read a dropdown's options (the definitions API is
+  // gated behind a paid tier and returns the field's label, not its options). So the
+  // names come from whoever can see the dropdown — once per option, and then every
+  // client's fields work the same way.
+  const optionKey = (field, value) => `${String(field).trim().toLowerCase()}::${String(value).trim().toLowerCase()}`;
+  const repLabelFor = (field, value) =>
+    repLabelMaps.find((m) => m.externalKey === optionKey(field, value)) ?? null;
 
   // Every rep value this page knows about, from three sources — because no single one
   // is complete. `repValues` is what QuickBooks documents have actually carried
@@ -754,17 +766,54 @@ export default function QuickBooks() {
   // is what someone typed in by hand. The API cannot enumerate a dropdown's options —
   // that needs the tier-gated App Foundations scope — so hand entry is the only way to
   // configure a rep before their first document arrives.
-  const knownRepValues = [
-    ...repValues.map((r) => r.value),
-    ...repLabelMaps.map((m) => m.externalKey),
-    ...extraRepValues,
-  ].filter((v, i, all) => v && all.indexOf(v) === i);
+  // Every field worth naming options for, and every option of each: what the
+  // documents carried, plus anything already named (an option that has gone quiet
+  // must stay visible and editable), plus a row for each position a paste created.
+  const namedFields = (() => {
+    const byField = new Map();
+    for (const f of fieldOptions) {
+      byField.set(f.field.toLowerCase(), {
+        field: f.field,
+        values: f.values.map((v) => ({ value: v.value, seen: true })),
+      });
+    }
+    for (const m of repLabelMaps) {
+      const [field, value] = String(m.externalKey ?? '').split('::');
+      if (!field || !value) continue;
+      const hit = byField.get(field) ?? { field, values: [] };
+      if (!hit.values.some((v) => v.value.toLowerCase() === value)) {
+        hit.values.push({ value, seen: false });
+      }
+      byField.set(field, hit);
+    }
+    // The salesperson field always gets a section, even before any document carries
+    // it — otherwise a new client cannot name their reps until someone sells.
+    if (s?.qboAssignedUserField && !byField.has(s.qboAssignedUserField.toLowerCase())) {
+      byField.set(s.qboAssignedUserField.toLowerCase(), { field: s.qboAssignedUserField, values: [] });
+    }
+    return [...byField.values()].map((f) => ({
+      ...f,
+      values: [...f.values].sort((a, b) => a.value.localeCompare(b.value, undefined, { numeric: true })),
+    }));
+  })();
 
-  async function saveRepLabel(value) {
-    const typed = (repLabelDraft[value] ?? '').trim();
-    const existing = repLabelFor(value);
+  // Rep values for the rep → Synergy user picker: seen on a document, or named.
+  const knownRepValues = (() => {
+    const repField = String(s?.qboAssignedUserField ?? '').toLowerCase();
+    const named = repLabelMaps
+      .map((m) => String(m.externalKey ?? '').split('::'))
+      .filter(([field]) => field === repField)
+      .map(([, value]) => value);
+    return [...repValues.map((r) => r.value), ...named, ...extraRepValues]
+      .filter((v, i, all) => v && all.indexOf(v) === i);
+  })();
+
+  async function saveRepLabel(field, value, typedRaw) {
+    const key = optionKey(field, value);
+    const typed = (typedRaw ?? repLabelDraft[key] ?? '').trim();
+    const existing = repLabelFor(field, value);
     if (typed === (existing?.ghlValue ?? '')) return;
-    setSavingRepLabel(value);
+    setSavingRepLabel(key);
     try {
       if (!typed) {
         if (existing) {
@@ -778,17 +827,38 @@ export default function QuickBooks() {
         method: 'POST',
         body: JSON.stringify({
           appSlug: 'quickbooks',
-          mapperType: 'qb_rep_label',
-          externalKey: value, // the rep exactly as QuickBooks sends it
-          ghlValue: typed,    // what this company calls that person
+          mapperType: 'qb_option_label',
+          externalKey: key,  // <field>::<value>, because option numbers restart per field
+          ghlValue: typed,   // what this company calls that option
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to save the name');
-      setRepLabelMaps((prev) => [...prev.filter((m) => m.externalKey !== value), data.mapper]);
-      toast({ title: `Rep "${value}" is ${typed}` });
+      setRepLabelMaps((prev) => [...prev.filter((m) => m.externalKey !== key), data.mapper]);
     } catch (err) {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingRepLabel(null);
+    }
+  }
+
+  // Name a whole dropdown in one paste: the items in the order QuickBooks lists
+  // them, one per line. Positions are the option numbers, which is how every
+  // QuickBooks dropdown we have seen behaves — and it turns setting up a client from
+  // "type each option and hope you have seen them all" into one copy and paste,
+  // including the options no document has carried yet.
+  async function pasteFieldOptions(field, text) {
+    const names = String(text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (names.length === 0) return;
+    setSavingRepLabel(`paste:${field}`);
+    try {
+      for (let i = 0; i < names.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- a handful of rows, and the
+        // mapper API is one row per call; a batch endpoint is not worth a migration.
+        await saveRepLabel(field, String(i + 1), names[i]);
+      }
+      toast({ title: `Named ${names.length} option(s) on "${field}"` });
+      setPasteDraft((d) => ({ ...d, [field]: '' }));
     } finally {
       setSavingRepLabel(null);
     }
@@ -1293,73 +1363,85 @@ export default function QuickBooks() {
                       code node ({"1":"Jon","2":"Cody",…}) — nobody but us could edit it,
                       and a new rep in QuickBooks meant a code change. Typed here, it feeds
                       both the Synergy field above and the "Rep name" mapping below. */}
-                  {s.qboAssignedUserField && (
-                    <div className="space-y-2">
-                      <Label>Rep names</Label>
+                  {/* Dropdown value names — every custom field this company's own documents
+                      carry, not a list we maintain per client. QuickBooks puts the option
+                      NUMBER on the document and exposes no way to read the option list, so
+                      the names have to come from someone who can see the dropdown. Once per
+                      option, and then it is the same for every client. */}
+                  {namedFields.length > 0 && (
+                    <div className="space-y-3">
+                      <Label>Dropdown value names</Label>
                       <p className="text-xs text-muted-foreground">
-                        QuickBooks sends the rep as the dropdown's <strong>internal value</strong> — on this
-                        company <code>1</code>, <code>2</code>, and so on. Type who each one is and Synergy
-                        gets the name instead of the number. An unnamed rep still syncs, as the raw value.
+                        QuickBooks sends a dropdown's <strong>option number</strong>, never its text — a
+                        rep arrives as <code>2</code>, a colour as <code>4</code>. Name them once and
+                        Synergy gets the name everywhere: the rep field, the "Rep name" mapping, and any
+                        custom field you map above. An unnamed option still syncs, as the number.
                       </p>
-                      {knownRepValues.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          No rep values seen on recent estimates or invoices yet — add them below in the
-                          order they appear in the QuickBooks dropdown.
-                        </p>
-                      ) : (
-                        <ul className="space-y-2">
-                          {knownRepValues.map((value) => (
-                            <li key={value} className="flex items-center gap-2">
-                              <code className="shrink-0 rounded border px-2 py-1 text-xs">{value}</code>
-                              <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <Input
-                                value={repLabelDraft[value] ?? ''}
-                                placeholder="Name in QuickBooks (e.g. Cody)"
-                                onChange={(e) => setRepLabelDraft((d) => ({ ...d, [value]: e.target.value }))}
-                                onBlur={() => saveRepLabel(value)}
-                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-                                disabled={savingRepLabel === value}
-                                className="h-8"
+                      {namedFields.map((f) => (
+                        <div key={f.field} className="rounded-md border px-3 py-2 space-y-2">
+                          <p className="text-sm font-medium" style={{ color: '#3d3672' }}>
+                            {f.field}
+                            {f.field === s.qboAssignedUserField && (
+                              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                                (the salesperson field)
+                              </span>
+                            )}
+                          </p>
+                          <ul className="space-y-2">
+                            {f.values.map(({ value, seen }) => {
+                              const key = optionKey(f.field, value);
+                              return (
+                                <li key={value} className="flex items-center gap-2">
+                                  <code className="shrink-0 rounded border px-2 py-1 text-xs">{value}</code>
+                                  <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                  <Input
+                                    value={repLabelDraft[key] ?? ''}
+                                    placeholder="What this option is called in QuickBooks"
+                                    onChange={(e) => setRepLabelDraft((d) => ({ ...d, [key]: e.target.value }))}
+                                    onBlur={() => saveRepLabel(f.field, value)}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                    disabled={savingRepLabel === key}
+                                    className="h-8"
+                                  />
+                                  {!seen && (
+                                    <span className="shrink-0 text-xs text-muted-foreground">not seen yet</span>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                          {/* One paste instead of one row at a time — and it covers the options
+                              no document has carried yet, which the discovered list cannot. */}
+                          <details>
+                            <summary className="cursor-pointer text-xs" style={{ color: '#1b7895' }}>
+                              Paste the whole dropdown instead
+                            </summary>
+                            <div className="mt-2 space-y-2">
+                              <textarea
+                                rows={4}
+                                value={pasteDraft[f.field] ?? ''}
+                                onChange={(e) => setPasteDraft((d) => ({ ...d, [f.field]: e.target.value }))}
+                                placeholder={'One per line, in the order QuickBooks lists them:\nJon\nCody\nJadon\nJason'}
+                                className="w-full rounded-md border px-2 py-1.5 text-sm"
                               />
-                              {!repValues.some((r) => r.value === value) && (
-                                <span className="shrink-0 text-xs text-muted-foreground">not seen yet</span>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-
-                      {/* Add a rep the documents have not carried yet.
-                          The list above can only offer values BuildBridge has actually seen on
-                          the newest 50 estimates and invoices, and QuickBooks does not expose a
-                          dropdown's options to the API without the tier-gated App Foundations
-                          scope. So a rep who has not sold recently is invisible — Rockwood's
-                          dropdown has four and only two have appeared. Values are the dropdown's
-                          positions, 1, 2, 3, 4 in the order they are listed in QuickBooks. */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <Input
-                          value={newRepValue}
-                          placeholder="Value (e.g. 3)"
-                          onChange={(e) => setNewRepValue(e.target.value)}
-                          className="h-8 w-28 shrink-0"
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={!newRepValue.trim() || knownRepValues.includes(newRepValue.trim())}
-                          onClick={() => {
-                            const v = newRepValue.trim();
-                            setExtraRepValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
-                            setNewRepValue('');
-                          }}
-                        >
-                          Add rep value
-                        </Button>
-                        <span className="text-xs text-muted-foreground">
-                          Not in the list? Add its position from the QuickBooks dropdown, then name it.
-                        </span>
-                      </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={savingRepLabel === `paste:${f.field}` || !(pasteDraft[f.field] ?? '').trim()}
+                                onClick={() => pasteFieldOptions(f.field, pasteDraft[f.field])}
+                              >
+                                {savingRepLabel === `paste:${f.field}` ? 'Naming…' : 'Name them in order'}
+                              </Button>
+                              <p className="text-xs text-muted-foreground">
+                                Line 1 becomes option <code>1</code>, line 2 becomes <code>2</code>, and so
+                                on — the order QuickBooks shows in "Edit custom field". Check one against a
+                                real estimate afterwards.
+                              </p>
+                            </div>
+                          </details>
+                        </div>
+                      ))}
                     </div>
                   )}
 
@@ -1425,7 +1507,7 @@ export default function QuickBooks() {
                                 wrong order: the mapping should be ready BEFORE their first
                                 estimate arrives. Named reps show their name. */}
                             {knownRepValues.map((value) => {
-                              const named = repLabelFor(value)?.ghlValue;
+                              const named = repLabelFor(s.qboAssignedUserField ?? '', value)?.ghlValue;
                               const seen = repValues.find((r) => r.value === value);
                               const label = named
                                 ? `${named} (${value})`

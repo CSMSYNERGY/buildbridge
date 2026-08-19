@@ -43,7 +43,8 @@ import {
   latestDocByCustomer,
   extractDocFields,
   docFieldWrites,
-  repDisplayName,
+  optionLabel,
+  customFieldName,
 } from './qbDocFields.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -610,9 +611,11 @@ async function reflectSalesDocStatus(
   // The same catalog, aimed at the linked OPPORTUNITY instead of the contact — the
   // "Update opportunity" step of the GHL workflow this replaces. Update-only.
   const oppFieldMaps = qbMappers.filter((m) => m.mapperType === 'qb_doc_field_opp');
-  // Rep option id → the name the client calls that person. Used for the `repName`
-  // field AND for the rep custom field below, which otherwise writes "2".
-  const repLabelMaps = qbMappers.filter((m) => m.mapperType === 'qb_rep_label');
+  // Dropdown option → the name this company calls it, for ANY custom field, keyed
+  // `<field>::<value>`. Used for the `repName` field, for the rep custom field below
+  // (which otherwise writes "2"), and for every mapped custom field — a client's
+  // "Siding Color" reaches Synergy as "4" without it.
+  const optionLabelMaps = qbMappers.filter((m) => m.mapperType === 'qb_option_label');
   // Synergy fields already spoken for by the QuickBooks-customer field mappings
   // (the "Field mappings" card). A document field must not write into one of those.
   const customerFieldTargets = qbMappers
@@ -857,6 +860,11 @@ async function reflectSalesDocStatus(
   const docValues = new Map(); // qb customer id → extracted values
   if (wantDocFields && repDocs) {
     const latest = latestDocByCustomer(repDocs.estimates, repDocs.invoices);
+    // Only the company's own custom fields that someone actually mapped — reading
+    // the rest off every document would be work nobody asked for.
+    const mappedCustomFields = [...docFieldMaps, ...oppFieldMaps]
+      .map((m) => customFieldName(m.externalKey))
+      .filter(Boolean);
     // The customer RECORDS for this batch, in ONE query. A sales document carries the
     // name and the billing email but never a PHONE, so without this the phone field
     // is permanently blank — the gap Ahsan hit on 2026-08-19 ("i want the phone number
@@ -866,7 +874,8 @@ async function reflectSalesDocStatus(
       docValues.set(customerId, extractDocFields(doc, {
         type,
         repField: repSource,
-        repLabels: repLabelMaps,
+        optionLabels: optionLabelMaps,
+        customFieldNames: mappedCustomFields,
         customer: customers.get(customerId),
       }));
     }
@@ -1021,7 +1030,7 @@ async function reflectSalesDocStatus(
       // Written as the NAME when the tenant has told us what the option id means.
       // Without a rep-name row this is the raw value exactly as before — a dropdown
       // sends "2", and "2" in a Synergy field is what the rep-name list exists to fix.
-      const repOut = rep ? repDisplayName(repLabelMaps, rep) : null;
+      const repOut = rep ? optionLabel(optionLabelMaps, repSource, rep) : null;
       if (repTarget && repOut && String(readField(repTarget) ?? '') !== repOut) {
         writes.push({ id: repTarget, value: repOut });
       }

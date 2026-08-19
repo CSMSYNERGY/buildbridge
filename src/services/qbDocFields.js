@@ -55,6 +55,81 @@ export const DOC_FIELD_CATALOG = [
 
 export const DOC_FIELD_KEYS = DOC_FIELD_CATALOG.map((f) => f.key);
 
+// A company's OWN custom fields, added to the catalog above at runtime.
+//
+// The nineteen fields above are the same for everyone — every QuickBooks document
+// has a number, a customer and a total. Everything a particular business actually
+// tracks is in its custom fields, and those differ per company: Rockwood carries
+// Rep, Siding Color, Trim Color and Roofing Color; the next client will carry
+// something else entirely. They are DISCOVERED from the company's own documents
+// (see collectTxnCustomFieldNames) rather than configured, so a new client can map
+// their own fields the day they connect, with no code and no list to maintain.
+export const CUSTOM_FIELD_PREFIX = 'custom:';
+
+/** Catalog key for one of the company's own custom fields. */
+export function customFieldKey(name) {
+  return `${CUSTOM_FIELD_PREFIX}${String(name ?? '').trim()}`;
+}
+
+/** The custom field NAME behind a catalog key, or null for the built-in fields. */
+export function customFieldName(key) {
+  const k = String(key ?? '');
+  return k.startsWith(CUSTOM_FIELD_PREFIX) ? k.slice(CUSTOM_FIELD_PREFIX.length) : null;
+}
+
+/**
+ * The full mappable catalog for one company: the built-ins, then its own custom
+ * fields in the order they were discovered (most frequently used first).
+ */
+export function docFieldCatalog(customFieldNames = []) {
+  const seen = new Set();
+  const dynamic = [];
+  for (const raw of customFieldNames ?? []) {
+    const name = String(raw ?? '').trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    dynamic.push({
+      key: customFieldKey(name),
+      label: name,
+      description: `A custom field on this company's estimates and invoices. Dropdown fields arrive as an option number — name them below and the name is what Synergy gets.`,
+      custom: true,
+    });
+  }
+  return [...DOC_FIELD_CATALOG, ...dynamic];
+}
+
+/**
+ * Mapper key for one option of one dropdown field: `<field>::<value>`, both
+ * lower-cased so a row typed as "rep::2" matches a document carrying "Rep" / "2".
+ *
+ * Scoped by FIELD because option numbers restart per field — "2" is Cody under Rep
+ * and something else entirely under Siding Color. The rep-only version of this
+ * table could not have told them apart.
+ */
+export function optionLabelKey(fieldName, value) {
+  return `${String(fieldName ?? '').trim().toLowerCase()}::${String(value ?? '').trim().toLowerCase()}`;
+}
+
+/**
+ * What a company calls one option of one dropdown field. Falls back to the raw
+ * value — an unnamed option still syncs, as the number QuickBooks sent.
+ *
+ * This table exists because Intuit does not expose a dropdown's options over any
+ * API we can reach: the modern definitions live behind the App Foundations scope
+ * (tier-gated, 403 on every company we have), and even that query returns labels
+ * for the FIELD, not for its options. So the names have to come from the person who
+ * can see the dropdown. Once per option, for any field, for any client.
+ */
+export function optionLabel(mappings, fieldName, value) {
+  const raw = str(value);
+  if (!raw) return null;
+  const want = optionLabelKey(fieldName, raw);
+  const hit = (Array.isArray(mappings) ? mappings : []).find(
+    (m) => m && m.ghlValue && String(m.externalKey ?? '').trim().toLowerCase() === want,
+  );
+  return hit ? String(hit.ghlValue) : raw;
+}
+
 /** Trimmed string, or null for anything empty/absent. Keeps blanks out of the CRM. */
 function str(v) {
   if (v == null) return null;
@@ -133,22 +208,12 @@ export function shippingParts(addr, fullName) {
 }
 
 /**
- * The rep's display name: the tenant's `qb_rep_label` mapping for this value, else
- * the value itself.
- *
- * The mapping exists because a QuickBooks dropdown puts the OPTION ID on the
- * document — Rockwood's reps arrive as "1".."4", and nobody outside their books can
- * turn that into a name. Matching is trimmed and case-insensitive so a row typed as
- * "cody" still matches "Cody".
+ * The rep's display name — one instance of `optionLabel`, kept as its own function
+ * because the rep is the one dropdown value the sync ALSO uses for a decision
+ * (which Synergy user owns the lead), not just for display.
  */
-export function repDisplayName(labelMappings, repValue) {
-  const raw = str(repValue);
-  if (!raw) return null;
-  const want = raw.toLowerCase();
-  const hit = (Array.isArray(labelMappings) ? labelMappings : []).find(
-    (m) => m && m.ghlValue && String(m.externalKey ?? '').trim().toLowerCase() === want,
-  );
-  return hit ? String(hit.ghlValue) : raw;
+export function repDisplayName(labelMappings, repValue, repField = 'rep') {
+  return optionLabel(labelMappings, repField, repValue);
 }
 
 /**
@@ -165,9 +230,13 @@ export function repDisplayName(labelMappings, repValue) {
  * @returns {Object<string, ?string>} Keyed by DOC_FIELD_CATALOG key; null = nothing
  *                                    to write for this field.
  */
-export function extractDocFields(doc, { customer, repField, repLabels, type } = {}) {
+export function extractDocFields(doc, {
+  customer, repField, repLabels, type, optionLabels, customFieldNames = [],
+} = {}) {
   const d = doc ?? {};
   const cust = customer ?? d.Customer ?? {};
+  // `repLabels` is the historical name for the same rows; either may be passed.
+  const labels = optionLabels ?? repLabels;
 
   const lines = lineItemsOf(d);
   const firstSalesLine = lines.find((l) => l?.DetailType === 'SalesItemLineDetail');
@@ -188,7 +257,19 @@ export function extractDocFields(doc, { customer, repField, repLabels, type } = 
 
   const rep = repField ? str(qbCustomFieldValue(findQbCustomField(d, repField))) : null;
 
+  // The company's own custom fields, named where a name exists. A dropdown sends an
+  // option number, so without the label table a client's "Siding Color" reaches
+  // Synergy as "4" — the same defect the rep had, one field over.
+  const custom = {};
+  for (const raw of customFieldNames ?? []) {
+    const name = String(raw ?? '').trim();
+    if (!name) continue;
+    const value = str(qbCustomFieldValue(findQbCustomField(d, name)));
+    custom[customFieldKey(name)] = value ? optionLabel(labels, name, value) : null;
+  }
+
   return {
+    ...custom,
     documentNumber: number,
     documentId: id,
     docType: invoice ? 'invoice' : 'estimate',
@@ -211,8 +292,43 @@ export function extractDocFields(doc, { customer, repField, repLabels, type } = 
     shippingCityStateZip: ship.cityStateZip,
     shippingFull: ship.full,
     rep,
-    repName: repDisplayName(repLabels, rep),
+    repName: optionLabel(labels, repField ?? 'rep', rep),
   };
+}
+
+/**
+ * Every distinct value each custom field has carried, with the name the tenant has
+ * given it — the data behind the "name your dropdown values" editor.
+ *
+ * Discovered, not configured: whatever a company's documents carry is what needs
+ * naming, so this works the same on the first client and the twentieth. A field that
+ * is free text rather than a dropdown simply shows its values and needs no names.
+ *
+ * @returns {Array<{field: string, values: Array<{value: string, label: ?string, count: number}>}>}
+ */
+export function optionsByField(estimates = [], invoices = [], labelMappings = []) {
+  const byField = new Map(); // lower(field) -> { field, values: Map(value -> count) }
+  for (const doc of [...(estimates ?? []), ...(invoices ?? [])]) {
+    for (const cf of doc?.CustomField ?? []) {
+      const field = String(cf?.Name ?? '').trim();
+      const value = str(qbCustomFieldValue(cf));
+      if (!field || !value) continue;
+      const key = field.toLowerCase();
+      const hit = byField.get(key) ?? { field, values: new Map() };
+      hit.values.set(value, (hit.values.get(value) ?? 0) + 1);
+      byField.set(key, hit);
+    }
+  }
+
+  return [...byField.values()].map((f) => ({
+    field: f.field,
+    values: [...f.values.entries()]
+      .map(([value, count]) => {
+        const named = optionLabel(labelMappings, f.field, value);
+        return { value, label: named === value ? null : named, count };
+      })
+      .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value)),
+  })).sort((a, b) => a.field.localeCompare(b.field));
 }
 
 /**
