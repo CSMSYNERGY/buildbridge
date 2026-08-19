@@ -166,9 +166,15 @@ Add and wire into `src/core/env.js` (envalid schema) and the fail-fast checks in
    superseded note in §5.8.
 6. ✅ **Estimate/invoice field mapping (2026-08-19)** — two more mapper types, both self-serve
    from BuildBridge → QuickBooks, no migration (the generic `mappers` table already fits):
-   **`qb_doc_field`** (`externalKey` = a key from `DOC_FIELD_CATALOG` in
-   `src/services/qbDocFields.js`, `ghlValue` = the Synergy field id) and **`qb_rep_label`**
-   (`externalKey` = the rep value QuickBooks sends, `ghlValue` = the name that company uses).
+   **`qb_doc_field`** (`externalKey` = a catalog key from `src/services/qbDocFields.js`,
+   `ghlValue` = the Synergy field id) and **`qb_option_label`** (`externalKey` =
+   `<field>::<option value>`, lower-cased; `ghlValue` = what that company calls the option).
+   The catalog is the 19 built-ins **plus the company's own custom fields**, discovered from its
+   own documents (`optionsByField` / `docFieldCatalog`) and keyed `custom:<Field Name>` — so this
+   is per-tenant configuration, never a per-client code change. Dropdown fields send an option
+   NUMBER and Intuit exposes no way to read the option list (the App Foundations definitions
+   endpoint is tier-gated and returns the field's label, not its options), so option names are
+   typed once per company: one row at a time, or by pasting the dropdown in order.
    This is the port of the code node that ran inside Rockwood's GHL workflows behind the three
    Zapier Zaps — same 19 values (document number/id, doc type, estimate vs invoice ids, subtotal,
    first line description, document link, customer name/email/phone, the three shipping parts,
