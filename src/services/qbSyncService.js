@@ -48,6 +48,7 @@ import {
   docFieldWrites,
   optionLabel,
   customFieldName,
+  optionsByField,
 } from './qbDocFields.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -851,6 +852,27 @@ async function reflectSalesDocStatus(
   // makes what was an afternoon of inference a single line in the log.
   //
   // Ids and option numbers only — no names, nothing about the customer.
+  // The whole custom-field inventory this company's documents carry: every field,
+  // every distinct option number, how often each appears, and the name if one is set.
+  //
+  // Free — it reads the documents the pass already fetched — and it is the answer to
+  // the question that cost most of 2026-08-19: "what numbers does this dropdown
+  // actually use?" QuickBooks will not say, its definitions API is tier-gated, and
+  // the config page can only be read by someone logged in. A line in the log can be
+  // read by whoever is debugging, which on that day was the difference between
+  // knowing and inferring.
+  //
+  // Option NUMBERS and field names only. A rep's name appears only if the tenant
+  // typed it here themselves.
+  if (repDocs) {
+    for (const f of optionsByField(repDocs.estimates, repDocs.invoices, optionLabelMaps)) {
+      const inventory = f.values
+        .map((v) => `${v.value}${v.label ? `=${v.label}` : ''} ×${v.count}`)
+        .join(', ');
+      console.log(`[rockwood] field "${f.field}" values in use — ${inventory}`);
+    }
+  }
+
   if (repSource && allNews.size) {
     const seen = [...allNews.keys()].filter((id) => reps.has(id)).map((id) => `${id}:${reps.get(id)}`);
     if (seen.length) {
