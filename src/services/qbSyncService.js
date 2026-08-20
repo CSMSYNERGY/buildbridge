@@ -1264,12 +1264,40 @@ async function reflectSalesDocStatus(
         // Merge into existing custom fields so a write never wipes the other's field.
         let customFields = existing?.contact?.customFields;
         for (const w of writes) customFields = mergeCustomFields(customFields, w);
-        await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, {
+        const payload = {
           ...(writes.length ? { customFields } : {}),
           ...(assignTo ? { assignedTo: assignTo } : {}),
           ...(phoneWrite ? { phone: phoneWrite } : {}),
-        });
-        if (phoneWrite) stats.qbPhoneBackfilled += 1;
+        };
+        // The PHONE is the only part of this that Synergy can refuse.
+        //
+        // A location with duplicate-blocking on rejects an update whose phone already
+        // belongs to a different contact — "This location does not allow duplicated
+        // contacts", HTTP 400. That is a fair refusal, but it takes the WHOLE PUT
+        // down with it, so a rep assignment and a set of document fields were being
+        // lost over a phone number: 4 rejections on Rockwood's test contact between
+        // 2026-08-19 17:15 and 2026-08-20 11:30, and no owner ever changed.
+        //
+        // Retried once without it. The phone is the optional half — the fields and
+        // the owner are what someone configured — and a number Synergy already holds
+        // on another contact is one it does not need from us.
+        let phoneRefused = false;
+        try {
+          await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
+        } catch (err) {
+          const duplicate = err.ghlDuplicateContactId
+            || /duplicated contacts/i.test(err.ghlReason ?? err.message ?? '');
+          if (!phoneWrite || !duplicate) throw err;
+          phoneRefused = true;
+          delete payload.phone;
+          if (Object.keys(payload).length === 0) throw err;
+          await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
+        }
+        if (phoneRefused) {
+          stats.qbPhoneRefusedAsDuplicate += 1;
+          console.warn(`[rockwood] Synergy refused the phone for contact ${link.ghlId} as a duplicate — wrote everything else`);
+        }
+        if (phoneWrite && !phoneRefused) stats.qbPhoneBackfilled += 1;
         if (assignTo) stats.qbRepAssigned = (stats.qbRepAssigned ?? 0) + 1;
         if (writes.some((w) => w.id === repTarget)) stats.qbRepUpdated = (stats.qbRepUpdated ?? 0) + 1;
         if (docWrites.length) {
@@ -1892,6 +1920,9 @@ export async function syncLocation(locationId, settings) {
     qbDocFieldContacts: 0,
     // Contacts that had no phone in Synergy and got the one QuickBooks holds.
     qbPhoneBackfilled: 0,
+    // Phones Synergy refused because another contact already holds that number. The
+    // rest of the write still went through — see the retry in the visit loop.
+    qbPhoneRefusedAsDuplicate: 0,
     // Existing opportunities updated with mapped estimate/invoice values. BuildBridge
     // never CREATES one from QuickBooks (Ahsan, 2026-08-19) — a deal that does not
     // exist in Synergy is not a deal, and creating one would also hand the GHL→QB half
