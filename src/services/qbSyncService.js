@@ -1310,6 +1310,7 @@ async function reflectSalesDocStatus(
         // the owner are what someone configured — and a number Synergy already holds
         // on another contact is one it does not need from us.
         let phoneRefused = false;
+        let duplicateHolderId = null;
         try {
           await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
         } catch (err) {
@@ -1317,13 +1318,32 @@ async function reflectSalesDocStatus(
             || /duplicated contacts/i.test(err.ghlReason ?? err.message ?? '');
           if (!phoneWrite || !duplicate) throw err;
           phoneRefused = true;
+          duplicateHolderId = err.ghlDuplicateContactId ?? null;
           delete payload.phone;
           if (Object.keys(payload).length === 0) throw err;
           await makeGhlRequest(locationId, 'PUT', `/contacts/${link.ghlId}`, payload);
         }
         if (phoneRefused) {
           stats.qbPhoneRefusedAsDuplicate += 1;
-          console.warn(`[rockwood] Synergy refused the phone for contact ${link.ghlId} as a duplicate — wrote everything else`);
+          const holder = duplicateHolderId ? ` (held by contact ${duplicateHolderId})` : '';
+          console.warn(`[rockwood] Synergy refused the phone for contact ${link.ghlId} as a duplicate${holder} — wrote everything else`);
+          // Durable and tenant-visible, because only the tenant can resolve it: two
+          // contacts claim one number and BuildBridge cannot know which is right.
+          // Ids only — the NUMBER is customer data and stays out of the log.
+          await recordError({
+            source: 'cron',
+            kind: 'ghl_phone_duplicate',
+            appSlug: 'quickbooks',
+            locationId,
+            upstream: 'ghl',
+            message: `Synergy refused the QuickBooks phone number for contact ${link.ghlId} because another contact already holds that number${holder} and this location blocks duplicates. The owner and fields were still written. To let the number through: merge or correct the two contacts in Synergy, or allow duplicate contacts in location settings; it will copy on the customer's next change.`,
+            context: {
+              job: 'rockwood-quickbooks-sync',
+              ghlContactId: String(link.ghlId),
+              holderContactId: duplicateHolderId ?? null,
+              qbCustomerId: String(customerId),
+            },
+          });
         }
         if (phoneWrite && !phoneRefused) stats.qbPhoneBackfilled += 1;
         if (assignTo) stats.qbRepAssigned = (stats.qbRepAssigned ?? 0) + 1;
