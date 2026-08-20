@@ -138,6 +138,8 @@ export const SETUP_GAP_TEXT = {
     'Some QuickBooks salesperson names are not matched to a Synergy user, so those contacts were left unassigned rather than assigned to the wrong person. Map them in BuildBridge → QuickBooks.',
   qbo_item_mapping_missing:
     'No QuickBooks item is set for billing these deals, so their estimates cannot be created — QuickBooks requires an item and an estimate has no default to fall back on. Set one in BuildBridge → QuickBooks; skipped deals are picked up again automatically once it is.',
+  ghl_opportunity_field_invalid:
+    'An estimate/invoice value could not be copied into a Synergy opportunity field because that field only accepts values from its own option list. The other mapped fields still synced. In BuildBridge → QuickBooks, point that mapping at a text-type Synergy field instead, or make the option list match the values QuickBooks sends.',
   ghl_phone_duplicate:
     'A phone number from QuickBooks was not copied because another Synergy contact already holds that number and this location blocks duplicate contacts. Everything else synced normally. Merge or correct the two contacts in Synergy — or allow duplicate contacts in location settings — and the number will copy on the customer’s next change.',
 };

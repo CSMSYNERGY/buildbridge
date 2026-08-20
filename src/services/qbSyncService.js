@@ -609,10 +609,52 @@ async function reflectDocFieldsToOpportunity(
   // overwrites the only evidence of whether this deal already had an unpushed edit.
   const updatedBefore = opp.updatedAt ?? opp.dateUpdated;
 
-  await makeGhlRequest(locationId, 'PUT', `/opportunities/${opp.id}`, {
-    customFields: writes.map((w) => ({ id: w.id, field_value: w.value })),
-  });
-  stats.qbOppFieldsUpdated += writes.length;
+  // Write what Synergy will take, and name what it will not. A Synergy field with a
+  // fixed option list (a picklist) rejects free text with `Invalid Custom Field
+  // Value "…" for "<fieldId>"` — and the 400 takes every OTHER field in the PUT down
+  // with it, so one mis-mapped field silently cost the whole write on every pass
+  // (observed live 2026-08-20, first-line description → picklist y5HdUniQsCE8…).
+  // Same rule as the duplicate phone: drop the part Synergy refuses, keep the rest,
+  // and put the refusal where the tenant can see it — only they can re-map it.
+  let pending = writes;
+  const rejected = [];
+  while (pending.length) {
+    try {
+      await makeGhlRequest(locationId, 'PUT', `/opportunities/${opp.id}`, {
+        customFields: pending.map((w) => ({ id: w.id, field_value: w.value })),
+      });
+      break;
+    } catch (err) {
+      const status = err.upstreamStatus ?? err.status;
+      const m = /Invalid Custom Field Value[\s\S]*for\s+"?([A-Za-z0-9]{8,})"?\s*$/i
+        .exec(err.ghlReason ?? err.message ?? '');
+      const bad = status === 400 && m ? pending.find((w) => w.id === m[1]) : null;
+      if (!bad) throw err; // not the invalid-value shape — the caller's catch reports it
+      rejected.push(bad);
+      pending = pending.filter((w) => w.id !== bad.id);
+    }
+  }
+  stats.qbOppFieldsUpdated += pending.length;
+  if (rejected.length) {
+    stats.qbOppFieldsInvalid += rejected.length;
+    // Which QuickBooks field feeds each rejected target, so the fix is a re-map,
+    // not a hunt. Field ids and catalog keys only.
+    const detail = rejected.map((w) => {
+      const map = oppFieldMaps.find((x) => x.ghlValue === w.id);
+      return `${map?.externalKey ?? '(unknown)'} → ${w.id}`;
+    }).join('; ');
+    await recordError({
+      source: 'cron',
+      kind: 'ghl_opportunity_field_invalid',
+      appSlug: 'quickbooks',
+      locationId,
+      upstream: 'ghl',
+      message: `Synergy rejected ${rejected.length} opportunity field value(s) because the target field only accepts values from its own option list (mappings: ${detail}). The other fields were still written. Map that QuickBooks value to a TEXT-type Synergy field instead, or make the option list match — in BuildBridge → QuickBooks, Estimate & invoice fields.`,
+      context: { job: 'rockwood-quickbooks-sync', ghlOpportunityId: String(opp.id), mappings: detail },
+    });
+  }
+  // Nothing landed ⇒ nothing to echo-suppress; the next pass retries the same way.
+  if (pending.length === 0) return;
 
   // Echo marker, not an identity mapping — hence ghlId === qbId === the opportunity
   // id, which also means the two unique indexes on this table can never disagree
@@ -2053,6 +2095,8 @@ export async function syncLocation(locationId, settings) {
     // BuildBridge does not create deals.
     qbOppNotFound: 0,
     qbOppFieldsFailed: 0,
+    // Values Synergy refused because the target field only accepts its own options.
+    qbOppFieldsInvalid: 0,
     // Contacts whose rep is known and mapped but who had no news this pass, so their
     // Synergy owner was deliberately left alone. Expected to be large on the first
     // passes after the toggle goes on — that is the backfill NOT happening.
