@@ -279,7 +279,15 @@ export async function getQuickBooksDocFields(req, res, next) {
     let estimates = [];
     let invoices = [];
     try {
-      ({ estimates, invoices } = await getRecentSalesDocs(locationId, 5, { links: true }));
+      // 300 of each, not 5. This one request answers two different questions and the
+      // second one needs history: the field SAMPLES only need the newest document,
+      // but the dropdown OPTIONS are discovered by seeing which numbers appear —
+      // and an option that has not been used lately simply does not show up. At a
+      // sample of 5 that made "not seen yet" meaningless, and it is the label
+      // someone reads when deciding which number belongs to which name. This page is
+      // opened by hand, so two larger queries are affordable here in a way they are
+      // not inside the 15-minute sync.
+      ({ estimates, invoices } = await getRecentSalesDocs(locationId, 300, { links: true }));
     } catch (err) {
       console.warn(`[quickbooks] doc-field preview read failed: ${err?.message}`);
       return res.json({ fields: catalog, options: [], sampledFrom: null, repField, unavailable: true });
@@ -329,6 +337,10 @@ export async function getQuickBooksDocFields(req, res, next) {
     res.json({
       fields: fullCatalog.map((f) => ({ ...f, sample: merged[f.key] })),
       options,
+      // How much history the option counts are based on, so the page can say
+      // "across 218 documents" rather than leaving "not seen yet" to be read as
+      // "never used" — which is exactly how the wrong rep number was chosen.
+      scanned: { estimates: estimates.length, invoices: invoices.length },
       sampledFrom: {
         estimateNumber: estValues.documentNumber ?? null,
         invoiceNumber: invValues.documentNumber ?? null,

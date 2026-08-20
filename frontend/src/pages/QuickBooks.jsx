@@ -148,6 +148,9 @@ export default function QuickBooks() {
   // documents — the difference between mapping a name and mapping a known value.
   const [docFields, setDocFields] = useState([]);
   const [docSampledFrom, setDocSampledFrom] = useState(null);
+  // How many documents the option counts were drawn from — the difference between
+  // "this option is unused" and "we did not look far enough".
+  const [docScanned, setDocScanned] = useState(null);
   const [docFieldsUnavailable, setDocFieldsUnavailable] = useState(false);
   const [docMaps, setDocMaps] = useState([]);
   const [savingDocField, setSavingDocField] = useState(null); // the key being saved
@@ -295,6 +298,7 @@ export default function QuickBooks() {
           setDocFields(d.fields ?? []);
           setFieldOptions(d.options ?? []);
           setDocSampledFrom(d.sampledFrom ?? null);
+          setDocScanned(d.scanned ?? null);
           setDocFieldsUnavailable(!!d.unavailable);
         })
         .catch(() => setDocFieldsUnavailable(true)),
@@ -1460,6 +1464,18 @@ export default function QuickBooks() {
                           <p className="text-sm font-medium" style={{ color: '#3d3672' }}>
                             Naming the options of <strong>{f.field}</strong>
                           </p>
+                          {/* Say how far back we looked. "Not seen yet" is only worth
+                              anything next to the size of the window it was measured in —
+                              read against five documents it meant nothing, and it is the
+                              label someone uses to decide which number is which. */}
+                          {docScanned && (
+                            <p className="text-xs text-muted-foreground">
+                              Counts are from this company's last {docScanned.estimates} estimate
+                              {docScanned.estimates === 1 ? '' : 's'} and {docScanned.invoices} invoice
+                              {docScanned.invoices === 1 ? '' : 's'}. An option that appears on none of
+                              them is either unused or older than that.
+                            </p>
+                          )}
                           <ul className="space-y-2">
                             {f.values.map(({ value, seen, count }) => {
                               const key = optionKey(f.field, value);

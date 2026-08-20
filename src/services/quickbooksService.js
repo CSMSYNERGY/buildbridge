@@ -648,7 +648,12 @@ export async function getCustomFieldDefinitions(locationId) {
  */
 export async function getRecentSalesDocs(locationId, sample = 50, { links = false } = {}) {
   assertConfigured();
-  const n = Math.min(Math.max(Number(sample) || 50, 1), 100);
+  // Up to QuickBooks' own per-query maximum. The old ceiling of 100 was a guess that
+  // quietly became a limit on what could be LEARNED: a dropdown option only reveals
+  // its number by appearing on a document, so a short window means an option that has
+  // not sold recently looks like it does not exist. Callers that want a definitive
+  // answer ask for a big window; the sync still asks for 50.
+  const n = Math.min(Math.max(Number(sample) || 50, 1), 1000);
   // `include=enhancedAllCustomFields` is the whole ballgame. Without it the response
   // carries ONLY the three legacy sales-form slots — and Intuit maps those
   // immutably, so they come back even when marked inactive, which is exactly the
