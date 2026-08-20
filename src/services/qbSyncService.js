@@ -421,11 +421,14 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
     try {
       existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`);
     } catch (err) {
-      if ((err.upstreamStatus ?? err.status) === 404) {
+      const status = err.upstreamStatus ?? err.status;
+      if (status === 404 || /not\s*found/i.test(err.ghlReason ?? err.message ?? '')) {
         await deleteLink(linkIndex, link);
         link = null;
         stats.qbContactsRelinked += 1;
         console.log(`[rockwood] contact for QB customer ${customer.Id} was deleted in Synergy — recreating`);
+      } else {
+        console.warn(`[rockwood] contact read failed for QB customer ${customer.Id}: HTTP ${status ?? '?'} — ${err.ghlReason ?? err.message}`);
       }
     }
   }
@@ -1173,9 +1176,19 @@ async function reflectSalesDocStatus(
       if (isFresh) freshVisited += 1; else visited += 1;
       // Don't downgrade: read the contact's current status value first.
       let deletedInSynergy = false;
+      // "Gone" is detected by the reason as well as the status: GHL is not
+      // consistent about which 4xx a deleted contact earns, and a missed detection
+      // here recreates the 2026-08-20 hole — a dead link silently skipped forever.
+      // Anything else is LOGGED with its status and reason, because a swallowed
+      // `.catch(() => null)` is why that hole took a day to see.
       const readContact = () => makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
         .catch((err) => {
-          if ((err.upstreamStatus ?? err.status) === 404) deletedInSynergy = true;
+          const status = err.upstreamStatus ?? err.status;
+          if (status === 404 || /not\s*found/i.test(err.ghlReason ?? err.message ?? '')) {
+            deletedInSynergy = true;
+          } else {
+            console.warn(`[rockwood] contact read failed for ${link.ghlId}: HTTP ${status ?? '?'} — ${err.ghlReason ?? err.message}`);
+          }
           return null;
         });
       let existing = await readContact();
