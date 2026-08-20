@@ -488,6 +488,34 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
       adopted = true;
       stats.qbToGhlContactsAdopted++;
       console.log(`[rockwood] adopted existing GHL contact for QB customer ${customer.Id}`);
+
+      // ADOPT AND UPDATE. Ahsan, 2026-08-20: "you have to update the contact if it
+      // is already created."
+      //
+      // This resolves a question the code had deliberately left open: adoption used
+      // to link the matched contact and write NOTHING to it, because Synergy matched
+      // it on a PHONE and a phone is not an identity — shed businesses share a
+      // household or office line, so the match could be a different person. That
+      // caution left a real cost, though: a customer QuickBooks knows about sat in
+      // Synergy with none of their QuickBooks values, forever, because the one pass
+      // that would have written them declined to.
+      //
+      // The phone is excluded from the update for the same reason it caused the
+      // rejection: Synergy already has it on someone. Everything else — name, email,
+      // address, mapped custom fields — is what QuickBooks knows about this customer,
+      // and QuickBooks is the source of truth for it.
+      try {
+        const { phone, ...safeBase } = base;
+        await makeGhlRequest(locationId, 'PUT', `/contacts/${ghlId}`, {
+          ...safeBase,
+          ...(cfEntries.length ? { customFields: cfEntries } : {}),
+        });
+        stats.qbToGhlContactsUpdated++;
+      } catch (updateErr) {
+        // Never fatal: the link is what the rest of the sync needs, and it is already
+        // established by the time this runs.
+        console.warn(`[rockwood] adopted contact ${ghlId} but could not update it: ${updateErr.message}`);
+      }
     }
   }
 
