@@ -241,6 +241,18 @@ async function upsertLink(linkIndex, locationId, entityType, ghlId, qbId, lastPu
   return row;
 }
 
+// Forget a link whose Synergy side no longer exists. A link is BuildBridge's only
+// notion of "this customer has a contact", so a contact deleted by hand in Synergy
+// leaves a pointer to nothing: every read 404s, every visit skips, and the customer
+// can never be re-created because having a link is what routes away from the create
+// path. Observed 2026-08-20 when Ahsan deleted both Carolyn Miller contacts to clear
+// a duplicate phone — the sync then reported "cannot see any contact" forever.
+async function deleteLink(linkIndex, link) {
+  await db.delete(qbSyncLinks).where(eq(qbSyncLinks.id, link.id));
+  linkIndex.delete(`${link.entityType}:ghl:${link.ghlId}`);
+  linkIndex.delete(`${link.entityType}:qb:${link.qbId}`);
+}
+
 // Advances the link's echo-suppression cursor. Mutating the row object also
 // updates the pass's link index (it holds the same reference), so a write in
 // one half is not re-detected as a fresh change by the other half.
@@ -392,17 +404,33 @@ async function syncQbCustomersToGhl(locationId, customers, stats, cfg, deadlineA
  */
 async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCustomFields, linkIndex }) {
   const qbUpdatedAt = customer.MetaData?.LastUpdatedTime;
-  const link = lookupLink(linkIndex, 'contact', { qbId: customer.Id });
+  let link = lookupLink(linkIndex, 'contact', { qbId: customer.Id });
 
   if (isEcho(qbUpdatedAt, link)) return;
 
   const cfEntries = contactCustomFields(customer);
   const base = qbCustomerToGhlContact(customer);
 
+  // Fetch GHL side for the LWW comparison. A 404 means the contact was DELETED in
+  // Synergy: forget the link and fall through to the create path below, as if this
+  // customer had never been synced — because as far as Synergy is concerned, they
+  // haven't. Any other failure keeps the old behaviour (a transient read must not
+  // tear down a valid link).
+  let existing = null;
   if (link) {
-    // Fetch GHL side for the LWW comparison
-    const existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
-      .catch(() => null);
+    try {
+      existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`);
+    } catch (err) {
+      if ((err.upstreamStatus ?? err.status) === 404) {
+        await deleteLink(linkIndex, link);
+        link = null;
+        stats.qbContactsRelinked += 1;
+        console.log(`[rockwood] contact for QB customer ${customer.Id} was deleted in Synergy — recreating`);
+      }
+    }
+  }
+
+  if (link) {
     const ghlUpdatedAt = existing?.contact?.dateUpdated ?? existing?.contact?.updatedAt;
     if (targetIsNewer(qbUpdatedAt, ghlUpdatedAt)) return; // GHL wins; other pass pushes it
 
@@ -1144,15 +1172,46 @@ async function reflectSalesDocStatus(
 
       if (isFresh) freshVisited += 1; else visited += 1;
       // Don't downgrade: read the contact's current status value first.
-      let existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
-        .catch(() => null);
+      let deletedInSynergy = false;
+      const readContact = () => makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
+        .catch((err) => {
+          if ((err.upstreamStatus ?? err.status) === 404) deletedInSynergy = true;
+          return null;
+        });
+      let existing = await readContact();
       // One retry, and only for a contact with news. A rate-limited read costs this
       // contact its assignment for good (the cursor moves past the document that made
       // it fresh), so one extra request is cheap insurance against a 429 that the
       // routine path can simply shrug off and redo next pass.
-      if (!existing && isFresh) {
-        existing = await makeGhlRequest(locationId, 'GET', `/contacts/${link.ghlId}`)
-          .catch(() => null);
+      if (!existing && isFresh && !deletedInSynergy) {
+        existing = await readContact();
+      }
+      // 404 is not a failed read — it is Synergy saying the contact is GONE, deleted
+      // by hand. The link is the only reason this loop believed one existed, so drop
+      // it and rebuild from the QuickBooks record (in hand for any customer with
+      // news) through the same create-or-adopt path as always. Without this, a
+      // deleted contact is a permanent hole: every pass reads a dead id, skips, and
+      // never creates, precisely because the link routes away from the create path.
+      if (deletedInSynergy) {
+        await deleteLink(linkIndex, link);
+        const record = newsCustomers.get(String(customerId));
+        if (record) {
+          try {
+            await syncOneQbCustomerToGhl(locationId, record, stats, {
+              contactCustomFields: () => [],
+              linkIndex,
+            });
+            link = lookupLink(linkIndex, 'contact', { qbId: customerId });
+            if (link) {
+              stats.qbContactsRelinked += 1;
+              console.log(`[rockwood] recreated the Synergy contact for QB customer ${customerId}`);
+              deletedInSynergy = false;
+              existing = await readContact();
+            }
+          } catch (err) {
+            console.warn(`[rockwood] could not recreate the contact for QB customer ${customerId}: ${err.message}`);
+          }
+        }
       }
       // A failed read is NOT an empty contact. Every decision below is a comparison
       // against what Synergy currently holds — don't downgrade the status, don't
@@ -1994,6 +2053,9 @@ export async function syncLocation(locationId, settings) {
     // Contacts linked on the spot because a document changed for a customer the
     // customer half had never seen change. Without this they are invisible forever.
     qbContactsAdoptedForNews: 0,
+    // Links dropped because their Synergy contact was deleted by hand, then rebuilt
+    // through the ordinary create-or-adopt path.
+    qbContactsRelinked: 0,
     // Contacts WITH news that still ran out of budget. Unlike the routine deferral
     // above this one loses work: the cursor moves past the document that made them
     // fresh. Non-zero means FRESH_VISITS_PER_PASS is too small for this tenant.
