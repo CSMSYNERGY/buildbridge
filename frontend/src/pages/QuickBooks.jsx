@@ -2064,6 +2064,17 @@ export default function QuickBooks() {
                   The field list could not be loaded. Reload the page.
                 </p>
               )}
+              {/* Asked in so many words on 2026-08-21: "I don't see contact name, phone,
+                  email, opportunity name in the dropdown." They are not there because they
+                  are not MAPPED — they are written automatically, and saying so here beats
+                  every tenant discovering it by asking. */}
+              <p className="rounded-md px-2.5 py-2 text-xs" style={{ backgroundColor: '#f0f9fb', border: '1px solid #cdeaf1', color: '#1b5f75' }}>
+                <strong>Standard fields are not in these dropdowns because they are automatic.</strong>{' '}
+                The contact's name, email, phone and address always come from the QuickBooks
+                customer — no mapping needed. The opportunity's <strong>name</strong> and{' '}
+                <strong>value</strong> are set in the box below. These dropdowns only decide where
+                the remaining document values go, which is why they list custom fields.
+              </p>
               <p className="pt-1 text-xs text-muted-foreground">
                 Nothing is copied until you pick a Synergy field, and clearing one back to
                 "Don't copy" stops it — the value already written stays where it is.
