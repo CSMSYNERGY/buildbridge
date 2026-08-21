@@ -49,6 +49,7 @@ import {
   optionLabel,
   customFieldName,
   optionsByField,
+  renderTemplate,
 } from './qbDocFields.js';
 
 // QBO Change Data Capture only reaches back 30 days; first sync starts there.
@@ -596,6 +597,7 @@ async function findContactOpportunity(locationId, contactId, pipelineId) {
 // opportunity is touched: no stage, no name, no monetary value, no status.
 async function reflectDocFieldsToOpportunity(
   locationId, contactId, values, oppFieldMaps, cfg, linkIndex, stats, since,
+  { nameTemplate = null, valueSource = null } = {},
 ) {
   const opp = await findContactOpportunity(locationId, contactId, cfg?.qboContactSyncPipelineId ?? null);
   if (!opp) {
@@ -603,7 +605,19 @@ async function reflectDocFieldsToOpportunity(
     return;
   }
   const writes = docFieldWrites(values, oppFieldMaps, opp.customFields ?? []);
-  if (writes.length === 0) return;
+
+  // The deal's NAME and VALUE, from tenant configuration — the "Update opportunity"
+  // step of the workflow this replaces named the deal "{first name} {first line}".
+  // Sent only when they actually CHANGE: a same-value write still bumps the deal's
+  // updatedAt, which the echo machinery then has to explain away every pass.
+  const renderedName = renderTemplate(nameTemplate, values);
+  const nameWrite = renderedName && renderedName !== String(opp.name ?? '').trim() ? renderedName : null;
+  const renderedValue = valueSource != null ? Number(values?.[valueSource]) : NaN;
+  const valueWrite = Number.isFinite(renderedValue) && renderedValue !== Number(opp.monetaryValue ?? NaN)
+    ? renderedValue
+    : null;
+
+  if (writes.length === 0 && !nameWrite && valueWrite == null) return;
 
   // What Synergy said BEFORE we touched it. Read first, because the write below
   // overwrites the only evidence of whether this deal already had an unpushed edit.
@@ -616,12 +630,21 @@ async function reflectDocFieldsToOpportunity(
   // (observed live 2026-08-20, first-line description → picklist y5HdUniQsCE8…).
   // Same rule as the duplicate phone: drop the part Synergy refuses, keep the rest,
   // and put the refusal where the tenant can see it — only they can re-map it.
+  // Name and value ride in every attempt — a picklist rejection can only name a
+  // custom field, so peeling custom fields never strips them.
+  const topLevel = {
+    ...(nameWrite ? { name: nameWrite } : {}),
+    ...(valueWrite != null ? { monetaryValue: valueWrite } : {}),
+  };
   let pending = writes;
   const rejected = [];
-  while (pending.length) {
+  let attempted = false;
+  while (pending.length || (!attempted && Object.keys(topLevel).length)) {
+    attempted = true;
     try {
       await makeGhlRequest(locationId, 'PUT', `/opportunities/${opp.id}`, {
-        customFields: pending.map((w) => ({ id: w.id, field_value: w.value })),
+        ...topLevel,
+        ...(pending.length ? { customFields: pending.map((w) => ({ id: w.id, field_value: w.value })) } : {}),
       });
       break;
     } catch (err) {
@@ -635,6 +658,8 @@ async function reflectDocFieldsToOpportunity(
     }
   }
   stats.qbOppFieldsUpdated += pending.length;
+  if (nameWrite) stats.qbOppNameSet += 1;
+  if (valueWrite != null) stats.qbOppValueSet += 1;
   if (rejected.length) {
     stats.qbOppFieldsInvalid += rejected.length;
     // Which QuickBooks field feeds each rejected target, so the fix is a re-map,
@@ -654,7 +679,7 @@ async function reflectDocFieldsToOpportunity(
     });
   }
   // Nothing landed ⇒ nothing to echo-suppress; the next pass retries the same way.
-  if (pending.length === 0) return;
+  if (pending.length === 0 && !nameWrite && valueWrite == null) return;
 
   // Echo marker, not an identity mapping — hence ghlId === qbId === the opportunity
   // id, which also means the two unique indexes on this table can never disagree
@@ -727,12 +752,20 @@ async function reflectSalesDocStatus(
   // (which otherwise writes "2"), and for every mapped custom field — a client's
   // "Siding Color" reaches Synergy as "4" without it.
   const optionLabelMaps = qbMappers.filter((m) => m.mapperType === 'qb_option_label');
+  // The opportunity's NAME and monetary VALUE, as tenant configuration. The legacy
+  // GHL workflow hardcoded "first name + first line description"; the template makes
+  // that a per-tenant choice ("{customerFirstName} {line1Description}") and the
+  // value source picks any catalog key (typically subtotal). Config rows, not
+  // columns — same as every other setting this integration has grown.
+  const oppNameTemplate = qbMappers.find((m) => m.mapperType === 'qb_opp_name_template')?.ghlValue ?? null;
+  const oppValueSource = qbMappers.find((m) => m.mapperType === 'qb_opp_value')?.ghlValue ?? null;
   // Synergy fields already spoken for by the QuickBooks-customer field mappings
   // (the "Field mappings" card). A document field must not write into one of those.
   const customerFieldTargets = qbMappers
     .filter((m) => m.mapperType === 'custom_field' && m.ghlValue)
     .map((m) => m.ghlValue);
-  const wantDocFields = docFieldMaps.length > 0 || oppFieldMaps.length > 0;
+  const wantOppWrite = oppFieldMaps.length > 0 || !!oppNameTemplate || !!oppValueSource;
+  const wantDocFields = docFieldMaps.length > 0 || wantOppWrite;
   // Resolved whenever a SOURCE is named, even with no target yet — the result is the
   // diagnostic below, and it answers the one question nobody can answer from outside:
   // does this QuickBooks company actually expose that field through REST? If the four
@@ -1480,7 +1513,7 @@ async function reflectSalesDocStatus(
       // read for the Synergy token. Running it for every customer in the document
       // window is what exhausted the invocation's subrequests on 2026-08-19: the
       // pass died mid-flight, silently, and the cursor stopped moving for hours.
-      if (oppFieldMaps.length && docValues.has(customerId) && hasNews(customerId)) {
+      if (wantOppWrite && docValues.has(customerId) && hasNews(customerId)) {
         // Isolated from the contact write above so a rejection here is reported as
         // itself. GHL takes opportunity custom fields in a different shape from
         // contact ones, and "opportunity update refused" must not surface as a status
@@ -1488,7 +1521,7 @@ async function reflectSalesDocStatus(
         try {
           await reflectDocFieldsToOpportunity(
             locationId, link.ghlId, docValues.get(customerId), oppFieldMaps, cfg, linkIndex, stats,
-            since,
+            since, { nameTemplate: oppNameTemplate, valueSource: oppValueSource },
           );
         } catch (err) {
           stats.qbOppFieldsFailed += 1;
@@ -2097,6 +2130,9 @@ export async function syncLocation(locationId, settings) {
     qbOppFieldsFailed: 0,
     // Values Synergy refused because the target field only accepts its own options.
     qbOppFieldsInvalid: 0,
+    // Deal name / monetary value set from the tenant template and value source.
+    qbOppNameSet: 0,
+    qbOppValueSet: 0,
     // Contacts whose rep is known and mapped but who had no news this pass, so their
     // Synergy owner was deliberately left alone. Expected to be large on the first
     // passes after the toggle goes on — that is the backfill NOT happening.

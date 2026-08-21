@@ -154,6 +154,11 @@ export default function QuickBooks() {
   const [docFieldsUnavailable, setDocFieldsUnavailable] = useState(false);
   const [docMaps, setDocMaps] = useState([]);
   const [savingDocField, setSavingDocField] = useState(null); // the key being saved
+  // The deal's name template and value source — single config rows, one each.
+  const [oppNameRow, setOppNameRow] = useState(null);
+  const [oppValueRow, setOppValueRow] = useState(null);
+  const [oppNameDraft, setOppNameDraft] = useState('');
+  const [oppValueDraft, setOppValueDraft] = useState('');
 
   // Rep option id → the name the client calls that person (`qb_rep_label` rows).
   // QuickBooks sends "2"; only they know that is Cody. Replaces the hardcoded
@@ -284,6 +289,10 @@ export default function QuickBooks() {
           setSpMaps(all.filter((m) => m.mapperType === 'qb_salesperson'));
           setRepUserMaps(all.filter((m) => m.mapperType === 'qb_rep_user'));
           setDocMaps(all.filter((m) => DOC_MAPPER_TYPES.includes(m.mapperType)));
+          const nameRow = all.find((m) => m.mapperType === 'qb_opp_name_template') ?? null;
+          const valueRow = all.find((m) => m.mapperType === 'qb_opp_value') ?? null;
+          setOppNameRow(nameRow); setOppNameDraft(nameRow?.ghlValue ?? '');
+          setOppValueRow(valueRow); setOppValueDraft(valueRow?.ghlValue ?? '');
           const labels = all.filter((m) => m.mapperType === 'qb_option_label');
           setRepLabelMaps(labels);
           setRepLabelDraft(Object.fromEntries(labels.map((m) => [m.externalKey, m.ghlValue])));
@@ -753,6 +762,33 @@ export default function QuickBooks() {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });
     } finally {
       setSavingDocField(null);
+    }
+  }
+
+  // ── Opportunity name template / value source (single config rows) ──────────
+  async function saveOppConfig(mapperType, externalKey, raw) {
+    const typed = String(raw ?? '').trim();
+    const existing = mapperType === 'qb_opp_name_template' ? oppNameRow : oppValueRow;
+    const setRow = mapperType === 'qb_opp_name_template' ? setOppNameRow : setOppValueRow;
+    if (typed === (existing?.ghlValue ?? '')) return;
+    try {
+      if (!typed) {
+        if (existing) {
+          const res = await fetchWithAuth(`/api/mappers/${existing.id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to clear');
+          setRow(null);
+        }
+        return;
+      }
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({ appSlug: 'quickbooks', mapperType, externalKey, ghlValue: typed }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save');
+      setRow(data.mapper);
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
     }
   }
 
@@ -2038,6 +2074,45 @@ export default function QuickBooks() {
                 creates an opportunity, so a customer with no deal in Synergy simply gets the
                 contact fields.
               </p>
+
+              {/* The deal's NAME and VALUE — the "Update opportunity" step of the legacy
+                  workflow, as tenant configuration instead of hardcoded JavaScript. */}
+              <div className="rounded-md border px-3 py-2 space-y-2">
+                <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Opportunity name &amp; value</p>
+                <div className="space-y-1">
+                  <Label htmlFor="oppNameTpl" className="text-xs">Name the deal from the document</Label>
+                  <Input
+                    id="oppNameTpl"
+                    value={oppNameDraft}
+                    placeholder="{customerFirstName} {line1Description}"
+                    onChange={(e) => setOppNameDraft(e.target.value)}
+                    onBlur={() => saveOppConfig('qb_opp_name_template', 'template', oppNameDraft)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                    className="h-8 font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Any field above works as a <code>{'{placeholder}'}</code>. Leave empty to never
+                    touch the deal's name. Only an existing deal is renamed, and only when the name
+                    actually changes.
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="oppValueSrc" className="text-xs">Set the deal's value from</Label>
+                  <Select
+                    id="oppValueSrc"
+                    value={oppValueDraft}
+                    onChange={(e) => { setOppValueDraft(e.target.value); saveOppConfig('qb_opp_value', 'source', e.target.value); }}
+                  >
+                    <option value="">Don't touch the value</option>
+                    {docFields.filter((f) => !f.custom).map((f) => (
+                      <option key={f.key} value={f.key}>{f.label}</option>
+                    ))}
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Usually <strong>Subtotal</strong>. Written as the deal's monetary value when it differs.
+                  </p>
+                </div>
+              </div>
             </CardContent>
           </Card>
         )}

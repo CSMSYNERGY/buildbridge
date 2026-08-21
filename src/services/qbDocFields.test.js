@@ -9,6 +9,7 @@ import {
   optionLabelKey,
   docFieldCatalog,
   optionsByField,
+  renderTemplate,
   customFieldKey,
   latestDocByCustomer,
   docFieldWrites,
@@ -473,5 +474,35 @@ describe('optionsByField — what needs naming, discovered from the documents', 
 
   it('is empty when no document carries a custom field', () => {
     expect(optionsByField([{ Id: '1' }], [])).toEqual([]);
+  });
+});
+
+describe('renderTemplate — the tenant-written opportunity name', () => {
+  const values = { customerFirstName: 'Carolyn', line1Description: '12x24 Lofted Barn', subtotal: '14250.00' };
+
+  it('fills placeholders from the extracted values', () => {
+    expect(renderTemplate('{customerFirstName} {line1Description}', values))
+      .toBe('Carolyn 12x24 Lofted Barn');
+  });
+
+  it('renders an unknown or empty key as nothing, without leaking braces', () => {
+    expect(renderTemplate('{customerFirstName} {nope} {line1Description}', values))
+      .toBe('Carolyn 12x24 Lofted Barn');
+  });
+
+  it('collapses the whitespace a missing token leaves behind', () => {
+    expect(renderTemplate('{a}   {b}', { a: 'x', b: '' })).toBe('x');
+  });
+
+  it('returns null for an empty template or an all-empty result', () => {
+    expect(renderTemplate('', values)).toBeNull();
+    expect(renderTemplate('  ', values)).toBeNull();
+    expect(renderTemplate('{nope}', values)).toBeNull();
+  });
+
+  it('passes literal text through untouched', () => {
+    expect(renderTemplate('Estimate {documentNumber} — {customerFullName}', {
+      documentNumber: '1743', customerFullName: 'Carolyn Miller',
+    })).toBe('Estimate 1743 — Carolyn Miller');
   });
 });

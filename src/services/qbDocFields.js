@@ -332,6 +332,24 @@ export function optionsByField(estimates = [], invoices = [], labelMappings = []
 }
 
 /**
+ * Fill a tenant-written template like "{customerFirstName} {line1Description}"
+ * from the extracted document values.
+ *
+ * This is how the opportunity NAME stays configuration instead of code: the legacy
+ * GHL workflow hardcoded "first name + first line description", the next client
+ * will want something else, and a template each tenant types is the universal form
+ * of both. Unknown or empty keys render as nothing rather than leaking "{foo}"
+ * into a deal name a salesperson reads; whitespace is collapsed so a missing
+ * middle token does not leave a double space.
+ */
+export function renderTemplate(template, values = {}) {
+  const t = str(template);
+  if (!t) return null;
+  const out = t.replace(/\{([^{}]+)\}/g, (_, key) => str(values[String(key).trim()]) ?? '');
+  return str(out.replace(/\s+/g, ' '));
+}
+
+/**
  * The newest estimate or invoice per QuickBooks customer.
  *
  * Same "newest document wins" rule as `repByCustomer`: `MetaData.LastUpdatedTime`
