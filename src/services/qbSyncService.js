@@ -570,7 +570,7 @@ async function syncOneQbCustomerToGhl(locationId, customer, stats, { contactCust
 //
 // Preference order: the configured contact-sync pipeline, then an open deal, then the
 // most recently updated. Returns null when the contact has no opportunity at all.
-async function findContactOpportunity(locationId, contactId, pipelineId) {
+async function findContactOpportunity(locationId, contactId, pipelineId, routedPipelineIds = []) {
   const data = await makeGhlRequest(
     locationId,
     'GET',
@@ -585,7 +585,12 @@ async function findContactOpportunity(locationId, contactId, pipelineId) {
   );
   if (list.length === 0) return null;
   const updated = (o) => Date.parse(o?.updatedAt ?? o?.dateUpdated ?? '') || 0;
-  const score = (o) => (pipelineId && String(o.pipelineId ?? '') === String(pipelineId) ? 4 : 0)
+  // A deal already sitting in one of the ROUTED pipelines outranks everything —
+  // that is the deal an estimate→invoice transition must move, not a stray older
+  // one that happens to be open elsewhere.
+  const routed = new Set((routedPipelineIds ?? []).map(String));
+  const score = (o) => (routed.has(String(o.pipelineId ?? '')) ? 8 : 0)
+    + (pipelineId && String(o.pipelineId ?? '') === String(pipelineId) ? 4 : 0)
     + (String(o.status ?? '').toLowerCase() === 'open' ? 2 : 0);
   return [...list].sort((a, b) => score(b) - score(a) || updated(b) - updated(a))[0];
 }
@@ -597,12 +602,50 @@ async function findContactOpportunity(locationId, contactId, pipelineId) {
 // opportunity is touched: no stage, no name, no monetary value, no status.
 async function reflectDocFieldsToOpportunity(
   locationId, contactId, values, oppFieldMaps, cfg, linkIndex, stats, since,
-  { nameTemplate = null, valueSource = null } = {},
+  { nameTemplate = null, valueSource = null, routes = {} } = {},
 ) {
-  const opp = await findContactOpportunity(locationId, contactId, cfg?.qboContactSyncPipelineId ?? null);
+  // Where a deal for THIS document type belongs: `routes` is { estimate: {pipelineId,
+  // stageId}, invoice: {…} }, each configured from dropdowns. Per type because that
+  // is the business shape — an estimate is one conversation, an invoice another —
+  // and the estimate→invoice transition is exactly a deal MOVING between them.
+  const route = routes?.[values?.docType] ?? null;
+  const routedPipelineIds = Object.values(routes ?? {}).map((r) => r?.pipelineId).filter(Boolean);
+
+  let opp = await findContactOpportunity(
+    locationId, contactId, cfg?.qboContactSyncPipelineId ?? null, routedPipelineIds,
+  );
+  let createdNow = false;
   if (!opp) {
-    stats.qbOppNotFound += 1;
-    return;
+    if (!route) {
+      stats.qbOppNotFound += 1;
+      return;
+    }
+    // CREATE, because a route is configured. This deliberately reverses the 08-19
+    // "update only, no create" rule — Ahsan, 2026-08-21: the pipeline/stage dropdowns
+    // say "where the opportunity will be created or updated". A route is the tenant
+    // stating where new deals belong, which is the consent the old rule was missing.
+    const madeName = renderTemplate(nameTemplate, values)
+      ?? values?.customerFullName
+      ?? `QuickBooks ${values?.docType ?? 'document'} ${values?.documentNumber ?? ''}`.trim();
+    const madeValue = valueSource != null ? Number(values?.[valueSource]) : NaN;
+    const res = await makeGhlRequest(locationId, 'POST', '/opportunities/', {
+      locationId,
+      pipelineId: route.pipelineId,
+      pipelineStageId: route.stageId,
+      contactId,
+      name: madeName,
+      status: 'open',
+      ...(Number.isFinite(madeValue) && madeValue > 0 ? { monetaryValue: madeValue } : {}),
+    });
+    opp = res?.opportunity ?? res;
+    if (!opp?.id) {
+      stats.qbOppFieldsFailed += 1;
+      console.warn(`[rockwood] opportunity create returned no id for contact ${contactId}`);
+      return;
+    }
+    createdNow = true;
+    stats.qbOppCreated += 1;
+    console.log(`[rockwood] created opportunity ${opp.id} (${values?.docType}) for contact ${contactId}`);
   }
   const writes = docFieldWrites(values, oppFieldMaps, opp.customFields ?? []);
 
@@ -617,7 +660,18 @@ async function reflectDocFieldsToOpportunity(
     ? renderedValue
     : null;
 
-  if (writes.length === 0 && !nameWrite && valueWrite == null) return;
+  // MOVE the deal when the document type says it belongs elsewhere — the invoice
+  // arriving is what carries an estimate-pipeline deal into the invoice pipeline.
+  // Only on a pipeline CHANGE: inside its routed pipeline the stage is the sales
+  // team's to manage, and yanking a progressed deal back to the entry stage on
+  // every estimate edit is the legacy workflow's "move to previous stage" toggle
+  // that Rockwood kept OFF.
+  const move = route && !createdNow && String(opp.pipelineId ?? '') !== String(route.pipelineId)
+    ? { pipelineId: route.pipelineId, pipelineStageId: route.stageId }
+    : {};
+
+  if (writes.length === 0 && !nameWrite && valueWrite == null
+      && Object.keys(move).length === 0 && !createdNow) return;
 
   // What Synergy said BEFORE we touched it. Read first, because the write below
   // overwrites the only evidence of whether this deal already had an unpushed edit.
@@ -635,6 +689,7 @@ async function reflectDocFieldsToOpportunity(
   const topLevel = {
     ...(nameWrite ? { name: nameWrite } : {}),
     ...(valueWrite != null ? { monetaryValue: valueWrite } : {}),
+    ...move,
   };
   let pending = writes;
   const rejected = [];
@@ -660,6 +715,10 @@ async function reflectDocFieldsToOpportunity(
   stats.qbOppFieldsUpdated += pending.length;
   if (nameWrite) stats.qbOppNameSet += 1;
   if (valueWrite != null) stats.qbOppValueSet += 1;
+  if (Object.keys(move).length) {
+    stats.qbOppMoved += 1;
+    console.log(`[rockwood] moved opportunity ${opp.id} to the ${values?.docType} pipeline`);
+  }
   if (rejected.length) {
     stats.qbOppFieldsInvalid += rejected.length;
     // Which QuickBooks field feeds each rejected target, so the fix is a re-map,
@@ -700,7 +759,11 @@ async function reflectDocFieldsToOpportunity(
   // before our last write is ours, not a pending client edit.
   const marker = lookupLink(linkIndex, 'opportunity_field', { ghlId: opp.id });
   const oursAlready = !!updatedBefore && isEcho(new Date(updatedBefore), marker ?? {});
-  const hadPendingEdit = since && updatedBefore
+  // A deal created THIS pass is ours to the last byte — its "pending edit" is our
+  // own POST from seconds ago. Skipping the marker here would hand the push half a
+  // brand-new changed opportunity to send into QuickBooks as a duplicate estimate,
+  // which is the exact loop the marker exists to prevent.
+  const hadPendingEdit = !createdNow && since && updatedBefore
     && new Date(updatedBefore) > new Date(since)
     && !oursAlready;
   if (hadPendingEdit) {
@@ -759,12 +822,21 @@ async function reflectSalesDocStatus(
   // columns — same as every other setting this integration has grown.
   const oppNameTemplate = qbMappers.find((m) => m.mapperType === 'qb_opp_name_template')?.ghlValue ?? null;
   const oppValueSource = qbMappers.find((m) => m.mapperType === 'qb_opp_value')?.ghlValue ?? null;
+  // Per-document-type pipeline routing: `qb_opp_route` rows, externalKey 'estimate'
+  // or 'invoice', ghlValue "<pipelineId>::<stageId>". A route present is also the
+  // tenant's consent to CREATE a deal when the contact has none.
+  const oppRoutes = {};
+  for (const m of qbMappers.filter((x) => x.mapperType === 'qb_opp_route')) {
+    const [pipelineId, stageId] = String(m.ghlValue ?? '').split('::');
+    if (pipelineId && stageId) oppRoutes[m.externalKey] = { pipelineId, stageId };
+  }
   // Synergy fields already spoken for by the QuickBooks-customer field mappings
   // (the "Field mappings" card). A document field must not write into one of those.
   const customerFieldTargets = qbMappers
     .filter((m) => m.mapperType === 'custom_field' && m.ghlValue)
     .map((m) => m.ghlValue);
-  const wantOppWrite = oppFieldMaps.length > 0 || !!oppNameTemplate || !!oppValueSource;
+  const wantOppWrite = oppFieldMaps.length > 0 || !!oppNameTemplate || !!oppValueSource
+    || Object.keys(oppRoutes).length > 0;
   const wantDocFields = docFieldMaps.length > 0 || wantOppWrite;
   // Resolved whenever a SOURCE is named, even with no target yet — the result is the
   // diagnostic below, and it answers the one question nobody can answer from outside:
@@ -1521,7 +1593,8 @@ async function reflectSalesDocStatus(
         try {
           await reflectDocFieldsToOpportunity(
             locationId, link.ghlId, docValues.get(customerId), oppFieldMaps, cfg, linkIndex, stats,
-            since, { nameTemplate: oppNameTemplate, valueSource: oppValueSource },
+            since,
+            { nameTemplate: oppNameTemplate, valueSource: oppValueSource, routes: oppRoutes },
           );
         } catch (err) {
           stats.qbOppFieldsFailed += 1;
@@ -2131,6 +2204,10 @@ export async function syncLocation(locationId, settings) {
     // Values Synergy refused because the target field only accepts its own options.
     qbOppFieldsInvalid: 0,
     // Deal name / monetary value set from the tenant template and value source.
+    // Deals created because a route consents to it, and deals moved between
+    // routed pipelines by a document-type change.
+    qbOppCreated: 0,
+    qbOppMoved: 0,
     qbOppNameSet: 0,
     qbOppValueSet: 0,
     // Contacts whose rep is known and mapped but who had no news this pass, so their

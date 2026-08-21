@@ -159,6 +159,42 @@ export default function QuickBooks() {
   const [oppValueRow, setOppValueRow] = useState(null);
   const [oppNameDraft, setOppNameDraft] = useState('');
   const [oppValueDraft, setOppValueDraft] = useState('');
+  // Pipeline/stage routes per document type ('estimate' | 'invoice'):
+  // { kind: { pipelineId, stageId, rowId } }. A saved route is a qb_opp_route row.
+  const [oppRouteDraft, setOppRouteDraft] = useState({});
+
+  async function setOppRoute(kind, pipelineId, stageId) {
+    setOppRouteDraft((d) => ({ ...d, [kind]: { ...(d[kind] ?? {}), pipelineId, stageId } }));
+    const existing = oppRouteDraft[kind];
+    try {
+      // No pipeline ⇒ no route: remove the row so the sync stops creating/moving.
+      if (!pipelineId) {
+        if (existing?.rowId) {
+          const res = await fetchWithAuth(`/api/mappers/${existing.rowId}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to clear the route');
+          setOppRouteDraft((d) => ({ ...d, [kind]: { pipelineId: '', stageId: '', rowId: null } }));
+        }
+        return;
+      }
+      // A route without a stage is not yet a route — save once both halves exist.
+      if (!stageId) return;
+      const res = await fetchWithAuth('/api/mappers', {
+        method: 'POST',
+        body: JSON.stringify({
+          appSlug: 'quickbooks',
+          mapperType: 'qb_opp_route',
+          externalKey: kind,
+          ghlValue: `${pipelineId}::${stageId}`,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to save the route');
+      setOppRouteDraft((d) => ({ ...d, [kind]: { pipelineId, stageId, rowId: data.mapper.id } }));
+      toast({ title: `${kind === 'estimate' ? 'Estimates' : 'Invoices'} route saved` });
+    } catch (err) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  }
 
   // Rep option id → the name the client calls that person (`qb_rep_label` rows).
   // QuickBooks sends "2"; only they know that is Cody. Replaces the hardcoded
@@ -289,6 +325,12 @@ export default function QuickBooks() {
           setSpMaps(all.filter((m) => m.mapperType === 'qb_salesperson'));
           setRepUserMaps(all.filter((m) => m.mapperType === 'qb_rep_user'));
           setDocMaps(all.filter((m) => DOC_MAPPER_TYPES.includes(m.mapperType)));
+          const routes = {};
+          for (const m of all.filter((x) => x.mapperType === 'qb_opp_route')) {
+            const [pipelineId, stageId] = String(m.ghlValue ?? '').split('::');
+            routes[m.externalKey] = { pipelineId: pipelineId ?? '', stageId: stageId ?? '', rowId: m.id };
+          }
+          setOppRouteDraft(routes);
           const nameRow = all.find((m) => m.mapperType === 'qb_opp_name_template') ?? null;
           const valueRow = all.find((m) => m.mapperType === 'qb_opp_value') ?? null;
           setOppNameRow(nameRow); setOppNameDraft(nameRow?.ghlValue ?? '');
@@ -2081,13 +2123,54 @@ export default function QuickBooks() {
                 <strong> Rep name</strong> uses the rep list in the sync card above.
                 Pick a contact field and the value lands on the contact; pick one marked
                 <em> (opportunity)</em> and it lands on that contact's opportunity —
-                an <strong>existing</strong> one, the most recent open deal. BuildBridge never
-                creates an opportunity, so a customer with no deal in Synergy simply gets the
-                contact fields.
+                an <strong>existing</strong> one, the most recent open deal — or, when a pipeline
+                is chosen below, the deal is <strong>created</strong> there if the contact has none.
               </p>
 
               {/* The deal's NAME and VALUE — the "Update opportunity" step of the legacy
                   workflow, as tenant configuration instead of hardcoded JavaScript. */}
+              {/* Per-document-type routing: which pipeline/stage an estimate deal and an
+                  invoice deal belong in. Setting a route is also consent to CREATE — the
+                  tenant naming where new deals go is the decision update-only was waiting
+                  for. An invoice arriving MOVES the deal from the estimate pipeline. */}
+              <div className="rounded-md border px-3 py-2 space-y-2">
+                <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Opportunity pipeline &amp; stage</p>
+                <p className="text-xs text-muted-foreground">
+                  Where the deal lives, per document type. With a pipeline set, BuildBridge
+                  <strong> creates</strong> the deal there when the contact has none, and an invoice
+                  <strong> moves</strong> the deal from the estimate pipeline into the invoice one.
+                  Inside its pipeline the stage stays yours — a re-edited estimate never drags a
+                  progressed deal back. Leave unset to keep the old behaviour: update existing
+                  deals only, never create.
+                </p>
+                {['estimate', 'invoice'].map((kind) => {
+                  const r = oppRouteDraft[kind] ?? { pipelineId: '', stageId: '' };
+                  const stages = pipelines.find((p) => p.id === r.pipelineId)?.stages ?? [];
+                  return (
+                    <div key={kind} className="grid grid-cols-[6rem_1fr_1fr] items-center gap-2">
+                      <span className="text-xs font-medium capitalize" style={{ color: '#3d3672' }}>{kind}s</span>
+                      <Select
+                        aria-label={`${kind} pipeline`}
+                        value={r.pipelineId}
+                        onChange={(e) => setOppRoute(kind, e.target.value, '')}
+                      >
+                        <option value="">No pipeline — don't create</option>
+                        {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </Select>
+                      <Select
+                        aria-label={`${kind} stage`}
+                        value={r.stageId}
+                        disabled={!r.pipelineId}
+                        onChange={(e) => setOppRoute(kind, r.pipelineId, e.target.value)}
+                      >
+                        <option value="">Stage…</option>
+                        {stages.map((st) => <option key={st.id} value={st.id}>{st.name}</option>)}
+                      </Select>
+                    </div>
+                  );
+                })}
+              </div>
+
               <div className="rounded-md border px-3 py-2 space-y-2">
                 <p className="text-sm font-medium" style={{ color: '#3d3672' }}>Opportunity name &amp; value</p>
                 <div className="space-y-1">
