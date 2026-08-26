@@ -1946,10 +1946,43 @@ export default function QuickBooks() {
               </TriggerNote>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* SEGMENTED, not one long column. Carolyn, 2026-08-21, scrolling this list:
+                  "it's so long and all the way down ... maybe take these little sections and
+                  create boxes." Rockwood's mapping runs to dozens of rows and every one of
+                  them looked equally important, so nothing stood out.
+
+                  The groups are DERIVED from the QuickBooks field name rather than a list we
+                  maintain: a client who adds a custom "Estimate PO #" gets it filed under
+                  Estimate without anybody editing this file. Empty groups render nothing, so
+                  a small mapping still looks small. */}
               {mappings.length > 0 ? (
-                <ul className="space-y-2">
-                  {mappings.map((m) => (
-                    <li key={m.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                <div className="space-y-3">
+                  {(() => {
+                    const GROUPS = [
+                      ["Estimate", /estimate|quote|proposal/i],
+                      ["Invoice", /invoice|bill(?!ing address)/i],
+                      ["Amounts", /total|subtotal|amount|price|tax|discount|coupon|balance|deposit|payment/i],
+                      ["Customer", /customer|contact|name|email|phone|address|city|state|zip/i],
+                    ];
+                    const bucket = (m) => {
+                      const hay = `${qbLabel(m.externalKey)} ${m.externalKey}`;
+                      const g = GROUPS.find(([, re]) => re.test(hay));
+                      return g ? g[0] : "Other";
+                    };
+                    const order = GROUPS.map(([n]) => n).concat(["Other"]);
+                    const by = new Map(order.map((n) => [n, []]));
+                    mappings.forEach((m) => by.get(bucket(m)).push(m));
+                    return order
+                      .filter((n) => by.get(n).length > 0)
+                      .map((name) => (
+                        <div key={name} className="rounded-lg border bg-muted/30 p-2">
+                          <div className="flex items-baseline justify-between px-1 pb-1.5">
+                            <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: '#3d3672' }}>{name}</span>
+                            <span className="text-xs text-muted-foreground">{by.get(name).length}</span>
+                          </div>
+                          <ul className="space-y-2">
+                            {by.get(name).map((m) => (
+                              <li key={m.id} className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
                       <span className="font-medium truncate" style={{ color: '#3d3672' }}>{qbLabel(m.externalKey)}</span>
                       <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       <span className="truncate" style={{ color: '#1b7895' }}>{ghlLabel(m.ghlValue)}</span>
@@ -1961,9 +1994,13 @@ export default function QuickBooks() {
                       >
                         <X className="h-4 w-4" />
                       </button>
-                    </li>
-                  ))}
-                </ul>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ));
+                  })()}
+                </div>
               ) : (
                 <p className="text-sm text-muted-foreground">No field mappings yet.</p>
               )}
