@@ -1,32 +1,88 @@
 name: Dependabot alerts to Monday (via Issues)
 
+# Files a GitHub Issue for every open Dependabot alert that does not already have one.
+# The issue is what reaches Monday: each repo has an `issues` webhook pointing at the
+# github-monday-bug edge function, which turns "issue opened" into a Bugs Queue card
+# (board 18419456589, group "topics").
+#
+# WHY THIS NEEDS ITS OWN TOKEN — this is the bug that had the workflow dead until 2026-08-31:
+# the default GITHUB_TOKEN CANNOT read Dependabot alerts. There is no `dependabot-alerts` key in a
+# workflow `permissions:` block, and `security-events: read` covers code scanning, not Dependabot —
+# so GET /repos/{repo}/dependabot/alerts answers
+#     gh: Resource not accessible by integration (HTTP 403)
+# and the job dies before filing anything. The fix is a fine-grained PAT with
+# "Dependabot alerts: Read-only" + "Issues: Read and write" on THIS repo, stored as the
+# DEPENDABOT_ALERTS_TOKEN secret. Use one token per repo, not one shared across all three: this
+# file lives in public repos, and a shared token would let either of them write to private Framed-UP.
+#
+# The PAT creates the issues too, simply because it is already the token in hand — the alerts read
+# is what forces a PAT at all. (GITHUB_TOKEN-authored issues DO reach repo webhooks; what they do
+# not do is trigger further workflow runs.)
+#
+# Scheduled workflows only ever run from the DEFAULT branch, so this file has to be on main to fire.
+
 on:
   schedule:
-    - cron: "0 13 * * *"
-  workflow_dispatch: {}
+    - cron: "0 13 * * *"   # 13:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      max_new:
+        description: "Most issues to open in one run (guards against a first-run flood)"
+        required: false
+        default: "25"
 
-permissions:
-  security-events: read
-  issues: write
+# Nothing here uses GITHUB_TOKEN — every call is made with DEPENDABOT_ALERTS_TOKEN.
+permissions: {}
 
 jobs:
   sync-alerts-to-issues:
     runs-on: ubuntu-latest
     steps:
-      - name: Ensure labels exist
+      - name: Check the alerts token is present and actually works
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh label create "dependabot-alert" --repo "${{ github.repository }}" --color "0366d6" --description "Auto-filed from an open Dependabot security alert" --force
-          gh label create "security" --repo "${{ github.repository }}" --color "d93f0b" --description "Security-related" --force
-
-      - name: Open an issue for each open Dependabot alert without one
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error title=DEPENDABOT_ALERTS_TOKEN missing::The default GITHUB_TOKEN cannot read Dependabot alerts. Create a fine-grained PAT scoped to this repo (resource owner CSMSYNERGY) with 'Dependabot alerts: Read-only' and 'Issues: Read and write', then add it as the DEPENDABOT_ALERTS_TOKEN Actions secret."
+            exit 1
+          fi
+          # Prove the token can actually READ ALERTS, not merely that the secret is non-empty.
+          # Fine-grained PATs carry a mandatory expiry, so this token WILL die one day — and an
+          # expired one fails as a bare "gh: Bad credentials" that looks exactly like the 403 this
+          # rewrite exists to fix. Fail here, loudly, with the remedy in the message.
+          if ! gh api "repos/$REPO/dependabot/alerts?per_page=1" >/dev/null 2>&1; then
+            echo "::error title=DEPENDABOT_ALERTS_TOKEN invalid, expired, or missing scope::The secret is set but cannot read Dependabot alerts on $REPO. Re-issue a fine-grained PAT scoped to this repo with 'Dependabot alerts: Read-only' and 'Issues: Read and write', and update the secret."
+            exit 1
+          fi
+          echo "Token present and can read alerts."
+
+      - name: Ensure labels exist
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh label create "dependabot-alert" --repo "$REPO" --color "0366d6" --description "Auto-filed from an open Dependabot security alert" --force
+          gh label create "security" --repo "$REPO" --color "d93f0b" --description "Security-related" --force
+          # The severity labels are what give the Monday card its Priority. github-monday-bug's
+          # priorityForLabels() maps "severity: critical|high|medium|low" onto Critical/High/Medium/Low;
+          # without them every card lands with an empty Priority column.
+          for s in critical high medium low; do
+            gh label create "severity: $s" --repo "$REPO" --color "ededed" --description "Dependabot advisory severity" --force
+          done
+
+      - name: Open an issue for each open Dependabot alert without one
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+          REPO: ${{ github.repository }}
+          MAX_NEW: ${{ github.event.inputs.max_new || '25' }}
+        run: |
+          set -euo pipefail
+
+          # A dispatch with max_new="all" would otherwise silently disable the cap.
+          case "$MAX_NEW" in ''|*[!0-9]*) echo "::warning::max_new='$MAX_NEW' is not a whole number; falling back to 25."; MAX_NEW=25 ;; esac
 
           echo "Fetching open Dependabot alerts for $REPO..."
           alerts_json="$(gh api "repos/$REPO/dependabot/alerts?state=open&per_page=100" --paginate)"
@@ -37,9 +93,13 @@ jobs:
           fi
 
           echo "Fetching existing dependabot-alert issue titles (open + closed) for dedup..."
-          existing_titles="$(gh api "repos/$REPO/issues?state=all&per_page=100&labels=dependabot-alert" --paginate --jq '.[].title' || true)"
+          # No `|| true` here on purpose: the zero-match case already exits 0 with empty output, so
+          # `|| true` would protect nothing while turning a transient read failure into a silent
+          # re-file of every alert as a duplicate issue.
+          existing_titles="$(gh api "repos/$REPO/issues?state=all&per_page=100&labels=dependabot-alert" --paginate --jq '.[].title')"
 
           count=0
+          skipped_for_cap=0
           while IFS= read -r alert; do
             [ -z "$alert" ] && continue
 
@@ -47,7 +107,7 @@ jobs:
             ghsa=$(echo "$alert" | jq -r '.security_advisory.ghsa_id')
             package=$(echo "$alert" | jq -r '.dependency.package.name')
             ecosystem=$(echo "$alert" | jq -r '.dependency.package.ecosystem')
-            summary=$(echo "$alert" | jq -r '.security_advisory.summary' | cut -c1-100)
+            summary=$(echo "$alert" | jq -r '(.security_advisory.summary // "" | gsub("\\s+"; " "))[0:100]')
             severity=$(echo "$alert" | jq -r '.security_advisory.severity')
             manifest=$(echo "$alert" | jq -r '.dependency.manifest_path // "unknown"')
             alert_url=$(echo "$alert" | jq -r '.html_url')
@@ -55,27 +115,58 @@ jobs:
             marker="[alert #$number]"
             title="[Dependabot] $package: $summary $marker"
 
-            if echo "$existing_titles" | grep -qF "$marker"; then
+            # Herestring, not a pipe: under `set -o pipefail` a pipe into `grep -q` can be killed by
+            # SIGPIPE once the title list outgrows the 64 KB pipe buffer, which would abort the run
+            # or silently disable dedup. state=all means this list only ever grows.
+            if grep -qF -- "$marker" <<< "$existing_titles"; then
               echo "Skip alert #$number ($ghsa) — issue already exists"
               continue
             fi
 
-            body="**Dependabot security alert ${marker}**
+            # The per-run cap exists because the first successful run after a long outage would
+            # otherwise open every backlogged alert at once and push that many cards onto the Bugs
+            # Queue in one burst. The schedule drains the rest daily; raise it for a single run with
+            # workflow_dispatch if you want the backlog now.
+            if [ "$count" -ge "$MAX_NEW" ]; then
+              skipped_for_cap=$((skipped_for_cap + 1))
+              continue
+            fi
 
-- Package: \`$package\` ($ecosystem)
-- Manifest: \`$manifest\`
-- Severity: **$severity**
-- Advisory: $ghsa
-- Alert: $alert_url
+            # Built with printf, NOT a multi-line bash string. The previous version continued at
+            # column 1, which escaped this `run: |` block scalar and left the whole workflow file
+            # unparseable — GitHub could not read the `on:` block, so it created a FAILED 0-second
+            # run on every push and the schedule never fired at all. Indenting those lines to stay
+            # inside the scalar would instead put the leading whitespace inside the string, and 4+
+            # spaces makes Markdown render the bullet list as a code block. printf keeps the YAML
+            # valid and the body clean.
+            body=$(printf '%s\n' \
+              "**Dependabot security alert ${marker}**" \
+              "" \
+              "- Package: \`$package\` ($ecosystem)" \
+              "- Manifest: \`$manifest\`" \
+              "- Severity: **$severity**" \
+              "- Advisory: $ghsa" \
+              "- Alert: $alert_url" \
+              "" \
+              "Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR.")
 
-Opened automatically from an open Dependabot alert. Closing this issue does not dismiss the alert — resolve via the Security tab or by merging Dependabot's fix PR."
+            # Guarded: `gh issue create --label` hard-fails on a label that does not exist, and under
+            # `set -e` that would kill the run. If GitHub ever emits a severity outside the four
+            # created above, fall back to no severity label rather than a dead workflow.
+            case "$severity" in
+              critical|high|medium|low) sev_label=",severity: $severity" ;;
+              *) sev_label="" ;;
+            esac
 
             echo "Creating issue for alert #$number ($ghsa)..."
             gh issue create --repo "$REPO" \
               --title "$title" \
               --body "$body" \
-              --label "dependabot-alert,security"
+              --label "dependabot-alert,security$sev_label"
             count=$((count + 1))
           done < <(echo "$alerts_json" | jq -c '.[]')
 
           echo "Created $count new issue(s)."
+          if [ "$skipped_for_cap" -gt 0 ]; then
+            echo "::notice::$skipped_for_cap more alert(s) left for the next run (cap MAX_NEW=$MAX_NEW)."
+          fi
