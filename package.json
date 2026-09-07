@@ -34,7 +34,7 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "pg": "^8.22.0",
-    "postgres": "^3.4.5",
+    "postgres": "^3.4.9",
     "zod": "^3.24.2"
   },
   "_comment_esbuild_advisory": "GHSA-67mh-4wv8-2f99 (esbuild 0.18.20, moderate) is ACCEPTED, not unfixed-by-neglect. It arrives only via drizzle-kit -> @esbuild-kit/esm-loader -> @esbuild-kit/core-utils, which pins esbuild ~0.18.20. drizzle-kit 0.31.10 IS the latest and still depends on it, so there is no upgrade path; `npm audit fix --force` offers drizzle-kit@0.18.1, a 13-minor downgrade of our migration tool. The advisory needs esbuild's DEV SERVER to be running (it lets any site read its responses); drizzle-kit only uses the loader to transpile drizzle.config.js and never starts one, and this is a devDependency that never reaches the Worker bundle. An npm `overrides` pin was tried and npm 11.13.0 did not apply it. Re-check when drizzle-kit completes its move to tsx (it already depends on both).",
