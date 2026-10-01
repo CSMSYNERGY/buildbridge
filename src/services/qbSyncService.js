@@ -16,7 +16,7 @@ import { getMappings, listMappers } from './mapperService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
 // Invocation-level spend guard — see core/subrequestBudget.js.
-import { beginBudget, endBudget, budgetExhausted, subrequestsUsed } from '../core/subrequestBudget.js';
+import { beginBudget, endBudget, budgetExhausted, subrequestsUsed, subrequestsLeft } from '../core/subrequestBudget.js';
 import { recordThrown, recordError } from './errorLogService.js';
 import {
   syncFlags,
@@ -2428,7 +2428,7 @@ export async function syncAllLocations() {
       // left does not sync it — it gets far enough to refresh a token and then dies
       // on the write, which is what happened to the second location on 2026-08-19
       // while the first was still draining its backlog. Better to defer it whole.
-      if (budgetExhausted() || subrequestsUsed() > MIN_BUDGET_TO_START_LOCATION) {
+      if (budgetExhausted() || subrequestsLeft() < MIN_BUDGET_TO_START_LOCATION) {
         console.warn(`[rockwood] subrequest budget spent (${subrequestsUsed()}) — ${locationId} deferred to the next tick`);
         continue;
       }
