@@ -593,8 +593,10 @@ export async function getQuickBooksConfig(req, res, next) {
 // ─── Milestone definitions (per-client milestone configuration, migration 0007) ──
 // Replaces the four hard-coded milestone types. A milestone is the client's own pair of
 // GHL opportunity fields (amount + optional date) plus the label that prints on the
-// QuickBooks invoice line. All four handlers are location-scoped by req.user.locationId —
-// an id from another tenant 404s rather than being silently ignored.
+// QuickBooks invoice line, and optionally the one pipeline it bills (`pipelineId`, 0012;
+// null = any pipeline). All four handlers are location-scoped by req.user.locationId —
+// an id from another tenant 404s rather than being silently ignored. Bodies are passed
+// through to the service, whose normalizeMilestoneInput is the field whitelist.
 
 /** GET /api/quickbooks/milestones */
 export async function getMilestoneDefinitions(req, res, next) {

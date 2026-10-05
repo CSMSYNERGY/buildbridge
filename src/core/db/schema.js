@@ -158,6 +158,10 @@ export const qbMilestoneDefinitions = pgTable('qb_milestone_definitions', {
   // NULL = no date field = invoice as soon as the opportunity is Won (the old 'deposit'
   // behaviour, now explicit configuration instead of an implicit frontend omission).
   dateField: text('date_field'),
+  // GHL pipeline id this milestone bills (0012). NULL = any pipeline, which is how every
+  // milestone behaved before the column existed. Set it when one account sells two kinds of
+  // job and bills only one of them in stages (sheds vs post-frame).
+  pipelineId: text('pipeline_id'),
   sortOrder: integer('sort_order').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

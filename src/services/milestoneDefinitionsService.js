@@ -31,6 +31,8 @@ export function serializeDefinition(d) {
     label: d.label,
     amountField: d.amountField,
     dateField: d.dateField ?? null,
+    // null = any pipeline (0012).
+    pipelineId: d.pipelineId ?? null,
     sortOrder: d.sortOrder,
   };
 }
@@ -38,6 +40,11 @@ export function serializeDefinition(d) {
 // Validation shared by create and update. The rules themselves live in qbSyncLogic's
 // pure normalizeMilestoneInput (import-free, unit-tested); this just turns a rejection
 // into the HTTP error the client sees.
+//
+// It is also the field WHITELIST: create and update spread only what it returns, so a body
+// can never write a column it does not name (the 07-27 upsertLocationSettings trap, the
+// other way round). `pipelineId` is returned only when the body carries the key, so an
+// update that leaves it out keeps the stored pipeline instead of resetting it to "any".
 function normalizeInput(input) {
   const result = normalizeMilestoneInput(input);
   if (!result.ok) throw createError(400, result.error);

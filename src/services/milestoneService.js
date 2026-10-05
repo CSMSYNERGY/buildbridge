@@ -3,60 +3,27 @@ import { qbMilestones, qbSyncState, integrationCredentials } from '../core/db/sc
 import { eq, and, or, isNotNull, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { listMappers } from './mapperService.js';
-import { resolveItemRef, milestoneIsDue } from './qbSyncLogic.js';
+import {
+  resolveItemRef,
+  milestoneIsDue,
+  buildMilestoneRows,
+  definitionAppliesToPipeline,
+  opportunityPipelineId,
+  wonSearchPath,
+  nextWonSearchCursor,
+  sameWonSearchCursor,
+  wonPollPage,
+} from './qbSyncLogic.js';
 import { findOrCreateCustomer, createInvoice } from './quickbooksService.js';
 import { makeGhlRequest } from './ghlService.js';
 import { hasAccess } from './subscriptionService.js';
 import { getLocationSettings } from './locationSettingsService.js';
 import { listMilestoneDefinitions } from './milestoneDefinitionsService.js';
-import { recordThrown } from './errorLogService.js';
+import { recordThrown, recordError } from './errorLogService.js';
 
-/**
- * Read a value out of a GHL webhook payload. Supports:
- *  - dot-paths into the payload ('opportunity.deposit_amount')
- *  - customFields as an object map ({ field_key: value })
- *  - customFields as an array ([{ key|fieldKey|id, value }])
- */
-export function getPayloadField(payload, fieldKey) {
-  if (!fieldKey) return undefined;
-
-  const cf = payload.customFields ?? payload.custom_fields;
-  if (cf) {
-    if (Array.isArray(cf)) {
-      const hit = cf.find(
-        (f) => f.key === fieldKey || f.fieldKey === fieldKey || f.id === fieldKey,
-      );
-      if (hit !== undefined) return hit.value ?? hit.fieldValue ?? hit.field_value;
-    } else if (typeof cf === 'object' && cf[fieldKey] !== undefined) {
-      return cf[fieldKey];
-    }
-  }
-
-  // Dot-path fallback
-  let node = payload;
-  for (const part of fieldKey.split('.')) {
-    if (node == null || typeof node !== 'object') return undefined;
-    node = node[part];
-  }
-  return node;
-}
-
-/** Parse "$12,500.00" / "12500" / 12500.5 → integer cents (null if unparseable). */
-export function parseAmountCents(value) {
-  if (value == null || value === '') return null;
-  const num = typeof value === 'number'
-    ? value
-    : Number(String(value).replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(num) || num <= 0) return null;
-  return Math.round(num * 100);
-}
-
-/** Parse a date-ish value → Date (null if unparseable). */
-export function parseDate(value) {
-  if (!value) return null;
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
+// The payload readers moved to qbSyncLogic.js (import-free, unit-tested) with
+// buildMilestoneRows. Re-exported so nothing that imported them from here breaks.
+export { getPayloadField, parseAmountCents, parseDate } from './qbSyncLogic.js';
 
 function extractContact(payload) {
   const c = payload.contact ?? {};
@@ -79,10 +46,16 @@ function extractContact(payload) {
 /**
  * GHL "opportunity Won" handler — schedules this deal's milestone invoices.
  *
- * 1. Creates/finds the QBO customer for the opportunity's contact.
- * 2. Reads each configured milestone's amount + date from the payload, using this
- *    location's own milestone definitions (qb_milestone_definitions, migration 0007).
+ * 1. Works out which milestones this deal is owed: this location's own definitions
+ *    (qb_milestone_definitions, migration 0007), limited to the deal's pipeline (0012), and
+ *    only those whose amount field is filled on this deal. See buildMilestoneRows.
+ * 2. ONLY IF that leaves something to bill, creates/finds the QBO customer for the contact.
  * 3. Persists qb_milestones rows; the scheduler invoices each one when it comes due.
+ *
+ * The order of 1 and 2 is load-bearing. It used to be the other way round, so once a location
+ * had any definition at all, every Won deal in every pipeline created a QuickBooks customer —
+ * a shed sale in a client who bills only post-frame jobs in stages, or a deal with no
+ * milestone amounts on it, still wrote a customer into the client's books.
  *
  * Won is the GATE, not the whole trigger. A milestone with a date field is scheduled here
  * but stays `pending` until that date field is filled and its lead time arrives — see
@@ -125,39 +98,31 @@ export async function handleOpportunityWon({ eventType, locationId, payload }) {
     return;
   }
 
+  // Decide what this deal is owed BEFORE QuickBooks is touched. Pure: no customer, no
+  // request, no row unless at least one milestone in this deal's pipeline has an amount.
+  const planned = buildMilestoneRows(definitions, payload, settings);
+  if (!planned.length) {
+    const pipelineId = opportunityPipelineId(payload);
+    const inPipeline = definitions.filter((d) => definitionAppliesToPipeline(d, pipelineId)).length;
+    console.log(
+      inPipeline
+        ? `[milestone] opportunity ${opportunityId}: no milestone amounts found in payload — nothing to bill`
+        : `[milestone] opportunity ${opportunityId}: no milestone applies to pipeline ${pipelineId ?? '(unknown)'} — nothing to bill`,
+    );
+    return;
+  }
+
   const contact = extractContact(payload);
   const customer = await findOrCreateCustomer(locationId, contact);
 
-  const rows = [];
-  for (const def of definitions) {
-    const amountCents = parseAmountCents(getPayloadField(payload, def.amountField));
-    // No amount on THIS deal → this milestone doesn't apply to it. Normal and expected:
-    // a client bills a roof milestone only on jobs that have a roof.
-    if (amountCents == null) continue;
-
-    rows.push({
-      id: randomUUID(),
-      locationId,
-      opportunityId: String(opportunityId),
-      contactId: payload.contactId ?? payload.contact?.id ?? null,
-      qbCustomerId: String(customer.Id),
-      // The definition id, not a slug: labels are editable, and the unique index below is
-      // the idempotency key, so renaming a milestone must not fork it into a new row.
-      milestoneType: String(def.id),
-      amountCents,
-      // Snapshots — the definition may be edited or deleted after this point, and neither
-      // the invoice description nor the due rule may change retroactively.
-      label: def.label,
-      awaitsDate: !!def.dateField,
-      milestoneDate: def.dateField ? parseDate(getPayloadField(payload, def.dateField)) : null,
-      invoiceLeadDays: settings.qboInvoiceLeadDays,
-    });
-  }
-
-  if (!rows.length) {
-    console.warn(`[milestone] opportunity ${opportunityId}: no milestone amounts found in payload`);
-    return;
-  }
+  const rows = planned.map((m) => ({
+    id: randomUUID(),
+    locationId,
+    opportunityId: String(opportunityId),
+    contactId: payload.contactId ?? payload.contact?.id ?? null,
+    qbCustomerId: String(customer.Id),
+    ...m,
+  }));
 
   // Idempotent per (location, opportunity, milestone) — a re-delivered Won event does not
   // duplicate milestones.
@@ -234,32 +199,44 @@ export async function invoiceDueMilestones() {
   }
 
   // Per-location QBO item mapping (mapperType 'qb_item'), cached for this run.
-  // Milestone invoicing has no per-deal GHL field context, so this resolves to
-  // the tenant's single mapped item as the line item (or null → QBO default '1').
-  const itemRefByLocation = new Map();
+  // Milestone invoicing has no per-deal GHL field context, so this resolves to the
+  // tenant's single mapped item as the line item, or null when there is none to use.
+  const itemByLocation = new Map();
   async function itemRefFor(locId) {
-    if (!itemRefByLocation.has(locId)) {
+    if (!itemByLocation.has(locId)) {
       const maps = await listMappers(locId, 'quickbooks', 'qb_item');
-      const ref = resolveItemRef(maps);
-      // Milestone invoicing has no per-deal GHL field context, so item selection
-      // only works with a SINGLE mapped item. If a location mapped 2+ items,
-      // resolveItemRef returns null and we'd silently bill QBO's default item —
-      // warn loudly instead of failing silently (see also the estimate path,
-      // which DOES resolve per-deal).
-      if (ref === null && maps.length > 1) {
-        console.warn(
-          `[milestone] location ${locId} has ${maps.length} qb_item mappings but milestone invoicing ` +
-          `can't pick per-deal — invoices will use QBO's default item. Map exactly one item for milestone invoicing.`,
-        );
-      }
-      itemRefByLocation.set(locId, ref);
+      // Item selection here only works with a SINGLE mapped item. With 2+ (left over from
+      // the older Item Mappings card) resolveItemRef returns null, exactly as with none.
+      itemByLocation.set(locId, { ref: resolveItemRef(maps), mappings: maps.length });
     }
-    return itemRefByLocation.get(locId);
+    return itemByLocation.get(locId);
   }
+
+  // Locations whose due milestones are WAITING for an item to be chosen: locationId →
+  // { waiting, mappings }. Reported once per location below, not once per milestone.
+  const waitingForItem = new Map();
 
   let invoiced = 0;
   for (const m of due) {
     if (!(await invoicingEnabled(m.locationId))) continue;
+
+    // No item ⇒ the milestone stays 'pending' and is NOT attempted. It used to go out billed
+    // as QuickBooks item '1' — whatever that happens to be in this company, or a 400 where
+    // there is no item 1 — and a 400 here marks the milestone 'failed', which is terminal:
+    // nothing ever retries it. Waiting instead means it bills on the first run after the
+    // client picks an item, with no one having to find and re-queue it.
+    //
+    // Deliberately OUTSIDE the try below. If the mapping lookup itself fails (our database,
+    // not QuickBooks), the run throws to the scheduler and is recorded as cron_job_failed with
+    // every milestone still pending. Inside the try it would mark this milestone 'failed'.
+    const item = await itemRefFor(m.locationId);
+    if (!item.ref) {
+      const w = waitingForItem.get(m.locationId) ?? { waiting: 0, mappings: item.mappings };
+      w.waiting += 1;
+      waitingForItem.set(m.locationId, w);
+      continue;
+    }
+
     try {
       const invoice = await createInvoice(m.locationId, {
         qbCustomerId: m.qbCustomerId,
@@ -269,7 +246,7 @@ export async function invoiceDueMilestones() {
         // before 0007 added the column (none in production, but cheap insurance).
         description: `${m.label || m.milestoneType} — opportunity ${m.opportunityId}`,
         dueDate: m.milestoneDate ? m.milestoneDate.toISOString().slice(0, 10) : undefined,
-        itemRef: await itemRefFor(m.locationId),
+        itemRef: item.ref,
       });
 
       await db
@@ -311,6 +288,36 @@ export async function invoiceDueMilestones() {
     }
   }
 
+  // One durable, actionable row per location per run: this is a single configuration gap, not
+  // N separate failures. Re-recorded every run while anything waits, so it stays current on the
+  // QuickBooks page until an item is picked, and stops by itself once the milestones bill.
+  //
+  // Per location only because error_events fingerprints include the location id. Before that,
+  // the same gap at a second location merged into the first location's open row, and the second
+  // location's page never showed it.
+  //
+  // Its own kind, not the estimate sync's qbo_item_mapping_missing: the two read as different
+  // sentences, so a location that only syncs estimates is never told about milestone invoices.
+  for (const [locId, w] of waitingForItem) {
+    const why = w.mappings > 1
+      ? `${w.mappings} QuickBooks items are saved for this location from the older setup, and a milestone invoice cannot choose between them per deal`
+      : 'no QuickBooks item is chosen for this location';
+    console.warn(`[milestone] location ${locId}: ${w.waiting} due milestone(s) waiting — ${why}`);
+    await recordError({
+      source: 'cron',
+      kind: 'qbo_milestone_item_missing',
+      appSlug: 'quickbooks',
+      locationId: locId,
+      upstream: 'qbo',
+      message: `${w.waiting} milestone invoice(s) are due but were not created: ${why}, and QuickBooks needs an item to bill. They are waiting, not failed. Pick one in BuildBridge → QuickBooks under "Bill milestone invoices as"; they are created on the next run after that.`,
+      context: {
+        job: 'yoder-invoice-due-milestones',
+        waitingMilestones: w.waiting,
+        configuredMappings: w.mappings,
+      },
+    });
+  }
+
   return invoiced;
 }
 
@@ -320,6 +327,12 @@ export async function invoiceDueMilestones() {
 // through handleOpportunityWon (idempotent per location+opportunity+milestone).
 
 const WON_POLL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // first poll looks back 7 days
+
+// How many pages of won deals (100 each) one pass may read for a location. The walk normally
+// ends well before this: at GHL's last page, or at the first page that is entirely older than
+// the cursor (see wonPollPage). The cap is there so a response that never says "last page"
+// cannot keep a cron invocation looping, and hitting it is recorded rather than silent.
+const MAX_WON_POLL_PAGES = 20;
 
 async function getWonPollSince(locationId) {
   const [state] = await db
@@ -392,42 +405,84 @@ export async function pollWonOpportunities() {
       const since = await getWonPollSince(locationId);
       const startedAt = new Date();
 
-      const data = await makeGhlRequest(
-        locationId,
-        'GET',
-        `/opportunities/search?location_id=${encodeURIComponent(locationId)}&status=won&limit=100`,
-      );
-      const opps = data?.opportunities ?? [];
+      // Walk GHL's won-deal list a page at a time. Until 0012 this read only the first 100,
+      // so at a location with more won deals than that, a deal further down the list never
+      // had its milestones scheduled, and nothing said so.
+      const seen = new Set();
+      let cursor = null;
+      let pages = 0;
+      let truncated = false;
+      for (;;) {
+        const data = await makeGhlRequest(locationId, 'GET', wonSearchPath(locationId, cursor));
+        pages += 1;
+        const opps = data?.opportunities ?? [];
+        const { fresh, caughtUp } = wonPollPage(opps, since);
 
-      for (const opp of opps) {
-        const updatedAt = opp.updatedAt ?? opp.dateUpdated;
-        if (updatedAt && new Date(updatedAt) <= since) continue; // already seen
+        for (const opp of fresh) {
+          const oppId = String(opp.id);
+          if (seen.has(oppId)) continue;
+          seen.add(oppId);
 
-        // Fetch the full opportunity + contact so milestone custom fields are
-        // present (search results are typically sparse).
-        const detail = await makeGhlRequest(locationId, 'GET', `/opportunities/${opp.id}`).catch(() => null);
-        const full = detail?.opportunity ?? opp;
-        const contactId = full.contactId ?? full.contact?.id ?? opp.contactId ?? null;
+          // A deal in a pipeline that no milestone bills is skipped here, before two more GHL
+          // calls are spent on it. If the search result does not say which pipeline, fetch the
+          // deal anyway and let handleOpportunityWon decide from the full record.
+          if (opp.pipelineId && !definitions.some((d) => definitionAppliesToPipeline(d, opp.pipelineId))) {
+            continue;
+          }
 
-        let contactObj = full.contact ?? null;
-        if (contactId) {
-          const cRes = await makeGhlRequest(locationId, 'GET', `/contacts/${contactId}`).catch(() => null);
-          contactObj = cRes?.contact ?? contactObj;
+          // Fetch the full opportunity + contact so milestone custom fields are
+          // present (search results are typically sparse).
+          const detail = await makeGhlRequest(locationId, 'GET', `/opportunities/${opp.id}`).catch(() => null);
+          const full = detail?.opportunity ?? opp;
+          const contactId = full.contactId ?? full.contact?.id ?? opp.contactId ?? null;
+
+          let contactObj = full.contact ?? null;
+          if (contactId) {
+            const cRes = await makeGhlRequest(locationId, 'GET', `/contacts/${contactId}`).catch(() => null);
+            contactObj = cRes?.contact ?? contactObj;
+          }
+
+          const payload = {
+            opportunityId: full.id ?? opp.id,
+            contactId,
+            // Carried so handleOpportunityWon can apply each milestone's pipeline (0012).
+            // Without it a pipeline-scoped milestone would never match a polled deal.
+            pipelineId: full.pipelineId ?? opp.pipelineId ?? null,
+            status: 'won',
+            customFields: collectCustomFields(
+              full.customFields, full.custom_fields,
+              contactObj?.customFields, contactObj?.custom_fields,
+            ),
+            contact: contactObj ?? undefined,
+          };
+
+          await handleOpportunityWon({ locationId, payload });
+          processed++;
         }
 
-        const payload = {
-          opportunityId: full.id ?? opp.id,
-          contactId,
-          status: 'won',
-          customFields: collectCustomFields(
-            full.customFields, full.custom_fields,
-            contactObj?.customFields, contactObj?.custom_fields,
-          ),
-          contact: contactObj ?? undefined,
-        };
+        if (!opps.length || caughtUp) break;
+        const next = nextWonSearchCursor(data?.meta);
+        if (!next || sameWonSearchCursor(next, cursor)) break;
+        if (pages >= MAX_WON_POLL_PAGES) {
+          truncated = true;
+          break;
+        }
+        cursor = next;
+      }
 
-        await handleOpportunityWon({ locationId, payload });
-        processed++;
+      if (truncated) {
+        // The cursor still advances below: holding it back would make every later pass re-read
+        // the same ever-growing window and spend more each time. Recorded instead, so a
+        // location this size is noticed and the cap raised, rather than deals quietly missed.
+        console.warn(`[milestone] won-poll for ${locationId} stopped at the ${MAX_WON_POLL_PAGES}-page cap`);
+        await recordError({
+          source: 'cron',
+          kind: 'milestone_won_poll_truncated',
+          appSlug: 'quickbooks',
+          locationId,
+          message: `Won-deal poll read ${pages} pages (up to ${pages * 100} won opportunities) and stopped at the cap without reaching deals older than the last poll. A deal further down GoHighLevel's list may not have had its milestones scheduled this pass.`,
+          context: { job: 'yoder-poll-won', pages, cap: MAX_WON_POLL_PAGES },
+        });
       }
 
       await setWonPollState(locationId, startedAt);

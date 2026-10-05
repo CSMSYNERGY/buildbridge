@@ -94,8 +94,9 @@ function hash(text) {
   return h.toString(16).padStart(8, '0');
 }
 
-function buildFingerprint(e) {
-  return hash([
+// Exported for its unit test only.
+export function buildFingerprint(e) {
+  const parts = [
     e.source ?? '',
     e.kind ?? '',
     e.upstream ?? '',
@@ -104,7 +105,19 @@ function buildFingerprint(e) {
     // Route pattern, not the concrete path: /contacts/abc123 → /contacts/<id>
     normalizeForFingerprint(e.path ?? ''),
     normalizeForFingerprint(e.message ?? ''),
-  ].join('|'));
+  ];
+  // The location is part of WHO has the problem, so it is part of the identity. Without it,
+  // two locations with the same failure fused into ONE open row: the upsert below only bumps
+  // the count and never rewrites location_id, so the row stayed owned by whichever location
+  // logged first. listOpenIssues filters on location_id, so the second location's QuickBooks
+  // page showed nothing at all — e.g. its milestones waiting for an item with no card saying
+  // why — while the first kept a card it had already fixed, refreshed by someone else's runs.
+  //
+  // Raw, not normalized: normalizeForFingerprint turns a 20-character location id into <id>,
+  // which would collide again. Appended only when present, so rows with no location (web
+  // traffic, cross-tenant jobs) keep the fingerprints they already have.
+  if (e.locationId) parts.push(String(e.locationId));
+  return hash(parts.join('|'));
 }
 
 function randomId() {

@@ -138,6 +138,13 @@ export const SETUP_GAP_TEXT = {
     'Some QuickBooks salesperson names are not matched to a Synergy user, so those contacts were left unassigned rather than assigned to the wrong person. Map them in BuildBridge → QuickBooks.',
   qbo_item_mapping_missing:
     'No QuickBooks item is set for billing these deals, so their estimates cannot be created — QuickBooks requires an item and an estimate has no default to fall back on. Set one in BuildBridge → QuickBooks; skipped deals are picked up again automatically once it is.',
+  // The same missing setting seen from milestone invoicing, which since 0012 no longer falls
+  // back to QuickBooks item 1. A kind of its own rather than a shared sentence, so a location
+  // that only syncs estimates is never told about milestone invoices it does not use, and the
+  // estimate sentence above reads exactly as it did before. The milestones wait (still
+  // pending), so picking an item is all it takes.
+  qbo_milestone_item_missing:
+    'Milestone invoices that are due are waiting instead of being created, because no single QuickBooks item is chosen to bill them as — QuickBooks requires an item, and BuildBridge will not guess one. Pick one in BuildBridge → QuickBooks under Milestone invoicing; the waiting invoices are created on the next run.',
   ghl_opportunity_field_invalid:
     'An estimate/invoice value could not be copied into a Synergy opportunity field because that field only accepts values from its own option list. The other mapped fields still synced. In BuildBridge → QuickBooks, point that mapping at a text-type Synergy field instead, or make the option list match the values QuickBooks sends.',
   ghl_phone_duplicate:
@@ -153,6 +160,11 @@ export const OURS_TEXT = {
     'The QuickBooks sync has stopped moving forward and keeps re-reading the same window, so recent changes may be delayed. Nothing is lost and there is nothing for you to change — contact CSM Synergy support.',
   ensure_location_failed:
     'BuildBridge could not record this location in its own database, so parts of the integration may not run. QuickBooks is not the problem and there is nothing for you to do.',
+  // The won-deal poller reads at most a fixed number of pages per pass. Hitting that cap is a
+  // BuildBridge sizing limit, not a setting the tenant can change, and nothing was billed
+  // wrongly — the risk is a milestone schedule that was never created.
+  milestone_won_poll_truncated:
+    'This location has more won deals than BuildBridge reads in one pass, so an older deal that was marked Won or updated recently may not have had its milestone invoices scheduled. Nothing was billed by mistake. Contact CSM Synergy support.',
   idearoom_unparsable_body:
     'A lead arrived from IdeaRoom in a format BuildBridge could not read, so it was stored raw rather than created. Support can see it — contact CSM Synergy.',
   idearoom_unmappable_lead:

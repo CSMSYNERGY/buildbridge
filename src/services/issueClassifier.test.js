@@ -256,11 +256,28 @@ describe('summarizeIssue — name the right system and the right remedy', () => 
     expect(s.text).toMatch(/BuildBridge → QuickBooks/);
 
     // Same shape, same trap, for the other setup gaps.
-    for (const kind of ['qbo_rep_field_not_found', 'qbo_rep_unmapped', 'qbo_item_mapping_missing']) {
+    for (const kind of ['qbo_rep_field_not_found', 'qbo_rep_unmapped', 'qbo_item_mapping_missing', 'qbo_milestone_item_missing']) {
       const t = summarizeIssue(row({ kind, upstream: kind === 'qbo_rep_unmapped' ? 'ghl' : 'qbo' }));
       expect(t.text, `${kind} claims unreachability`).not.toMatch(/could not reach/i);
       expect(t.text, `${kind} gives the tenant nowhere to go`).toMatch(/BuildBridge → QuickBooks|IdeaRoom/);
     }
+  });
+
+  it('tells an estimate-only location about estimates, and a milestone location about milestones', () => {
+    // Both rows mean "no QuickBooks item is chosen", but they reach different tenants: the
+    // estimate sync raises one, milestone invoicing (0012) the other. A location that only
+    // pushes estimates must not be told its milestone invoices are held.
+    const est = summarizeIssue(row({ kind: 'qbo_item_mapping_missing', upstream: 'qbo' }));
+    expect(est.text).toMatch(/estimates/);
+    expect(est.text).not.toMatch(/milestone/i);
+
+    const ms = summarizeIssue(row({ kind: 'qbo_milestone_item_missing', upstream: 'qbo' }));
+    expect(ms.code).toBe('qbo_milestone_item_missing');
+    expect(ms.text).toMatch(/milestone invoices/i);
+    expect(ms.text).not.toMatch(/estimate/i);
+    // Waiting, not failed: the tenant needs to know nothing was lost.
+    expect(ms.text).toMatch(/waiting/);
+    expect(issueClass(row({ kind: 'qbo_milestone_item_missing', upstream: 'qbo' }))).not.toBe('terminal');
   });
 
   it('only claims Synergy is unreachable when there is evidence of it', () => {

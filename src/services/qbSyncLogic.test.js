@@ -28,6 +28,17 @@ import {
   milestoneIsDue,
   normalizeMilestoneInput,
   summarizeQboFault,
+  buildMilestoneRows,
+  definitionAppliesToPipeline,
+  opportunityPipelineId,
+  getPayloadField,
+  parseAmountCents,
+  parseDate,
+  buildInvoiceBody,
+  wonSearchPath,
+  nextWonSearchCursor,
+  sameWonSearchCursor,
+  wonPollPage,
 } from './qbSyncLogic.js';
 
 describe('summarizeQboFault — scrubbed QBO Fault summary for the durable error log', () => {
@@ -522,7 +533,7 @@ describe('readQbCustomerField — salesperson custom field read', () => {
 });
 
 describe('resolveItemRef — QBO item selection from qb_item mappings', () => {
-  it('returns null when there are no item mappings (caller falls back to default item "1")', () => {
+  it('returns null when there are no item mappings (no item to bill — the caller must not guess one)', () => {
     expect(resolveItemRef([], {})).toBeNull();
     expect(resolveItemRef(undefined, {})).toBeNull();
     expect(resolveItemRef(null)).toBeNull();
@@ -1125,5 +1136,338 @@ describe('samePhone — one comparison for both directions', () => {
     // Not a NANP 11-digit string: 44 is a country code, and dropping a leading
     // digit from an arbitrary international number would merge two real numbers.
     expect(samePhone('443305550142', '3305550142')).toBe(false);
+  });
+});
+
+// ─── Milestone hardening (0012) ───────────────────────────────────────────────
+
+describe('buildMilestoneRows — what a Won deal is owed, decided before QuickBooks is touched', () => {
+  const POST_FRAME = 'pipe-post-frame';
+  const SHEDS = 'pipe-sheds';
+  const settings = { qboInvoiceLeadDays: 3 };
+  const deposit = { id: 'def-deposit', label: 'Deposit', amountField: 'f_dep_amt', dateField: null, pipelineId: null };
+  const materials = { id: 'def-mat', label: 'Materials Delivered', amountField: 'f_mat_amt', dateField: 'f_mat_date', pipelineId: null };
+  const payload = (over = {}) => ({
+    opportunityId: 'opp-1',
+    status: 'won',
+    customFields: [
+      { id: 'f_dep_amt', value: '$2,500.00' },
+      { id: 'f_mat_amt', value: 12000 },
+      { id: 'f_mat_date', value: '2026-11-02' },
+    ],
+    ...over,
+  });
+
+  it('returns NO rows when the deal carries none of the milestone amounts', () => {
+    // The precondition for skipping findOrCreateCustomer: an empty plan must be the answer for
+    // a deal with no amounts, so that deal never creates a customer in the client's books.
+    expect(buildMilestoneRows([deposit, materials], payload({ customFields: [] }), settings)).toEqual([]);
+    expect(buildMilestoneRows([deposit, materials], payload({
+      customFields: [{ id: 'f_dep_amt', value: '' }, { id: 'f_mat_amt', value: '0' }],
+    }), settings)).toEqual([]);
+  });
+
+  it('returns NO rows when there are no definitions', () => {
+    expect(buildMilestoneRows([], payload(), settings)).toEqual([]);
+    expect(buildMilestoneRows(undefined, payload(), settings)).toEqual([]);
+  });
+
+  it('builds one row per milestone that has an amount, with the snapshots the scheduler needs', () => {
+    const rows = buildMilestoneRows([deposit, materials], payload(), settings);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({
+      milestoneType: 'def-deposit',
+      amountCents: 250000,
+      label: 'Deposit',
+      awaitsDate: false,
+      milestoneDate: null,
+      invoiceLeadDays: 3,
+    });
+    expect(rows[1].milestoneType).toBe('def-mat');
+    expect(rows[1].amountCents).toBe(1200000);
+    expect(rows[1].awaitsDate).toBe(true);
+    expect(rows[1].milestoneDate).toEqual(new Date('2026-11-02'));
+  });
+
+  it('skips only the milestone with no amount, not the whole deal', () => {
+    const rows = buildMilestoneRows([deposit, materials], payload({
+      customFields: [{ id: 'f_mat_amt', value: '900' }],
+    }), settings);
+    expect(rows.map((r) => r.milestoneType)).toEqual(['def-mat']);
+    // Its date field is configured but not filled: scheduled, waiting, not billed on Won.
+    expect(rows[0]).toMatchObject({ awaitsDate: true, milestoneDate: null });
+  });
+
+  it('a definition with no pipeline (NULL) applies to deals in every pipeline — today\'s behaviour', () => {
+    for (const pipelineId of [POST_FRAME, SHEDS, undefined]) {
+      const rows = buildMilestoneRows([deposit], payload({ pipelineId }), settings);
+      expect(rows, `pipeline ${pipelineId ?? '(none)'}`).toHaveLength(1);
+    }
+  });
+
+  it('a pipeline-scoped definition applies only to deals in that pipeline', () => {
+    const scoped = { ...deposit, pipelineId: POST_FRAME };
+    expect(buildMilestoneRows([scoped], payload({ pipelineId: POST_FRAME }), settings)).toHaveLength(1);
+    // The shed sale: same field filled in, different pipeline — nothing to bill.
+    expect(buildMilestoneRows([scoped], payload({ pipelineId: SHEDS }), settings)).toEqual([]);
+  });
+
+  it('a deal whose pipeline is unknown matches only the any-pipeline definitions', () => {
+    const scoped = { ...materials, pipelineId: POST_FRAME };
+    const rows = buildMilestoneRows([deposit, scoped], payload({ pipelineId: undefined }), settings);
+    expect(rows.map((r) => r.milestoneType)).toEqual(['def-deposit']);
+  });
+
+  it('reads the pipeline from every payload shape a Won event arrives in', () => {
+    const scoped = { ...deposit, pipelineId: POST_FRAME };
+    for (const shape of [
+      { pipelineId: POST_FRAME },                       // GHL opportunity webhook
+      { pipeline_id: POST_FRAME },                      // workflow custom webhook
+      { opportunity: { pipelineId: POST_FRAME } },      // nested deal
+    ]) {
+      expect(buildMilestoneRows([scoped], payload(shape), settings), JSON.stringify(shape)).toHaveLength(1);
+    }
+  });
+
+  it('mixes scoped and unscoped definitions on one deal', () => {
+    const scopedMat = { ...materials, pipelineId: POST_FRAME };
+    expect(buildMilestoneRows([deposit, scopedMat], payload({ pipelineId: POST_FRAME }), settings)).toHaveLength(2);
+    expect(buildMilestoneRows([deposit, scopedMat], payload({ pipelineId: SHEDS }), settings)
+      .map((r) => r.milestoneType)).toEqual(['def-deposit']);
+  });
+
+  it('ignores a malformed definition instead of throwing mid-schedule', () => {
+    expect(buildMilestoneRows([null, { label: 'no id', amountField: 'f_dep_amt' }, deposit], payload(), settings))
+      .toHaveLength(1);
+  });
+});
+
+describe('definitionAppliesToPipeline / opportunityPipelineId', () => {
+  it('treats null, undefined and blank as "any pipeline"', () => {
+    for (const pipelineId of [null, undefined, '', '   ']) {
+      expect(definitionAppliesToPipeline({ pipelineId }, 'p1')).toBe(true);
+      expect(definitionAppliesToPipeline({ pipelineId }, null)).toBe(true);
+    }
+  });
+
+  it('requires an exact match for a scoped definition, and refuses an unknown pipeline', () => {
+    expect(definitionAppliesToPipeline({ pipelineId: 'p1' }, 'p1')).toBe(true);
+    expect(definitionAppliesToPipeline({ pipelineId: 'p1' }, ' p1 ')).toBe(true);
+    expect(definitionAppliesToPipeline({ pipelineId: 'p1' }, 'p2')).toBe(false);
+    expect(definitionAppliesToPipeline({ pipelineId: 'p1' }, null)).toBe(false);
+  });
+
+  it('returns null rather than "" when a payload names no pipeline', () => {
+    expect(opportunityPipelineId({})).toBeNull();
+    expect(opportunityPipelineId({ pipelineId: '  ' })).toBeNull();
+    expect(opportunityPipelineId(undefined)).toBeNull();
+    expect(opportunityPipelineId({ pipelineId: 'p1', pipeline_id: 'p2' })).toBe('p1');
+  });
+});
+
+describe('payload readers (moved from milestoneService)', () => {
+  it('reads custom fields as an array, an object map, or a dot-path', () => {
+    expect(getPayloadField({ customFields: [{ id: 'a', value: 1 }] }, 'a')).toBe(1);
+    expect(getPayloadField({ customFields: [{ fieldKey: 'a', fieldValue: 2 }] }, 'a')).toBe(2);
+    expect(getPayloadField({ custom_fields: { a: 3 } }, 'a')).toBe(3);
+    expect(getPayloadField({ opportunity: { amount: 4 } }, 'opportunity.amount')).toBe(4);
+    expect(getPayloadField({ customFields: [null, { id: 'a', value: 5 }] }, 'a')).toBe(5);
+    expect(getPayloadField(null, 'a')).toBeUndefined();
+  });
+
+  it('parses money into integer cents and refuses zero, negatives and junk', () => {
+    expect(parseAmountCents('$12,500.50')).toBe(1250050);
+    expect(parseAmountCents(99.999)).toBe(10000);
+    expect(parseAmountCents('0')).toBeNull();
+    expect(parseAmountCents('-5')).toBeNull();
+    expect(parseAmountCents('n/a')).toBeNull();
+    expect(parseAmountCents(null)).toBeNull();
+  });
+
+  it('parses dates and returns null for anything unparseable', () => {
+    expect(parseDate('2026-11-02')).toEqual(new Date('2026-11-02'));
+    expect(parseDate('soon')).toBeNull();
+    expect(parseDate('')).toBeNull();
+  });
+});
+
+describe('buildInvoiceBody — an invoice is never billed as a guessed item', () => {
+  const ok = { qbCustomerId: '58', amountCents: 250000, description: 'Deposit — opportunity opp-1', dueDate: '2026-11-02', itemRef: '49' };
+
+  it('refuses an invoice with no itemRef — no fallback to QuickBooks item "1"', () => {
+    for (const itemRef of [undefined, null, '', '   ']) {
+      const r = buildInvoiceBody({ ...ok, itemRef });
+      expect(r.ok, `itemRef=${JSON.stringify(itemRef)}`).toBe(false);
+      expect(r.error).toMatch(/itemRef is required/);
+      expect(r.value).toBeUndefined();
+    }
+  });
+
+  it('bills exactly the item it was given', () => {
+    const r = buildInvoiceBody(ok);
+    expect(r.ok).toBe(true);
+    expect(r.value.Line).toHaveLength(1);
+    expect(r.value.Line[0].SalesItemLineDetail.ItemRef).toEqual({ value: '49' });
+    expect(r.value.Line[0].Amount).toBe(2500);
+    expect(r.value.CustomerRef).toEqual({ value: '58' });
+    expect(r.value.DueDate).toBe('2026-11-02');
+    expect(JSON.stringify(r.value)).not.toMatch(/"value":"1"/);
+  });
+
+  it('omits DueDate when there is none rather than sending an empty one', () => {
+    expect(buildInvoiceBody({ ...ok, dueDate: undefined }).value).not.toHaveProperty('DueDate');
+  });
+
+  it('still refuses a missing customer or a non-positive amount', () => {
+    expect(buildInvoiceBody({ ...ok, qbCustomerId: '' }).ok).toBe(false);
+    expect(buildInvoiceBody({ ...ok, amountCents: 0 }).ok).toBe(false);
+    expect(buildInvoiceBody({ ...ok, amountCents: NaN }).ok).toBe(false);
+    expect(buildInvoiceBody().ok).toBe(false);
+  });
+});
+
+describe('normalizeMilestoneInput — pipelineId (0012)', () => {
+  const ok = { label: 'Deposit', amountField: 'fA' };
+
+  it('leaves pipelineId OUT when the body does not mention it, so an update keeps the stored one', () => {
+    // An old cached tab sends no pipelineId. If that read as "any pipeline", renaming a
+    // milestone from it would silently widen a post-frame-only milestone to shed deals too.
+    expect(normalizeMilestoneInput(ok).value).not.toHaveProperty('pipelineId');
+  });
+
+  it('normalizes "" and null to null (any pipeline), and trims an id', () => {
+    expect(normalizeMilestoneInput({ ...ok, pipelineId: '' }).value.pipelineId).toBeNull();
+    expect(normalizeMilestoneInput({ ...ok, pipelineId: null }).value.pipelineId).toBeNull();
+    expect(normalizeMilestoneInput({ ...ok, pipelineId: '  p1 ' }).value.pipelineId).toBe('p1');
+  });
+
+  it('rejects something that cannot be a pipeline id rather than storing it', () => {
+    expect(normalizeMilestoneInput({ ...ok, pipelineId: 42 }).ok).toBe(false);
+    expect(normalizeMilestoneInput({ ...ok, pipelineId: { id: 'p1' } }).ok).toBe(false);
+    expect(normalizeMilestoneInput({ ...ok, pipelineId: 'x'.repeat(101) }).ok).toBe(false);
+  });
+});
+
+describe('won-deal paging — wonSearchPath / nextWonSearchCursor / wonPollPage', () => {
+  it('always asks for won deals at this location, on every page', () => {
+    const first = new URLSearchParams(wonSearchPath('loc-1').split('?')[1]);
+    expect(first.get('status')).toBe('won');
+    expect(first.get('location_id')).toBe('loc-1');
+    expect(first.get('limit')).toBe('100');
+    const later = new URLSearchParams(wonSearchPath('loc-1', { startAfter: '1700000000000', startAfterId: 'o99' }).split('?')[1]);
+    expect(later.get('status')).toBe('won');
+    expect(later.get('location_id')).toBe('loc-1');
+    expect(later.get('startAfter')).toBe('1700000000000');
+    expect(later.get('startAfterId')).toBe('o99');
+    expect(wonSearchPath('loc-1', { page: 3 })).toMatch(/[?&]page=3(&|$)/);
+  });
+
+  it('ends when GHL nulls nextPageUrl, even if a cursor is still present', () => {
+    expect(nextWonSearchCursor({ nextPageUrl: null, startAfter: 1, startAfterId: 'x' })).toBeNull();
+    expect(nextWonSearchCursor(undefined)).toBeNull();
+    expect(nextWonSearchCursor({})).toBeNull();
+  });
+
+  it('takes the cursor from meta, or from inside nextPageUrl, but never the URL itself', () => {
+    expect(nextWonSearchCursor({ nextPageUrl: 'https://example/x', startAfter: 17, startAfterId: 'o2' }))
+      .toEqual({ startAfter: '17', startAfterId: 'o2' });
+    expect(nextWonSearchCursor({
+      nextPageUrl: 'http://services.leadconnectorhq.com/opportunities/search?location_id=l&startAfter=18&startAfterId=o3',
+    })).toEqual({ startAfter: '18', startAfterId: 'o3' });
+    expect(nextWonSearchCursor({ nextPage: 2 })).toEqual({ page: 2 });
+    expect(nextWonSearchCursor({ nextPage: 1 })).toBeNull();
+  });
+
+  it('recognizes a cursor that did not move, so a stuck response cannot loop', () => {
+    expect(sameWonSearchCursor({ startAfter: '1', startAfterId: 'a' }, { startAfter: '1', startAfterId: 'a' })).toBe(true);
+    expect(sameWonSearchCursor({ startAfter: '1', startAfterId: 'a' }, { startAfter: '2', startAfterId: 'b' })).toBe(false);
+    expect(sameWonSearchCursor(null, { page: 2 })).toBe(false);
+  });
+
+  const SINCE = new Date('2026-10-01T00:00:00Z');
+  const at = (iso) => ({ updatedAt: iso });
+
+  it('keeps deals updated after the cursor and drops the ones already seen', () => {
+    const { fresh } = wonPollPage([
+      { id: 'a', status: 'won', ...at('2026-10-03T00:00:00Z') },
+      { id: 'b', status: 'won', ...at('2026-09-20T00:00:00Z') },
+    ], SINCE);
+    expect(fresh.map((o) => o.id)).toEqual(['a']);
+  });
+
+  it('never passes on a deal that is not Won, whatever the query returned', () => {
+    const { fresh } = wonPollPage([
+      { id: 'a', status: 'open', ...at('2026-10-03T00:00:00Z') },
+      { id: 'b', status: 'lost', ...at('2026-10-03T00:00:00Z') },
+      { id: 'c', status: 'won', ...at('2026-10-03T00:00:00Z') },
+    ], SINCE);
+    expect(fresh.map((o) => o.id)).toEqual(['c']);
+  });
+
+  it('treats a deal with no timestamp as fresh (re-reading is cheap, missing one is not)', () => {
+    expect(wonPollPage([{ id: 'a', status: 'won' }], SINCE).fresh).toHaveLength(1);
+  });
+
+  // A deal last updated at `updated` and created at `created`.
+  const made = (id, updated, created) => ({ id, updatedAt: updated, createdAt: created });
+
+  it('is caught up only when the whole page is old AND ordered newest-update first', () => {
+    // Update times fall down the page; creation times go up AND down, so this page is not in
+    // creation order either way round. That is the only shape that proves update order.
+    const oldDesc = [
+      made('a', '2026-09-30T00:00:00Z', '2026-06-01T00:00:00Z'),
+      made('b', '2026-09-25T00:00:00Z', '2026-08-01T00:00:00Z'),
+      made('c', '2026-09-20T00:00:00Z', '2026-07-01T00:00:00Z'),
+    ];
+    expect(wonPollPage(oldDesc, SINCE).caughtUp).toBe(true);
+
+    // Same old deals in creation order (timestamps rising): later pages could still hold a
+    // deal created long ago and Won today, so this must NOT stop the walk.
+    expect(wonPollPage([...oldDesc].reverse(), SINCE).caughtUp).toBe(false);
+
+    // One fresh deal on the page: keep going.
+    expect(wonPollPage([{ id: 'n', ...at('2026-10-02T00:00:00Z') }, ...oldDesc], SINCE).caughtUp).toBe(false);
+
+    // A deal with no timestamp: cannot prove the page is old.
+    expect(wonPollPage([...oldDesc, { id: 'x' }], SINCE).caughtUp).toBe(false);
+
+    // Empty page: not "caught up" — the caller ends on emptiness for its own reason.
+    expect(wonPollPage([], SINCE).caughtUp).toBe(false);
+  });
+
+  it('does not mistake a creation-ordered page for update order when update times happen to fall', () => {
+    // 100 deals listed newest-created first, all bulk-marked Won together a month ago: update
+    // times are equal, so they never rise. Stopping here would hide every deal on later pages,
+    // including one created earlier whose milestone date was filled in today.
+    const bulk = Array.from({ length: 100 }, (_, i) => made(
+      `bulk${i}`,
+      '2026-09-01T00:00:00Z',
+      new Date(Date.parse('2026-08-31T00:00:00Z') - i * 3_600_000).toISOString(),
+    ));
+    expect(wonPollPage(bulk, SINCE)).toEqual({ fresh: [], caughtUp: false });
+
+    // Deals nobody touched after creating them: updated == created, both falling down the page.
+    const untouched = [
+      made('u1', '2026-09-30T00:00:00Z', '2026-09-30T00:00:00Z'),
+      made('u2', '2026-09-20T00:00:00Z', '2026-09-20T00:00:00Z'),
+      made('u3', '2026-09-10T00:00:00Z', '2026-09-10T00:00:00Z'),
+    ];
+    expect(wonPollPage(untouched, SINCE).caughtUp).toBe(false);
+
+    // Oldest-created first is creation order too, even with update times falling down the page.
+    expect(wonPollPage([
+      made('r1', '2026-09-30T00:00:00Z', '2026-05-01T00:00:00Z'),
+      made('r2', '2026-09-20T00:00:00Z', '2026-06-01T00:00:00Z'),
+      made('r3', '2026-09-10T00:00:00Z', '2026-07-01T00:00:00Z'),
+    ], SINCE).caughtUp).toBe(false);
+
+    // No creation times at all: nothing proves the order, so keep walking.
+    expect(wonPollPage([
+      { id: 'x', ...at('2026-09-30T00:00:00Z') },
+      { id: 'y', ...at('2026-09-20T00:00:00Z') },
+    ], SINCE).caughtUp).toBe(false);
+
+    // A single deal cannot show any order.
+    expect(wonPollPage([made('one', '2026-09-30T00:00:00Z', '2026-06-01T00:00:00Z')], SINCE).caughtUp).toBe(false);
   });
 });

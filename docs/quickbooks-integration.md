@@ -119,6 +119,42 @@ Modeled on `ghlService.js`:
   `Project Completion`).
 - Persist milestones and enqueue scheduled invoices.
 
+> **Hardened before first use, 2026-10-05 (migration 0012).** No location had a milestone
+> definition yet, so all of this was latent; it is fixed before anyone adds one.
+> - **Pipeline scope.** `qb_milestone_definitions.pipeline_id` (NULL = any pipeline, the old
+>   behaviour). A Won deal in another pipeline gets no milestone for that definition. Set in the
+>   milestone card's Pipeline dropdown (fed by `/api/ghl/pipelines`). The dropdown sits first
+>   and is locked while that list fails to load, so a scoped milestone never reads as deleted.
+> - **Nothing live until Save.** A new milestone row stays in the browser until **Save
+>   milestone** is pressed. It used to be POSTed the moment it had a name and an amount field,
+>   which made it live as "any pipeline, bill on Won" before its pipeline was chosen; a cron
+>   tick in that gap could schedule every Won deal in every pipeline. Narrowing a saved
+>   milestone's pipeline later does not withdraw rows already scheduled.
+> - **Decide before writing.** `buildMilestoneRows` (pure, `qbSyncLogic.js`) runs first;
+>   `findOrCreateCustomer` is called only when it returns rows. Previously every Won deal in
+>   every pipeline created a QuickBooks customer once any definition existed.
+> - **No guessed item.** `createInvoice` requires `itemRef` (no more ItemRef `'1'` fallback). With
+>   no item, or 2+ leftover `qb_item` rows, a due milestone stays `pending` and the run records
+>   one `qbo_milestone_item_missing` row per location. It bills on the first run after an item is
+>   picked, instead of being marked `failed` (terminal, never retried). Its own kind, so the
+>   estimate sync's `qbo_item_mapping_missing` sentence still talks only about estimates.
+> - **error_events are per location.** `buildFingerprint` now hashes the raw `locationId` (when
+>   there is one). Before, the same failure at two locations shared ONE open row owned by the
+>   first location, so the second location's QuickBooks page never showed it. Each open row
+>   with a location reopens once under its new fingerprint; the old row drops off the tenant
+>   card after 24 hours or can be resolved in triage.
+> - **Poller pagination.** `pollWonOpportunities` walks `/opportunities/search` page by page
+>   (status=won re-asserted on every page), stops at GHL's last page or at the first page that
+>   is entirely older than the last poll AND provably ordered newest-update first (update times
+>   never rise down the page, and creation times go both up and down, so it is not
+>   creation-ordered), and records `milestone_won_poll_truncated` if it hits the 20-page cap.
+>   If GHL lists by creation date, the early stop never fires and every pass reads up to the
+>   cap. Search hits in a pipeline no definition bills are skipped before the detail/contact
+>   fetches.
+> - **Deploy order.** Apply 0012 in the SQL editor first, then deploy: the Worker selects every
+>   column of the definitions table. Rollback is the reverse: `npx wrangler rollback` (or a
+>   revert landed on main, then `npm run deploy`), and only then drop the column.
+
 ### 5.6 Scheduler (new)
 - A lightweight daily worker that finds milestones whose scheduled date is due (e.g. ~3 days before
   Material Delivery) and creates the corresponding QBO invoice via `makeQuickBooksRequest`.

@@ -105,6 +105,10 @@ export default function QuickBooks() {
   // Per-tenant feature settings
   const [settings, setSettings] = useState(null);
   const [pipelines, setPipelines] = useState([]);
+  // Same idea as qbItemsUnavailable, for Synergy's pipelines. An empty list because the request
+  // failed is not "this account has no pipelines", and a milestone set to one pipeline must not
+  // read as "a pipeline Synergy no longer lists" just because Synergy briefly did not answer.
+  const [pipelinesUnavailable, setPipelinesUnavailable] = useState(false);
   const [ghlFields, setGhlFields] = useState([]);
   const [saving, setSaving] = useState(false);
 
@@ -115,6 +119,8 @@ export default function QuickBooks() {
   const [savingMap, setSavingMap] = useState(false);
   // Per-client milestone definitions (replaces the milestone_amount/milestone_date mappers).
   const [milestones, setMilestones] = useState([]);
+  // The temp id of a new milestone whose Save is in flight, so a double click cannot create two.
+  const [savingNewMilestone, setSavingNewMilestone] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
 
   // Which QuickBooks item milestone invoices bill (a single `qb_item` mapper row).
@@ -295,9 +301,9 @@ export default function QuickBooks() {
         .then((d) => setSettings(d?.settings ?? null))
         .catch(() => {}),
       fetchWithAuth('/api/ghl/pipelines')
-        .then((r) => (r.ok ? r.json() : { pipelines: [] }))
-        .then((d) => setPipelines(d.pipelines ?? []))
-        .catch(() => {}),
+        .then((r) => (r.ok ? r.json() : { pipelines: [], unavailable: true }))
+        .then((d) => { setPipelines(d.pipelines ?? []); setPipelinesUnavailable(!!d.unavailable); })
+        .catch(() => setPipelinesUnavailable(true)),
       fetchWithAuth('/api/ghl/fields')
         .then((r) => (r.ok ? r.json() : { fields: [] }))
         .then((d) => setGhlFields(d.fields ?? []))
@@ -631,6 +637,14 @@ export default function QuickBooks() {
   const usedGhl = new Set(mappings.map((m) => m.ghlValue));
   const qbLabel = (id) => qbFields.find((f) => f.id === id)?.name ?? id;
   const ghlLabel = (id) => ghlFields.find((f) => (f.id ?? f.key) === id)?.label ?? id;
+  // "the Post Frame pipeline", or a neutral phrase when the id is not in the list — never the
+  // raw id, which means nothing to the person reading it. "No longer lists" only when the list
+  // actually loaded: if the request failed, the pipeline is unknown, not gone.
+  const pipelineLabel = (id) => {
+    const p = pipelines.find((x) => x.id === id);
+    if (p) return `the ${p.name} pipeline`;
+    return pipelinesUnavailable ? 'the pipeline you chose' : 'a pipeline Synergy no longer lists';
+  };
 
   async function addMapping() {
     if (!mapDraft.qb || !mapDraft.ghl) return;
@@ -996,11 +1010,10 @@ export default function QuickBooks() {
   // keeps that one row correct instead of leaving invisible configuration steering real invoices.
   const milestoneItemMap = itemMaps.length === 1 ? itemMaps[0] : null;
   const milestoneItemId = milestoneItemMap?.externalKey ?? '';
-  // Once the sync PUSHES to QuickBooks, this item stops being optional. An estimate
-  // has no default to fall back on — upsertEstimate refuses without an itemRef and the
-  // opportunity is skipped — whereas a milestone invoice does fall back. Same setting,
-  // two very different consequences, so the copy below distinguishes them instead of
-  // telling everyone they can leave it alone.
+  // Neither path falls back to a default item any more. An estimate push refuses without an
+  // item and the opportunity is skipped; a milestone invoice (since 0012) waits, still
+  // pending, until one is chosen. The copy below says which of the two is held up, because
+  // a location that only bills milestones never sees the estimate warning.
   const itemRequiredForEstimates = s.qboSyncDirection === 'ghl_to_qb' || s.qboSyncDirection === 'two_way';
   const itemLabel = (id) => {
     const it = qbItems.find((i) => i.id === id);
@@ -1014,8 +1027,8 @@ export default function QuickBooks() {
    * DELETE-THEN-INSERT, never PUT. createMapper's conflict target is
    * (locationId, appSlug, mapperType, externalKey) — and externalKey IS the QuickBooks item id —
    * so POSTing a different item ADDS a second row rather than replacing the first. Two rows with
-   * no per-deal field context make resolveItemRef return null, which silently bills QuickBooks'
-   * default item '1' instead. PUT is equally wrong: it only changes ghlValue, not externalKey.
+   * no per-deal field context make resolveItemRef return null, which leaves every milestone
+   * invoice waiting. PUT is equally wrong: it only changes ghlValue, not externalKey.
    */
   async function setMilestoneItem(itemId) {
     setSavingItemMap(true);
@@ -1027,7 +1040,7 @@ export default function QuickBooks() {
       }
       if (!itemId) {
         setItemMaps([]);
-        toast({ title: 'Milestone invoices will use QuickBooks’ default item' });
+        toast({ title: 'No item chosen — milestone invoices will wait until you pick one' });
         return;
       }
       const res = await fetchWithAuth('/api/mappers', {
@@ -1095,6 +1108,8 @@ export default function QuickBooks() {
           label: body.label,
           amountField: body.amountField,
           dateField: body.dateField || null,
+          // Always sent, so the server never has to guess. '' / null = any pipeline.
+          pipelineId: body.pipelineId || null,
           sortOrder: body.sortOrder ?? 0,
         }),
       });
@@ -1106,19 +1121,28 @@ export default function QuickBooks() {
     }
   }
 
-  // Local-only until it has both required parts; created server-side on first valid save.
+  // Local-only until the admin presses Save on it (see saveNewMilestone).
   function addMilestoneRow() {
     setMilestones((prev) => [
       ...prev,
-      { id: `new-${Date.now()}`, label: '', amountField: '', dateField: '', sortOrder: prev.length, isNew: true },
+      { id: `new-${Date.now()}`, label: '', amountField: '', dateField: '', pipelineId: '', sortOrder: prev.length, isNew: true },
     ]);
   }
 
-  async function commitNewMilestone(tempId, patch) {
-    const current = milestones.find((m) => m.id === tempId);
-    const body = { ...current, ...patch };
-    setMilestones((prev) => prev.map((m) => (m.id === tempId ? body : m)));
-    if (!body.label || !body.amountField) return; // still incomplete — stay local
+  // Every edit to a NEW milestone stays in the browser. It used to be created the moment it had
+  // a name and an amount field, and picking the amount field fills in the name, so that first
+  // pick made it live as "any pipeline, bill on Won" before the date or pipeline was chosen.
+  // A cron tick landing in that gap (every 15 minutes) could schedule and bill every Won deal in
+  // every pipeline with that field filled in, sheds included, and narrowing the pipeline
+  // afterwards does not withdraw what was already scheduled. So nothing is sent until Save.
+  function commitNewMilestone(tempId, patch) {
+    setMilestones((prev) => prev.map((m) => (m.id === tempId ? { ...m, ...patch } : m)));
+  }
+
+  async function saveNewMilestone(tempId) {
+    const body = milestones.find((m) => m.id === tempId);
+    if (!body || !body.label || !body.amountField || savingNewMilestone) return;
+    setSavingNewMilestone(tempId);
     try {
       const res = await fetchWithAuth('/api/quickbooks/milestones', {
         method: 'POST',
@@ -1126,6 +1150,7 @@ export default function QuickBooks() {
           label: body.label,
           amountField: body.amountField,
           dateField: body.dateField || null,
+          pipelineId: body.pipelineId || null,
           sortOrder: body.sortOrder ?? 0,
         }),
       });
@@ -1134,6 +1159,8 @@ export default function QuickBooks() {
       setMilestones((prev) => prev.map((m) => (m.id === tempId ? data.definition : m)));
     } catch (err) {
       toast({ title: 'Could not add the milestone', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingNewMilestone(null);
     }
   }
 
@@ -2317,16 +2344,15 @@ export default function QuickBooks() {
                     disabled={savingItemMap}
                     onChange={(e) => setMilestoneItem(e.target.value)}
                   >
-                    {/* "Let QuickBooks choose" is safe for a milestone INVOICE — that path
-                        falls back to a default item. It is NOT safe once the sync pushes
-                        ESTIMATES: those fail closed with no item, and the opportunity is
-                        skipped silently. Rockwood followed this option's advice and lost
-                        every estimate for three days, so it says so now rather than
-                        presenting the two cases as equivalent. */}
+                    {/* Nothing chosen holds work up on BOTH paths now: estimates are skipped
+                        and milestone invoices wait. This option used to promise "QuickBooks'
+                        default item", which was never safe for estimates (a client followed
+                        that advice and lost every estimate for three days) and since 0012 is
+                        not true for milestone invoices either, so it says what really happens. */}
                     <option value="">
                       {itemRequiredForEstimates
-                        ? "QuickBooks' default item — ⚠ estimates will NOT sync"
-                        : "QuickBooks' default item"}
+                        ? 'Not chosen — ⚠ estimates and milestone invoices are held'
+                        : 'Not chosen — milestone invoices wait'}
                     </option>
                     {qbItems.map((i) => (
                       <option key={i.id} value={i.id}>
@@ -2338,13 +2364,13 @@ export default function QuickBooks() {
                     {itemMaps.length > 1 ? (
                       <>
                         This company has <strong>{itemMaps.length} items</strong> saved from the older
-                        setup, so BuildBridge can't tell which one to bill and falls back to QuickBooks'
-                        default. Pick one above to replace them.
+                        setup, so BuildBridge can't tell which one to bill and milestone invoices are
+                        waiting. Pick one above to replace them.
                       </>
                     ) : qbItems.length === 0 ? (
                       qbItemsUnavailable
                         ? "BuildBridge could not read Products & Services from QuickBooks, so this list is empty for that reason — not because the company has none. Fix the connection at the top of this page, then reload."
-                        : 'No QuickBooks items found yet. Add a product or service in QuickBooks, then reload. Until then invoices use QuickBooks’ default item.'
+                        : 'No QuickBooks items found yet. Add a product or service in QuickBooks, then reload. Until then milestone invoices wait — nothing is billed without an item.'
                     ) : (
                       <>
                         The product or service every milestone invoice{itemRequiredForEstimates ? ' and every synced estimate' : ''} is billed against.
@@ -2352,7 +2378,7 @@ export default function QuickBooks() {
                           ? <> Currently <strong>{itemLabel(milestoneItemId)}</strong>.</>
                           : itemRequiredForEstimates
                             ? <> <strong style={{ color: '#B91C1C' }}>Nothing is chosen, so estimates are not reaching QuickBooks at all.</strong> An estimate has no default to fall back on — it is skipped instead. Pick an item to start them syncing.</>
-                            : ' Leave this alone to let QuickBooks choose.'}
+                            : <> <strong>Nothing is chosen, so milestone invoices that come due wait instead of being created.</strong> Pick an item and they go out on the next run.</>}
                       </>
                     )}
                   </p>
@@ -2363,7 +2389,8 @@ export default function QuickBooks() {
                   <p className="text-xs text-muted-foreground">
                     Pick the opportunity field holding each milestone's amount, and the field holding its
                     date. The name is taken from the field you pick — edit it if you want something
-                    different on the invoice.
+                    different on the invoice. If you only bill some kinds of job in stages, pick the
+                    pipeline those deals are in, and deals in your other pipelines are left alone.
                   </p>
 
                   {milestones.length === 0 && (
@@ -2380,6 +2407,44 @@ export default function QuickBooks() {
                       : (patch) => saveMilestone(ms.id, patch);
                     return (
                       <div key={ms.id} className="rounded-md border border-input p-2.5 space-y-2">
+                        {/* First, so which deals a milestone applies to is settled before what
+                            it bills. */}
+                        <div className="space-y-1">
+                          <Label className="text-xs">Pipeline</Label>
+                          <Select
+                            size="compact"
+                            aria-label="Milestone pipeline"
+                            value={ms.pipelineId ?? ''}
+                            // Locked while the list could not be loaded: the only choices left
+                            // would be "Any pipeline" and the saved one, and switching to "Any
+                            // pipeline" because the real one seemed to be missing is exactly how
+                            // shed deals would start being billed in stages.
+                            disabled={pipelinesUnavailable}
+                            onChange={(e) => commit({ pipelineId: e.target.value })}
+                          >
+                            {/* Empty = any pipeline: what every milestone did before this
+                                existed, so leaving it alone changes nothing. */}
+                            <option value="">Any pipeline</option>
+                            {pipelines.map((p) => (
+                              <option key={`p-${ms.id}-${p.id}`} value={p.id}>{p.name}</option>
+                            ))}
+                            {/* A saved pipeline that is not in the list must not DISPLAY as "Any
+                                pipeline" — that would misreport what the milestone bills. Say
+                                which of the two reasons it is. */}
+                            {ms.pipelineId && !pipelines.some((p) => p.id === ms.pipelineId) && (
+                              <option value={ms.pipelineId}>
+                                {pipelinesUnavailable ? 'The pipeline you chose' : 'A pipeline Synergy no longer lists'}
+                              </option>
+                            )}
+                          </Select>
+                          {pipelinesUnavailable && (
+                            <p className="text-xs text-muted-foreground">
+                              {ms.isNew
+                                ? "Couldn't load your pipelines from Synergy right now. Reload the page to pick this milestone's pipeline before saving it."
+                                : "Couldn't load your pipelines from Synergy right now. This milestone still only bills the pipeline you chose."}
+                            </p>
+                          )}
+                        </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <div className="space-y-1">
                             <Label className="text-xs">Amount field</Label>
@@ -2460,7 +2525,27 @@ export default function QuickBooks() {
                           {ms.dateField
                             ? `Invoices ${s.qboInvoiceLeadDays ?? 3} day${(s.qboInvoiceLeadDays ?? 3) === 1 ? '' : 's'} before ${ghlLabel(ms.dateField)} is reached.`
                             : 'Invoices as soon as the opportunity is marked Won.'}
+                          {ms.pipelineId
+                            ? ` Only for deals in ${pipelineLabel(ms.pipelineId)}.`
+                            : ' Applies to deals in any pipeline.'}
                         </p>
+                        {/* A new milestone goes live only from here — see commitNewMilestone. Its
+                            own row, so it never squeezes the name box in a narrow iframe. */}
+                        {ms.isNew && (
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs font-medium" style={{ color: '#3d3672' }}>
+                              Nothing is invoiced until you save this milestone.
+                            </p>
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={!ms.label || !ms.amountField || pipelinesUnavailable || savingNewMilestone === ms.id}
+                              onClick={() => saveNewMilestone(ms.id)}
+                            >
+                              {savingNewMilestone === ms.id ? 'Saving…' : 'Save milestone'}
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -2516,14 +2601,14 @@ export default function QuickBooks() {
                 <ol className="mt-1 list-decimal space-y-1 pl-5">
                   <li>Click <strong>Connect to QuickBooks</strong> and approve access at Intuit (no passwords are stored). Check the company name shown afterwards is the right business.</li>
                   <li>If you want the sync: choose a <strong>direction</strong> — QuickBooks → Synergy is read-only and safe — then add any <strong>Field mappings</strong>.</li>
-                  <li>If you bill in stages: turn on <strong>Milestone invoicing</strong> and add a milestone for each stage, choosing the opportunity field that holds its amount and the one that holds its date. Leave the date blank for anything billed straight away, like a deposit. Optionally pick which QuickBooks product or service those invoices are billed as.</li>
+                  <li>If you bill in stages: turn on <strong>Milestone invoicing</strong> and add a milestone for each stage, choosing the opportunity field that holds its amount and the one that holds its date. Leave the date blank for anything billed straight away, like a deposit. If only one kind of job is billed in stages, set each milestone's pipeline so deals in your other pipelines are left alone. Press <strong>Save milestone</strong> on each new one — nothing is invoiced from it until you do. Then pick which QuickBooks product or service those invoices are billed as — they wait until you do.</li>
                   <li>Save. Nothing needs to be run by hand.</li>
                 </ol>
               </div>
               <div>
                 <p className="font-medium" style={{ color: '#3d3672' }}>Common questions</p>
                 <p className="mt-1"><strong>Can I use more than one part at once?</strong> Yes — that's the point of them being separate. Selling sheds through one process and post-frame buildings through another is a normal setup.</p>
-                <p className="mt-1"><strong>Why hasn't a milestone been invoiced?</strong> Most often its date field hasn't been filled in on the opportunity yet, or the deal isn't marked Won. Each milestone above shows exactly what it's waiting for.</p>
+                <p className="mt-1"><strong>Why hasn't a milestone been invoiced?</strong> Most often its date field hasn't been filled in on the opportunity yet, or the deal isn't marked Won. It also waits while no QuickBooks item is chosen above, and it never applies to a deal outside the pipeline it is set to. Each milestone above shows what it's waiting for.</p>
                 <p className="mt-1"><strong>Will this change my QuickBooks?</strong> Not in QuickBooks → Synergy mode — it only reads. It writes to QuickBooks only if you pick "Synergy → QuickBooks", "Two-way", or milestone invoicing.</p>
                 <p className="mt-1"><strong>Is it secure?</strong> You approve access on Intuit's own sign-in; your password is never stored. You can disconnect any time above.</p>
               </div>

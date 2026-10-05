@@ -150,6 +150,11 @@ fi
 # logic that quickbooksController, qbSyncService and quickbooksService all import. Pure
 # units: no network, no D1, no wrangler, no env vars. (The classifier half also reads src/
 # from disk to enumerate error kinds; still hermetic, still no network.)
+# scripts/deploy-source.test.mjs is the one file that runs a real program: it drives the
+# predeploy guard against throwaway git repositories in the OS temp folder, with a local bare
+# repo standing in for GitHub. Still no network; it ignores global git config and drops the
+# GIT_DIR this hook exports, so it can never touch this checkout. ~5s on Windows, run
+# concurrently.
 check "unit tests" npm test
 
 # Syntax-check every other JS file. Blunt, but this repo has NO eslint config and NO

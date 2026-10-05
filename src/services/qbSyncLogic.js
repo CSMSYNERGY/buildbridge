@@ -615,8 +615,9 @@ export function collectRepValues(estimates = [], invoices = [], fieldName) {
  * Pick the QBO Item id to put on an invoice/estimate line from the tenant's
  * configured item mappings (mapperType 'qb_item'; each row externalKey = QBO
  * Item Id, ghlValue = the GHL/Synergy field that selects it) and this deal's
- * GHL field values. Returns the item id, or null when the caller should fall
- * back to QBO's built-in default item.
+ * GHL field values. Returns the item id, or null when there is no item to bill.
+ * Null is a refusal, not a cue to guess: both upsertEstimate and createInvoice
+ * require an item (0012), and the caller skips or waits instead.
  *
  *   1. Prefer an item whose mapped GHL field is set/truthy on this deal.
  *   2. Else, if exactly one item is mapped, use it as the location default.
@@ -799,6 +800,8 @@ export function summarizeQboFault(rawBody) {
 
 // How long a milestone name may be. It prints on a QuickBooks invoice line.
 const MAX_MILESTONE_LABEL = 120;
+// GHL pipeline ids are ~20 characters. Anything far longer is not one.
+const MAX_PIPELINE_ID = 100;
 
 /**
  * Validate and normalize one milestone definition from the UI.
@@ -833,11 +836,31 @@ export function normalizeMilestoneInput(input) {
   }
 
   const n = Number(raw.sortOrder);
-  return {
-    ok: true,
-    value: { label, amountField, dateField, sortOrder: Number.isFinite(n) ? Math.trunc(n) : 0 },
-  };
+  const value = { label, amountField, dateField, sortOrder: Number.isFinite(n) ? Math.trunc(n) : 0 };
+
+  // Which pipeline this milestone bills (0012). ABSENT and NULL mean different things here,
+  // and the difference is what keeps an old browser tab from widening a milestone's reach:
+  //   - key absent  → leave the stored pipeline alone (not in `value`, so an update keeps it
+  //                   and a create gets the column default, NULL)
+  //   - null / ''   → any pipeline, which is how every milestone behaved before 0012
+  //   - a string    → only deals in that pipeline
+  // A cached bundle from before this field existed sends no key at all. If that read as
+  // "any pipeline", renaming a milestone from that tab would quietly start billing shed deals
+  // for a post-frame-only milestone, which is precisely what the pipeline exists to prevent.
+  if (Object.prototype.hasOwnProperty.call(raw, 'pipelineId')) {
+    const p = raw.pipelineId;
+    if (p == null || (typeof p === 'string' && !p.trim())) {
+      value.pipelineId = null;
+    } else if (typeof p === 'string' && p.trim().length <= MAX_PIPELINE_ID) {
+      value.pipelineId = p.trim();
+    } else {
+      return { ok: false, error: 'Choose the pipeline from the list.' };
+    }
+  }
+
+  return { ok: true, value };
 }
+
 
 /**
  * Is this scheduled milestone due to be invoiced yet?
@@ -872,4 +895,322 @@ export function milestoneIsDue(row, now = new Date()) {
   const leadDays = Number.isFinite(row.invoiceLeadDays) ? row.invoiceLeadDays : 0;
   const dueAt = date.getTime() - leadDays * 24 * 60 * 60 * 1000;
   return now.getTime() >= dueAt;
+}
+
+// ─── Milestone scheduling: what a Won deal is owed (pure) ─────────────────────
+// Lived in milestoneService.js until 0012. Moved here, import-free, so the decision "does this
+// deal get milestone invoices at all?" can be tested without a database, and so it can run
+// BEFORE anything touches QuickBooks (see buildMilestoneRows).
+
+/**
+ * Read a value out of a GHL webhook payload. Supports:
+ *  - dot-paths into the payload ('opportunity.deposit_amount')
+ *  - customFields as an object map ({ field_key: value })
+ *  - customFields as an array ([{ key|fieldKey|id, value }])
+ */
+export function getPayloadField(payload, fieldKey) {
+  if (!fieldKey || payload == null) return undefined;
+
+  const cf = payload.customFields ?? payload.custom_fields;
+  if (cf) {
+    if (Array.isArray(cf)) {
+      const hit = cf.find(
+        (f) => f && (f.key === fieldKey || f.fieldKey === fieldKey || f.id === fieldKey),
+      );
+      if (hit !== undefined) return hit.value ?? hit.fieldValue ?? hit.field_value;
+    } else if (typeof cf === 'object' && cf[fieldKey] !== undefined) {
+      return cf[fieldKey];
+    }
+  }
+
+  // Dot-path fallback
+  let node = payload;
+  for (const part of fieldKey.split('.')) {
+    if (node == null || typeof node !== 'object') return undefined;
+    node = node[part];
+  }
+  return node;
+}
+
+/** Parse "$12,500.00" / "12500" / 12500.5 → integer cents (null if unparseable). */
+export function parseAmountCents(value) {
+  if (value == null || value === '') return null;
+  const num = typeof value === 'number'
+    ? value
+    : Number(String(value).replace(/[^0-9.-]/g, ''));
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Math.round(num * 100);
+}
+
+/** Parse a date-ish value → Date (null if unparseable). */
+export function parseDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * The GHL pipeline a Won payload belongs to, or null when it does not say.
+ *
+ * Three shapes reach handleOpportunityWon: GHL's own opportunity webhooks (`pipelineId`), a
+ * workflow "custom webhook" action (`pipeline_id`), and a payload that nests the deal under
+ * `opportunity`. The poller builds its payload itself and always says.
+ */
+export function opportunityPipelineId(payload) {
+  const raw = payload?.pipelineId
+    ?? payload?.pipeline_id
+    ?? payload?.opportunity?.pipelineId
+    ?? payload?.opportunity?.pipeline_id;
+  const id = raw == null ? '' : String(raw).trim();
+  return id || null;
+}
+
+/**
+ * Does this milestone definition apply to a deal in `pipelineId`?
+ *
+ * A definition with no pipeline applies to every pipeline: that is how milestones worked before
+ * 0012, so a location that never sets one keeps exactly today's behaviour. A definition WITH a
+ * pipeline applies only when the deal is known to be in it. A deal whose pipeline is unknown
+ * therefore matches only the any-pipeline definitions, which is the safe direction: the field
+ * exists for a client who sells sheds and post-frame buildings from one account and bills only
+ * one of them in stages, and guessing wrong sends a shed customer an invoice for a roof.
+ */
+export function definitionAppliesToPipeline(def, pipelineId) {
+  const scoped = def?.pipelineId == null ? '' : String(def.pipelineId).trim();
+  if (!scoped) return true;
+  return pipelineId != null && String(pipelineId).trim() === scoped;
+}
+
+/**
+ * Turn a location's milestone definitions and one Won payload into the milestones this deal is
+ * owed, WITHOUT any I/O.
+ *
+ * This runs BEFORE the QuickBooks customer is looked up or created, and an empty result means
+ * the caller stops right there. Before 0012 the customer came first: once a location had any
+ * definition, every Won deal in every pipeline created a customer in the client's books, even a
+ * deal with no milestone amounts on it at all. So the order is as much the fix as the filter is.
+ *
+ * Rows come back without id, location, opportunity, contact or QuickBooks customer — the caller
+ * owns those. Everything that decides WHETHER and WHAT to bill is here.
+ *
+ * @param {Array}  defs      qb_milestone_definitions rows (camelCase, as drizzle returns them)
+ * @param {object} payload   the Won payload (webhook body or the poller's synthesized one)
+ * @param {object} settings  the location's settings (qboInvoiceLeadDays)
+ */
+export function buildMilestoneRows(defs, payload, settings) {
+  const pipelineId = opportunityPipelineId(payload);
+  const rows = [];
+  for (const def of Array.isArray(defs) ? defs : []) {
+    if (!def || def.id == null) continue;
+    if (!definitionAppliesToPipeline(def, pipelineId)) continue;
+
+    const amountCents = parseAmountCents(getPayloadField(payload, def.amountField));
+    // No amount on THIS deal → this milestone doesn't apply to it. Normal and expected:
+    // a client bills a roof milestone only on jobs that have a roof.
+    if (amountCents == null) continue;
+
+    rows.push({
+      // The definition id, not a slug: labels are editable, and the unique index on
+      // (location, opportunity, milestone_type) is the idempotency key, so renaming a
+      // milestone must not fork it into a new row.
+      milestoneType: String(def.id),
+      amountCents,
+      // Snapshots — the definition may be edited or deleted after this point, and neither
+      // the invoice description nor the due rule may change retroactively.
+      label: def.label,
+      awaitsDate: !!def.dateField,
+      milestoneDate: def.dateField ? parseDate(getPayloadField(payload, def.dateField)) : null,
+      invoiceLeadDays: settings?.qboInvoiceLeadDays,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Validate one milestone invoice and build its QuickBooks request body.
+ *
+ * Returns `{ ok: true, value }` or `{ ok: false, error }`, the same convention as
+ * normalizeMilestoneInput, so createInvoice can turn a refusal into a 400 and this stays
+ * import-free and testable.
+ *
+ * An item is REQUIRED. createInvoice used to fall back to ItemRef '1', which is not an item
+ * anyone chose: QuickBooks item ids are per company, and a client whose books have no item 1
+ * had its estimate sync 400 on exactly that fallback on 2026-07-31. In a company that DOES have an
+ * item 1 it is worse than a 400 — the invoice goes through, billed as whatever that item happens
+ * to be. upsertEstimate stopped guessing then; invoices stop guessing now.
+ */
+export function buildInvoiceBody({ qbCustomerId, amountCents, description, dueDate, itemRef } = {}) {
+  if (!qbCustomerId) return { ok: false, error: 'qbCustomerId is required' };
+  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+    return { ok: false, error: 'amountCents must be a positive number' };
+  }
+  const item = itemRef == null ? '' : String(itemRef).trim();
+  if (!item) return { ok: false, error: 'itemRef is required — no QuickBooks item to bill' };
+
+  return {
+    ok: true,
+    value: {
+      CustomerRef: { value: String(qbCustomerId) },
+      ...(dueDate ? { DueDate: dueDate } : {}),
+      Line: [
+        {
+          DetailType: 'SalesItemLineDetail',
+          Amount: Math.round(amountCents) / 100,
+          Description: description ?? undefined,
+          SalesItemLineDetail: { ItemRef: { value: item } },
+        },
+      ],
+    },
+  };
+}
+
+// ─── Won polling: walking GHL's won-deal list (pure) ──────────────────────────
+
+const OPPORTUNITY_SEARCH_PATH = '/opportunities/search';
+const WON_SEARCH_PAGE_SIZE = 100; // GHL's maximum for this endpoint
+
+function oppUpdatedMs(opp) {
+  const raw = opp?.updatedAt ?? opp?.dateUpdated;
+  if (!raw) return NaN;
+  return new Date(raw).getTime();
+}
+
+function oppCreatedMs(opp) {
+  const raw = opp?.createdAt ?? opp?.dateAdded;
+  if (!raw) return NaN;
+  return new Date(raw).getTime();
+}
+
+/**
+ * The GET path for one page of a location's won opportunities.
+ *
+ * Rebuilt here for every page rather than following GHL's `nextPageUrl`, so `status=won` and
+ * the location can never fall off a later page's query string. The poller treats everything it
+ * reads as Won, so a page that quietly widened to open deals would schedule invoices for them.
+ *
+ * @param {string}  locationId
+ * @param {?object} cursor  from nextWonSearchCursor; null for the first page
+ */
+export function wonSearchPath(locationId, cursor = null) {
+  const q = new URLSearchParams({
+    location_id: String(locationId),
+    status: 'won',
+    limit: String(WON_SEARCH_PAGE_SIZE),
+  });
+  if (cursor?.startAfter != null && cursor?.startAfterId != null) {
+    q.set('startAfter', String(cursor.startAfter));
+    q.set('startAfterId', String(cursor.startAfterId));
+  } else if (cursor?.page != null) {
+    q.set('page', String(cursor.page));
+  }
+  return `${OPPORTUNITY_SEARCH_PATH}?${q}`;
+}
+
+/**
+ * Where the next page starts, read from a search response's `meta`, or null when there is none.
+ *
+ * GHL ends the list by nulling `nextPageUrl`. Otherwise it hands back a startAfter/startAfterId
+ * cursor (also embedded in nextPageUrl), and some responses carry a plain `nextPage` number.
+ * Only the cursor VALUES are taken from the response; the request itself is rebuilt by
+ * wonSearchPath, for the reason given there.
+ */
+export function nextWonSearchCursor(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  if ('nextPageUrl' in meta && !meta.nextPageUrl) return null;
+
+  let startAfter = meta.startAfter;
+  let startAfterId = meta.startAfterId;
+  let page = meta.nextPage;
+  if (typeof meta.nextPageUrl === 'string') {
+    try {
+      const u = new URL(meta.nextPageUrl, 'https://services.leadconnectorhq.com');
+      startAfter ??= u.searchParams.get('startAfter');
+      startAfterId ??= u.searchParams.get('startAfterId');
+      page ??= u.searchParams.get('page');
+    } catch {
+      // An unparseable URL is no cursor; fall through to what meta said directly.
+    }
+  }
+
+  const has = (v) => v != null && String(v) !== '';
+  if (has(startAfter) && has(startAfterId)) {
+    return { startAfter: String(startAfter), startAfterId: String(startAfterId) };
+  }
+  const n = Number(page);
+  if (has(page) && Number.isInteger(n) && n > 1) return { page: n };
+  return null;
+}
+
+/** Two cursors pointing at the same page — the loop guard for a response that never advances. */
+export function sameWonSearchCursor(a, b) {
+  if (!a || !b) return false;
+  return String(a.startAfter ?? '') === String(b.startAfter ?? '')
+    && String(a.startAfterId ?? '') === String(b.startAfterId ?? '')
+    && String(a.page ?? '') === String(b.page ?? '');
+}
+
+/**
+ * Sort one page of won opportunities into "process these" and "is it safe to stop here".
+ *
+ *   fresh     — Won (or no status given) and updated after `since`, or with no usable
+ *               timestamp. Unknown counts as fresh because handleOpportunityWon is idempotent:
+ *               re-reading a deal costs a few calls, skipping one can cost an invoice.
+ *   caughtUp  — every deal on the page was last updated at or before `since`, AND the page is
+ *               provably ordered newest-update first. Only then are later pages certain to be
+ *               older.
+ *
+ * Why the ordering test: "stop at the first page that is entirely old" is only sound if GHL
+ * lists the most recently UPDATED deals first. If it lists by date CREATED instead (its
+ * startAfter cursor is a date-added timestamp, which suggests it does), a deal created months
+ * ago and Won (or given its milestone date) today sits on a later page behind a page of
+ * untouched newer deals, and stopping there would never schedule its invoices.
+ *
+ * Update times that never rise down the page are not proof on their own. A creation-ordered
+ * page of deals nobody edited after creating them, or of deals bulk-marked Won together, has
+ * update times that never rise either. So the page must ALSO show that it is not in creation
+ * order, either way round: creation times that go up somewhere and down somewhere. A page that
+ * cannot show that (one deal, missing creation times, or creation order) keeps the walk going to
+ * GHL's last page or the page cap. Walking further costs one GET per 100 deals; stopping early
+ * on a guess can cost an invoice, with nothing recorded.
+ *
+ * @param {Array}       opps   one page of /opportunities/search results
+ * @param {Date|string} since  the poller's cursor
+ */
+export function wonPollPage(opps, since) {
+  const list = Array.isArray(opps) ? opps.filter((o) => o && o.id != null) : [];
+  const sinceMs = since instanceof Date ? since.getTime() : new Date(since).getTime();
+  const sinceKnown = Number.isFinite(sinceMs);
+
+  const fresh = list.filter((o) => {
+    // The query asks for won deals only. This re-checks, because everything that comes out of
+    // here is handed on as Won.
+    const status = o.status == null ? '' : String(o.status).toLowerCase();
+    if (status && status !== 'won') return false;
+    const t = oppUpdatedMs(o);
+    return !sinceKnown || !Number.isFinite(t) || t > sinceMs;
+  });
+
+  let caughtUp = sinceKnown && list.length > 0;
+  let prev = Infinity;
+  let prevCreated = NaN;
+  let createdRises = false;
+  let createdFalls = false;
+  for (const o of list) {
+    if (!caughtUp) break;
+    const t = oppUpdatedMs(o);
+    if (!Number.isFinite(t) || t > sinceMs || t > prev) caughtUp = false;
+    prev = t;
+
+    const c = oppCreatedMs(o);
+    if (!Number.isFinite(c)) caughtUp = false;
+    else if (Number.isFinite(prevCreated)) {
+      if (c > prevCreated) createdRises = true;
+      if (c < prevCreated) createdFalls = true;
+    }
+    prevCreated = c;
+  }
+  // Not in creation order, either way round — see above.
+  if (!(createdRises && createdFalls)) caughtUp = false;
+
+  return { fresh, caughtUp };
 }

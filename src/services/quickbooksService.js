@@ -7,7 +7,7 @@ import { env } from '../core/env.js';
 import { createError } from '../core/middleware/errorHandler.js';
 import { spendSubrequest } from '../core/subrequestBudget.js';
 import { ensureLocation } from './locationService.js';
-import { summarizeQboFault, collectTxnCustomFieldNames } from './qbSyncLogic.js';
+import { summarizeQboFault, collectTxnCustomFieldNames, buildInvoiceBody } from './qbSyncLogic.js';
 
 const QUICKBOOKS_SLUG = 'quickbooks';
 
@@ -978,34 +978,20 @@ export async function findOrCreateCustomer(locationId, { name, firstName, lastNa
 /**
  * Create a QBO Invoice for a customer with a single line item.
  * amountCents is an integer; description labels the line.
+ *
+ * `itemRef` is REQUIRED, exactly as it is for upsertEstimate. The old `itemRef || '1'`
+ * fallback guessed at the client's chart of items — QBO item ids are per company, a client
+ * with no item 1 had its estimate sync 400 on exactly that fallback on 2026-07-31. Refused here,
+ * before any request, so nothing arbitrary can be billed into a client's books. The milestone
+ * invoicer checks first and leaves the milestone waiting instead of calling this without an
+ * item (see invoiceDueMilestones); this throw is the backstop. Body and rules live in
+ * qbSyncLogic's buildInvoiceBody, which is unit-tested.
  */
 export async function createInvoice(locationId, { qbCustomerId, amountCents, description, dueDate, itemRef }) {
-  if (!qbCustomerId) throw createError(400, 'qbCustomerId is required');
-  if (!Number.isFinite(amountCents) || amountCents <= 0) {
-    throw createError(400, 'amountCents must be a positive number');
-  }
+  const built = buildInvoiceBody({ qbCustomerId, amountCents, description, dueDate, itemRef });
+  if (!built.ok) throw createError(400, built.error);
 
-  const amount = Math.round(amountCents) / 100;
-  const body = {
-    CustomerRef: { value: String(qbCustomerId) },
-    ...(dueDate ? { DueDate: dueDate } : {}),
-    Line: [
-      {
-        DetailType: 'SalesItemLineDetail',
-        Amount: amount,
-        Description: description ?? undefined,
-        // ⚠️ ItemRef "1" is NOT guaranteed to exist — QBO item ids are per-company
-        // (Rockwood has none, and this exact fallback 400'd its estimate sync,
-        // 2026-07-31). Kept here only because the milestone-invoice flow's tenants
-        // haven't hit it; prefer the tenant's mapper (appSlug 'quickbooks', type
-        // 'qb_item') resolved to `itemRef` before the call, like upsertEstimate
-        // now requires.
-        SalesItemLineDetail: { ItemRef: { value: String(itemRef || '1') } },
-      },
-    ],
-  };
-
-  const created = await makeQuickBooksRequest(locationId, 'POST', '/invoice?minorversion=75', body);
+  const created = await makeQuickBooksRequest(locationId, 'POST', '/invoice?minorversion=75', built.value);
   return created.Invoice;
 }
 
